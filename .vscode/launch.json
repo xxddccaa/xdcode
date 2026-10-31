@@ -1,0 +1,22 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Cargo launch",
+      "cargo": {
+        "cwd": "${workspaceFolder}/xdcode-rs",
+        "args": ["build", "--bin=xdcode-tui"]
+      },
+      "args": []
+    },
+    {
+      "type": "lldb",
+      "request": "attach",
+      "name": "Attach to running xdcode CLI",
+      "pid": "${command:pickProcess}",
+      "sourceLanguages": ["rust"]
+    }
+  ]
+}

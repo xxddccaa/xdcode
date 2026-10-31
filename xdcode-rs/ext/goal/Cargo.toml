@@ -1,0 +1,38 @@
+[package]
+edition.workspace = true
+license.workspace = true
+name = "xdcode-goal-extension"
+version.workspace = true
+
+[lib]
+name = "xdcode_goal_extension"
+path = "src/lib.rs"
+test = false
+doctest = false
+
+[lints]
+workspace = true
+
+[dependencies]
+xdcode-analytics = { workspace = true }
+xdcode-core = { workspace = true }
+xdcode-extension-api = { workspace = true }
+xdcode-otel = { workspace = true }
+xdcode-prompts = { workspace = true }
+xdcode-protocol = { workspace = true }
+xdcode-rollout = { workspace = true }
+xdcode-state = { workspace = true }
+xdcode-tools = { workspace = true }
+xdcode-utils-template = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
+tracing = { workspace = true }
+
+[dev-dependencies]
+anyhow = { workspace = true }
+chrono = { workspace = true }
+xdcode-utils-absolute-path = { workspace = true }
+pretty_assertions = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

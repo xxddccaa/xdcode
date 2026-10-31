@@ -1,0 +1,31 @@
+name: xdcode documentation issue
+description: Report missing, incorrect or confusing xdcode documentation
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Identify the xdcode document and source revision or package build you used.
+        The delivery guide is docs/xdcode.md; the source upgrade guide is UPSTREAM_UPGRADE.md.
+        Remove credentials and private configuration from examples.
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What is the type of issue?
+      multiple: true
+      options:
+        - Documentation is missing
+        - Documentation is incorrect
+        - Documentation is confusing
+        - Example code is not working
+        - Something else
+  - type: textarea
+    id: issue
+    attributes:
+      label: What is the issue?
+    validations:
+      required: true
+  - type: textarea
+    id: location
+    attributes:
+      label: Where did you find it?
+      description: Give the file path or URL, section, and source revision or package build ID if available.

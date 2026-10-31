@@ -1,0 +1,21 @@
+[package]
+edition.workspace = true
+license.workspace = true
+name = "xdcode-memories-read"
+version.workspace = true
+
+[lib]
+name = "xdcode_memories_read"
+path = "src/lib.rs"
+doctest = false
+
+[lints]
+workspace = true
+
+[dependencies]
+xdcode-protocol = { workspace = true }
+xdcode-shell-command = { workspace = true }
+xdcode-utils-absolute-path = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }

@@ -1,0 +1,113 @@
+{
+  "version": "0.165.0",
+  "upstream_repository": "https://github.com/openai/codex.git",
+  "upstream_tag": "rust-v0.165.0",
+  "upstream_commit": "360319d8dee62d87e2d59fc0c21805d79519cfed",
+  "upstream_release_commit": "360319d8dee62d87e2d59fc0c21805d79519cfed",
+  "release_branch_base": "b559e6a3988489b636e1e79672eff330bf0679dc",
+  "version_selection": "Follow the upstream stable release tag exactly. Product version matches Codex; personal revisions use a separate build ID.",
+  "previous_baseline": {
+    "version": "0.163.0",
+    "upstream_commit": "83086188ae0614bd882818ff1aa23f3194962012"
+  },
+  "upgrade_notes": "UPSTREAM_0.165.0.md",
+  "selective_backports": [
+    {
+      "date": "2026-10-31",
+      "comparison_tag": "rust-v0.166.0",
+      "comparison_commit": "6ff1e1ca3b30fc8b914720681fcf5fe62e95f856",
+      "comparison_main_commit": "67f0994b532b8740f14b5b738af7b7b2a915b1d6",
+      "commits": [
+        {
+          "commit": "4c54667b408ea7c5d262f1a4171ca414a8f5be88",
+          "feature": "Provider and profile status-line items"
+        },
+        {
+          "commit": "3047741b63abd7543ed78f0f8e0f703b0125ceea",
+          "feature": "Acknowledged resume/fork permissions"
+        },
+        {
+          "commit": "c62e9df39f3bc2e1eae124a79075e9bc5555fe1a",
+          "feature": "Persisted reasoning-token accounting"
+        },
+        {
+          "commit": "78a3185ecba7ca3422f14589aeac97059649f60f",
+          "feature": "Reconnect recovery and offline exit"
+        },
+        {
+          "commit": "abf4bb91ec49fbf443ccec0069f9cab5dd1462d8",
+          "feature": "Transcript keyboard navigation and selection"
+        },
+        {
+          "commit": "285fc743050f739eff7c71f34d8dc9e0dd5c0bb2",
+          "feature": "Find integrated with transcript selection"
+        },
+        {
+          "commit": "9f622c2abb676fb5d6764eb92034f5282c7934e9",
+          "feature": "Configurable transcript selection leader shortcut"
+        },
+        {
+          "commit": "964aeda6273f67f633a2f0f198158471ef095547",
+          "feature": "Selection input routing and composer draft preservation"
+        },
+        {
+          "commit": "81cbc26ee3c1beb903879bbaad1e3809aca18c4a",
+          "feature": "Markdown in asynchronous question choices"
+        },
+        {
+          "commit": "a014908c50c39cb2d2244e568c7e12aab7021c9e",
+          "feature": "User-message presentation enum required by Markdown replies"
+        },
+        {
+          "commit": "b52a272cff73ee81ead57f7417144c2161d75f35",
+          "feature": "Markdown in asynchronous questions and replies"
+        },
+        {
+          "commit": "5e769a1cdae3fd93efd5e7b9df71e39efb2223ab",
+          "feature": "Ctrl+L preserves detailed transcript history"
+        },
+        {
+          "commit": "f40f3dfeb9059add2dff5974787fb1c3e632eb98",
+          "feature": "Restore local image attachments with killed text"
+        },
+        {
+          "commit": "fab1a5754558ec90f27efa9b3bc4a1159802bc03",
+          "feature": "Preserve rich composer content in Vim registers"
+        },
+        {
+          "commit": "f752c97f7d0be0cbef5cece327f52a16ad6fb1c6",
+          "feature": "Inline patch expansion during approval"
+        },
+        {
+          "commit": "d5cbb90b721ea73427f296868a444cfda7608882",
+          "feature": "Shared local image attachment type"
+        },
+        {
+          "commit": "8b5ce2fd61ca5b1096c93c00f651edc8493ffeea",
+          "feature": "Local image thumbnails and smaller interactive dispatcher stack"
+        },
+        {
+          "commit": "a795f961be68383738e56ac396742b3e8451696a",
+          "feature": "Clickable viewed-image paths"
+        },
+        {
+          "commit": "4fc522f5e0d3187af8047c4d666d67da3a27ef9b",
+          "feature": "Optional thread resume after queueing a message"
+        },
+        {
+          "commit": "bae11269ebf784f5071ca32a9f75312e81b0864b",
+          "feature": "Reject unsupported queue options"
+        },
+        {
+          "commit": "b538d2b340aee571fa1a81989cafb41f9d35b013",
+          "feature": "Typed WebSocket probe evidence and redacted diagnostics"
+        },
+        {
+          "commit": "939f5decb26456169c42bec12aac88dcdedc4b9a",
+          "feature": "Network-only diagnostics adapted to configured providers"
+        }
+      ],
+      "notes": "MODIFICATIONS.md"
+    }
+  ]
+}

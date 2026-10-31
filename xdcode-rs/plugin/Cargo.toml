@@ -1,0 +1,26 @@
+[package]
+edition.workspace = true
+license.workspace = true
+name = "xdcode-plugin"
+version.workspace = true
+
+[lib]
+doctest = false
+name = "xdcode_plugin"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+xdcode-config = { workspace = true }
+xdcode-core-plugin-common = { workspace = true }
+xdcode-protocol = { workspace = true }
+xdcode-utils-absolute-path = { workspace = true }
+xdcode-utils-path-uri = { workspace = true }
+xdcode-utils-plugins = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }

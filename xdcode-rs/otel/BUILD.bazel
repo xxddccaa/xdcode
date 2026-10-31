@@ -1,0 +1,7 @@
+load("//:defs.bzl", "xdcode_rust_crate")
+
+xdcode_rust_crate(
+    name = "otel",
+    crate_name = "xdcode_otel",
+    integration_test_args = ["--test-threads=1"],
+)

@@ -1,0 +1,44 @@
+use xdcode_aws_auth::AwsAuthConfig;
+use xdcode_login::XdcodeAuth;
+use xdcode_model_provider_info::ModelProviderAwsAuthInfo;
+use xdcode_protocol::error::Result;
+
+use super::BedrockEndpoint;
+use super::auth::BedrockAuthSource;
+use super::auth::resolve_region;
+use super::mantle::region_from_config;
+
+const BEDROCK_RUNTIME_SERVICE_NAME: &str = "bedrock";
+
+pub(super) fn aws_auth_config(aws: &ModelProviderAwsAuthInfo) -> AwsAuthConfig {
+    AwsAuthConfig {
+        profile: aws.profile.clone(),
+        region: region_from_config(aws),
+        service: BEDROCK_RUNTIME_SERVICE_NAME.to_string(),
+    }
+}
+
+pub(super) fn base_url(region: &str) -> String {
+    format!("https://bedrock-runtime.{region}.amazonaws.com/openai/v1")
+}
+
+pub(super) async fn bedrock_runtime_base_url(
+    source: BedrockAuthSource,
+    managed_auth: Option<&XdcodeAuth>,
+    aws: &ModelProviderAwsAuthInfo,
+    http_client_factory: &xdcode_http_client::HttpClientFactory,
+) -> Result<String> {
+    let region = resolve_region(
+        source,
+        managed_auth,
+        aws,
+        BedrockEndpoint::Runtime,
+        http_client_factory,
+    )
+    .await?;
+    Ok(base_url(&region))
+}
+
+#[cfg(test)]
+#[path = "runtime_tests.rs"]
+mod tests;

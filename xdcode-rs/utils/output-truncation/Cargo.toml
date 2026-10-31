@@ -1,0 +1,19 @@
+[package]
+edition.workspace = true
+license.workspace = true
+name = "xdcode-utils-output-truncation"
+version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+xdcode-protocol = { workspace = true }
+xdcode-utils-string = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }
+
+[lib]
+doctest = false

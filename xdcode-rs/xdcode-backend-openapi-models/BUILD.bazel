@@ -1,0 +1,6 @@
+load("//:defs.bzl", "xdcode_rust_crate")
+
+xdcode_rust_crate(
+    name = "xdcode-backend-openapi-models",
+    crate_name = "xdcode_backend_openapi_models",
+)

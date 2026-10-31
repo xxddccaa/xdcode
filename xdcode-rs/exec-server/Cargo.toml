@@ -1,0 +1,115 @@
+[package]
+name = "xdcode-exec-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+doctest = false
+
+# cargo-shear 1.11.2 misresolves these #[path] modules containing parent directories.
+# Both modules are compiled and exercised by the exec-server unit test target.
+[package.metadata.cargo-shear]
+ignored-paths = [
+    "tests/unit/client_provisioning_tests.rs",
+    "src/discoverV2/tests/capability_watchers_tests.rs",
+]
+
+[lints]
+workspace = true
+
+[dependencies]
+xdcode-utils-process = { workspace = true }
+arc-swap = { workspace = true }
+axum = { workspace = true, features = ["http1", "tokio", "ws"] }
+base64 = { workspace = true }
+bytes = { workspace = true }
+clatter = { workspace = true }
+xdcode-api = { workspace = true }
+xdcode-build-info = { workspace = true }
+xdcode-config = { workspace = true }
+xdcode-core-plugin-common = { workspace = true }
+xdcode-http-client = { workspace = true }
+xdcode-exec-server-protocol = { workspace = true }
+xdcode-file-system = { workspace = true }
+xdcode-file-watcher = { workspace = true }
+xdcode-network-proxy = { workspace = true }
+xdcode-otel = { workspace = true }
+xdcode-protocol = { workspace = true }
+xdcode-sandboxing = { workspace = true }
+xdcode-shell-command = { workspace = true }
+xdcode-skills = { workspace = true }
+xdcode-utils-absolute-path = { workspace = true }
+xdcode-utils-home-dir = { workspace = true }
+xdcode-utils-path-uri = { workspace = true }
+xdcode-utils-pty = { workspace = true }
+xdcode-utils-redacted-string = { workspace = true }
+xdcode-utils-rustls-provider = { workspace = true }
+xdcode-websocket-auth = { workspace = true }
+xdcode-websocket-client = { workspace = true }
+dirs = { workspace = true }
+futures = { workspace = true }
+http = { workspace = true }
+opentelemetry = { workspace = true }
+prost = "0.14.3"
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+toml = { workspace = true }
+tokio = { workspace = true, features = [
+    "fs",
+    "io-std",
+    "io-util",
+    "macros",
+    "net",
+    "process",
+    "rt-multi-thread",
+    "sync",
+    "time",
+] }
+tokio-util = { workspace = true, features = ["io", "rt"] }
+tokio-tungstenite = { workspace = true }
+tracing = { workspace = true }
+url = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+xdcode-linux-sandbox = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+xdcode-uds = { workspace = true }
+libc = { workspace = true }
+rustix = { workspace = true, features = ["fs"] }
+tempfile = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+xdcode-mxc-sandbox = { workspace = true }
+which = { workspace = true }
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+] }
+
+[dev-dependencies]
+anyhow = { workspace = true }
+xdcode-exec-server-test-support = { workspace = true }
+xdcode-test-binary-support = { workspace = true }
+xdcode-utils-cargo-bin = { workspace = true }
+xdcode-windows-sandbox-test-support = { workspace = true }
+ctor = { workspace = true }
+http = { workspace = true }
+opentelemetry_sdk = { workspace = true }
+pretty_assertions = { workspace = true }
+rcgen = { workspace = true }
+rustls = { workspace = true }
+serial_test = { workspace = true }
+tempfile = { workspace = true }
+test-case = "3.3.1"
+tokio = { workspace = true, features = ["test-util"] }
+tracing-opentelemetry = { workspace = true }
+tracing-subscriber = { workspace = true }
+wiremock = { workspace = true }

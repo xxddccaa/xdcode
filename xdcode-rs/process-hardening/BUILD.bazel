@@ -1,0 +1,6 @@
+load("//:defs.bzl", "xdcode_rust_crate")
+
+xdcode_rust_crate(
+    name = "process-hardening",
+    crate_name = "xdcode_process_hardening",
+)

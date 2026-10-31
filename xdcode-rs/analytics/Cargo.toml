@@ -1,0 +1,37 @@
+[package]
+edition.workspace = true
+license.workspace = true
+name = "xdcode-analytics"
+version.workspace = true
+
+[lib]
+doctest = false
+name = "xdcode_analytics"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+xdcode-http-client = { workspace = true }
+xdcode-app-server-protocol = { workspace = true }
+xdcode-git-utils = { workspace = true }
+xdcode-login = { workspace = true }
+xdcode-model-provider = { workspace = true }
+xdcode-plugin = { workspace = true }
+xdcode-protocol = { workspace = true }
+xdcode-state = { workspace = true }
+xdcode-utils-path-uri = { workspace = true }
+os_info = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+sha1 = { workspace = true }
+tokio = { workspace = true, features = [
+    "macros",
+    "rt-multi-thread",
+] }
+tracing = { workspace = true, features = ["log"] }
+
+[dev-dependencies]
+xdcode-utils-absolute-path = { workspace = true }
+pretty_assertions = { workspace = true }

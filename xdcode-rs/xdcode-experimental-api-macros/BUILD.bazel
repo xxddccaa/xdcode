@@ -1,0 +1,7 @@
+load("//:defs.bzl", "xdcode_rust_crate")
+
+xdcode_rust_crate(
+    name = "xdcode-experimental-api-macros",
+    crate_name = "xdcode_experimental_api_macros",
+    proc_macro = True,
+)

@@ -1,0 +1,45 @@
+[package]
+edition.workspace = true
+license.workspace = true
+name = "xdcode-mcp-extension"
+version.workspace = true
+
+[lib]
+name = "xdcode_mcp_extension"
+path = "src/lib.rs"
+doctest = false
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+xdcode-core = { workspace = true }
+xdcode-core-plugins = { workspace = true }
+xdcode-config = { workspace = true }
+xdcode-connectors = { workspace = true }
+xdcode-connectors-extension = { workspace = true }
+xdcode-exec-server = { workspace = true }
+xdcode-extension-api = { workspace = true }
+xdcode-features = { workspace = true }
+xdcode-mcp = { workspace = true }
+xdcode-plugin = { workspace = true }
+xdcode-protocol = { workspace = true }
+xdcode-utils-absolute-path = { workspace = true }
+xdcode-utils-path-uri = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
+
+[dev-dependencies]
+core_test_support = { workspace = true }
+axum = { workspace = true }
+xdcode-exec-server-test-support = { workspace = true }
+xdcode-login = { workspace = true }
+futures = { workspace = true }
+pretty_assertions = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
+tokio-util = { workspace = true, features = ["rt"] }
+wiremock = { workspace = true }

@@ -1,0 +1,8 @@
+---
+source: tui/src/app/tests.rs
+assertion_line: 5874
+expression: rendered
+---
+
+  >_ xdcode (v<VERSION>)
+     /tmp/project

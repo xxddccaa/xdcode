@@ -1,0 +1,13 @@
+load("//:defs.bzl", "xdcode_rust_crate")
+
+xdcode_rust_crate(
+    name = "v8-poc",
+    crate_features = ["sandbox"],
+    crate_name = "xdcode_v8_poc",
+    deps_extra = ["@crates//:v8"],
+)
+
+alias(
+    name = "v8-poc-rusty-v8",
+    actual = ":v8-poc",
+)

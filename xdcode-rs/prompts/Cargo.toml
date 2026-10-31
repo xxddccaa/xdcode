@@ -1,0 +1,29 @@
+[package]
+edition.workspace = true
+license.workspace = true
+name = "xdcode-prompts"
+version.workspace = true
+
+[lib]
+doctest = false
+name = "xdcode_prompts"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+xdcode-collaboration-mode-templates = { workspace = true }
+xdcode-context-fragments = { workspace = true }
+xdcode-execpolicy = { workspace = true }
+xdcode-git-utils = { workspace = true }
+xdcode-guardian-context = { workspace = true }
+xdcode-protocol = { workspace = true }
+xdcode-utils-absolute-path = { workspace = true }
+xdcode-utils-template = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+xdcode-protocol-test-support = { workspace = true }
+pretty_assertions = { workspace = true }

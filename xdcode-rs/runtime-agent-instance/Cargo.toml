@@ -1,0 +1,36 @@
+[package]
+name = "xdcode-runtime-agent-instance"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+doctest = false
+
+[lints]
+workspace = true
+
+[dependencies]
+base64 = { workspace = true }
+xdcode-agent-identity = { workspace = true }
+xdcode-api = { workspace = true }
+xdcode-features = { workspace = true }
+xdcode-http-client = { workspace = true }
+xdcode-login = { workspace = true }
+xdcode-utils-redacted-string = { workspace = true }
+ed25519-dalek = { workspace = true }
+http = { workspace = true }
+rand = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
+url = { workspace = true }
+uuid = { workspace = true, features = ["serde", "v4"] }
+zeroize = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+wiremock = { workspace = true }

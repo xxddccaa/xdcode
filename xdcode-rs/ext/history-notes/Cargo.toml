@@ -1,0 +1,37 @@
+[package]
+edition.workspace = true
+license.workspace = true
+name = "xdcode-history-notes-extension"
+version.workspace = true
+
+[lib]
+name = "xdcode_history_notes_extension"
+path = "src/lib.rs"
+doctest = false
+
+[lints]
+workspace = true
+
+[dependencies]
+xdcode-analytics = { workspace = true }
+xdcode-client = { workspace = true }
+xdcode-core = { workspace = true }
+xdcode-extension-api = { workspace = true }
+xdcode-http-client = { workspace = true }
+xdcode-login = { workspace = true }
+xdcode-model-provider = { workspace = true }
+xdcode-protocol = { workspace = true }
+xdcode-tools = { workspace = true }
+xdcode-utils-output-truncation = { workspace = true }
+http = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+xdcode-config = { workspace = true }
+xdcode-model-provider-info = { workspace = true }
+core_test_support = { workspace = true }
+insta = { workspace = true }
+pretty_assertions = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt"] }
+wiremock = { workspace = true }

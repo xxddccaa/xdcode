@@ -1,0 +1,6 @@
+load("//:defs.bzl", "xdcode_rust_crate")
+
+xdcode_rust_crate(
+    name = "config-schema",
+    crate_name = "xdcode_config_schema",
+)

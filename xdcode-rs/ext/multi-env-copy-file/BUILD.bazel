@@ -1,0 +1,17 @@
+load("//:defs.bzl", "xdcode_rust_crate")
+
+xdcode_rust_crate(
+    name = "multi-env-copy-file",
+    crate_name = "xdcode_multi_env_copy_file",
+    extra_binaries = [
+        "//xdcode-rs/bwrap:bwrap",
+        "//xdcode-rs/code-mode-host:xdcode-code-mode-host",
+        "//xdcode-rs/linux-sandbox:xdcode-linux-sandbox",
+        "//xdcode-rs/cli:xdcode",
+        "//xdcode-rs/windows-sandbox-rs:xdcode-command-runner",
+        "//xdcode-rs/windows-sandbox-rs:xdcode-windows-managed-deny-probe",
+        "//xdcode-rs/windows-sandbox-rs:xdcode-windows-sandbox-setup",
+    ],
+    run_tests_with_wine_exec = True,
+    test_tags = ["no-sandbox"],
+)

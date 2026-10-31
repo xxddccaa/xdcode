@@ -1,0 +1,168 @@
+[package]
+name = "xdcode-app-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "xdcode-app-server"
+path = "src/main.rs"
+
+[[bin]]
+name = "xdcode-app-server-test-notify-capture"
+path = "src/bin/notify_capture.rs"
+
+[[bin]]
+name = "exec-server"
+path = "src/bin/exec_server.rs"
+
+[lib]
+name = "xdcode_app_server"
+path = "src/lib.rs"
+doctest = false
+
+[lints]
+workspace = true
+
+[dependencies]
+xdcode-utils-process = { workspace = true }
+anyhow = { workspace = true }
+base64 = { workspace = true }
+axum = { workspace = true, default-features = false, features = [
+    "http1",
+    "json",
+    "tokio",
+    "ws",
+] }
+xdcode-analytics = { workspace = true }
+xdcode-app-server-daemon = { workspace = true }
+xdcode-agent-extension = { workspace = true }
+xdcode-arg0 = { workspace = true }
+xdcode-aws-auth = { workspace = true }
+xdcode-cloud-config = { workspace = true }
+xdcode-code-mode = { workspace = true }
+xdcode-config = { workspace = true }
+xdcode-network-proxy = { workspace = true }
+xdcode-connectors = { workspace = true }
+xdcode-core = { workspace = true }
+xdcode-core-plugins = { workspace = true }
+xdcode-diagnostics = { workspace = true }
+xdcode-home = { workspace = true }
+xdcode-exec-server = { workspace = true }
+xdcode-extension-api = { workspace = true }
+xdcode-external-agent-migration = { workspace = true }
+xdcode-features = { workspace = true }
+xdcode-multi-env-copy-file = { workspace = true }
+xdcode-goal-extension = { workspace = true }
+xdcode-git-attribution = { workspace = true }
+xdcode-guardian-v2 = { workspace = true }
+xdcode-git-utils = { workspace = true }
+xdcode-file-watcher = { workspace = true }
+xdcode-hooks = { workspace = true }
+xdcode-history-notes-extension = { workspace = true }
+xdcode-http-client = { workspace = true }
+xdcode-otel = { workspace = true }
+xdcode-plugin = { workspace = true }
+xdcode-shell-command = { workspace = true }
+xdcode-skills = { workspace = true }
+xdcode-skills-extension = { workspace = true }
+xdcode-utils-cli = { workspace = true }
+xdcode-user-verification = { workspace = true }
+xdcode-utils-pty = { workspace = true }
+xdcode-backend-client = { workspace = true }
+xdcode-file-search = { workspace = true }
+xdcode-chatgpt = { workspace = true }
+xdcode-login = { workspace = true }
+xdcode-image-generation-extension = { workspace = true }
+xdcode-memories-extension = { workspace = true }
+xdcode-web-search-extension = { workspace = true }
+xdcode-websocket-auth = { workspace = true }
+xdcode-memories-write = { workspace = true }
+xdcode-mcp = { workspace = true }
+xdcode-mcp-extension = { workspace = true }
+xdcode-model-provider = { workspace = true }
+xdcode-model-provider-info = { workspace = true }
+xdcode-models-manager = { workspace = true }
+xdcode-prompts = { workspace = true }
+xdcode-protocol = { workspace = true }
+xdcode-queue-extension = { workspace = true }
+xdcode-app-server-protocol = { workspace = true }
+xdcode-app-server-transport = { workspace = true }
+xdcode-feedback = { workspace = true }
+xdcode-rmcp-client = { workspace = true }
+xdcode-rollout = { workspace = true }
+xdcode-sandboxing = { workspace = true }
+xdcode-state = { workspace = true }
+xdcode-thread-store = { workspace = true }
+xdcode-tools = { workspace = true }
+xdcode-utils-absolute-path = { workspace = true }
+xdcode-utils-json-to-toml = { workspace = true }
+xdcode-utils-path-uri = { workspace = true }
+chrono = { workspace = true }
+clap = { workspace = true, features = ["derive"] }
+futures = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tempfile = { workspace = true }
+thiserror = { workspace = true }
+time = { workspace = true }
+toml = { workspace = true }
+toml_edit = { workspace = true }
+tokio = { workspace = true, features = [
+    "io-std",
+    "macros",
+    "process",
+    "rt-multi-thread",
+    "signal",
+] }
+tokio-util = { workspace = true }
+tracing = { workspace = true, features = ["log"] }
+tracing-subscriber = { workspace = true, features = ["env-filter", "fmt", "json"] }
+url = { workspace = true }
+uuid = { workspace = true, features = ["serde", "v7"] }
+
+[target.'cfg(all(target_os = "linux", target_env = "musl", any(target_arch = "x86_64", target_arch = "aarch64")))'.dependencies]
+tikv-jemallocator = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+xdcode-windows-sandbox = { workspace = true }
+
+[dev-dependencies]
+zip = { workspace = true }
+xdcode-uds = { workspace = true }
+app_test_support = { workspace = true }
+axum = { workspace = true, default-features = false, features = [
+    "http1",
+    "json",
+    "tokio",
+] }
+base64 = { workspace = true }
+xdcode-utils-cargo-bin = { workspace = true }
+core_test_support = { workspace = true }
+flate2 = { workspace = true }
+hmac = { workspace = true }
+http = { workspace = true }
+insta = { workspace = true }
+keyring = { workspace = true }
+opentelemetry = { workspace = true }
+opentelemetry_sdk = { workspace = true }
+pretty_assertions = { workspace = true }
+rcgen = { workspace = true }
+rmcp = { workspace = true, default-features = false, features = [
+    "elicitation",
+    "server",
+    "transport-streamable-http-server",
+] }
+serial_test = { workspace = true }
+shlex = { workspace = true }
+sqlx = { workspace = true }
+tar = { workspace = true }
+test-case = "3.3.1"
+tokio-rustls = { workspace = true }
+tokio-tungstenite = { workspace = true }
+tracing-opentelemetry = { workspace = true }
+wiremock = { workspace = true }

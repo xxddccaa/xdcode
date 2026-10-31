@@ -1,0 +1,38 @@
+[package]
+name = "xdcode-cloud-config"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+base64 = { workspace = true }
+chrono = { workspace = true, features = ["serde"] }
+xdcode-async-utils = { workspace = true }
+xdcode-backend-client = { workspace = true }
+xdcode-config = { workspace = true }
+xdcode-http-client = { workspace = true }
+xdcode-keyring-store = { workspace = true }
+xdcode-login = { workspace = true }
+xdcode-otel = { workspace = true }
+xdcode-protocol = { workspace = true }
+hmac = "0.12.1"
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tempfile = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["fs", "rt", "sync", "time"] }
+tracing = { workspace = true }
+
+[dev-dependencies]
+wiremock = { workspace = true }
+xdcode-agent-identity = { workspace = true }
+xdcode-core = { workspace = true }
+pretty_assertions = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "test-util", "time"] }
+
+[lib]
+doctest = false

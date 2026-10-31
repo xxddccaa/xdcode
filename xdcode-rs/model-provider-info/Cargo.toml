@@ -1,0 +1,30 @@
+[package]
+edition.workspace = true
+license.workspace = true
+name = "xdcode-model-provider-info"
+version.workspace = true
+
+[lib]
+doctest = false
+name = "xdcode_model_provider_info"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+xdcode-client = { workspace = true }
+xdcode-http-client = { workspace = true }
+xdcode-protocol = { workspace = true }
+xdcode-utils-redacted-string = { workspace = true }
+http = { workspace = true }
+schemars = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+url = { workspace = true }
+
+[dev-dependencies]
+xdcode-utils-absolute-path = { workspace = true }
+maplit = { workspace = true }
+pretty_assertions = { workspace = true }
+tempfile = { workspace = true }
+toml = { workspace = true }

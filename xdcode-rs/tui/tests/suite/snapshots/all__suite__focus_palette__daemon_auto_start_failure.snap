@@ -1,0 +1,7 @@
+---
+source: tui/tests/suite/focus_palette.rs
+assertion_line: 484
+expression: failure.trim()
+---
+Error: daemon executable not found at [XDCODE_HOME]/packages/app-server-daemon/current/bin/xdcode; repair the existing installation, or run `xdcode app-server daemon start` to install a missing daemon
+To work without the background server, rerun the same command with --no-daemon (including resume or fork and its arguments).

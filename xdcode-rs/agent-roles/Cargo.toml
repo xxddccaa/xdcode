@@ -1,0 +1,23 @@
+[package]
+edition.workspace = true
+license.workspace = true
+name = "xdcode-agent-roles"
+version.workspace = true
+
+[lib]
+doctest = false
+name = "xdcode_agent_roles"
+path = "src/lib.rs"
+test = false
+
+[lints]
+workspace = true
+
+[dependencies]
+xdcode-config = { workspace = true }
+xdcode-file-system = { workspace = true }
+xdcode-utils-absolute-path = { workspace = true }
+xdcode-utils-path-uri = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+toml = { workspace = true, features = ["preserve_order"] }
+tracing = { workspace = true }

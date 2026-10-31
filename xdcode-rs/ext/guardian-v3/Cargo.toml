@@ -1,0 +1,17 @@
+[package]
+edition.workspace = true
+license.workspace = true
+name = "xdcode-guardian-v3"
+version.workspace = true
+
+[lib]
+doctest = false
+test = false
+
+[lints]
+workspace = true
+
+[dependencies]
+xdcode-message-board = { workspace = true }
+xdcode-protocol = { workspace = true }
+xdcode-state = { workspace = true }

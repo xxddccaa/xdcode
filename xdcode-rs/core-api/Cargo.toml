@@ -1,0 +1,33 @@
+[package]
+edition.workspace = true
+license.workspace = true
+name = "xdcode-core-api"
+version.workspace = true
+
+[lib]
+doctest = false
+name = "xdcode_core_api"
+path = "src/lib.rs"
+test = false
+
+[lints]
+workspace = true
+
+[dependencies]
+xdcode-app-server-protocol = { workspace = true }
+xdcode-arg0 = { workspace = true }
+xdcode-analytics = { workspace = true }
+xdcode-config = { workspace = true }
+xdcode-core = { workspace = true }
+xdcode-extension-api = { workspace = true }
+xdcode-home = { workspace = true }
+xdcode-history = { workspace = true }
+xdcode-image-generation-extension = { workspace = true }
+xdcode-exec-server = { workspace = true }
+xdcode-features = { workspace = true }
+xdcode-login = { workspace = true }
+xdcode-model-provider-info = { workspace = true }
+xdcode-models-manager = { workspace = true }
+xdcode-protocol = { workspace = true }
+xdcode-state = { workspace = true }
+xdcode-utils-absolute-path = { workspace = true }

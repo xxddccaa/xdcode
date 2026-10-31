@@ -1,0 +1,46 @@
+[package]
+edition.workspace = true
+license.workspace = true
+name = "xdcode-model-provider"
+version.workspace = true
+
+[lib]
+doctest = false
+name = "xdcode_model_provider"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+xdcode-utils-process = { workspace = true }
+chrono = { workspace = true }
+xdcode-api = { workspace = true }
+xdcode-agent-identity = { workspace = true }
+xdcode-aws-auth = { workspace = true }
+xdcode-http-client = { workspace = true }
+xdcode-feedback = { workspace = true }
+xdcode-login = { workspace = true }
+xdcode-keyring-store = { workspace = true }
+xdcode-model-provider-info = { workspace = true }
+xdcode-models-manager = { workspace = true }
+xdcode-otel = { workspace = true }
+xdcode-protocol = { workspace = true }
+xdcode-response-debug-context = { workspace = true }
+xdcode-secrets = { workspace = true }
+http = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tokio = { workspace = true, features = ["io-util", "process", "sync", "time"] }
+tracing = { workspace = true, features = ["log"] }
+url = { workspace = true }
+
+[dev-dependencies]
+base64 = { workspace = true }
+xdcode-utils-cargo-bin = { workspace = true }
+xdcode-utils-redacted-string = { workspace = true }
+pretty_assertions = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt"] }
+wiremock = { workspace = true }

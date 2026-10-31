@@ -1,0 +1,6 @@
+load("//:defs.bzl", "xdcode_rust_crate")
+
+xdcode_rust_crate(
+    name = "install-context",
+    crate_name = "xdcode_install_context",
+)

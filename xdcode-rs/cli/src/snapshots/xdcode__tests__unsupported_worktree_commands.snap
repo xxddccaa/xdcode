@@ -1,0 +1,13 @@
+---
+source: cli/src/main.rs
+assertion_line: 3324
+expression: "errors.join(\"\\n\")"
+---
+xdcode --worktree mcp list: `--worktree` supports new interactive sessions, `xdcode fork`, `xdcode exec`, and `xdcode exec fork`
+xdcode fork --worktree: `xdcode fork --worktree` requires an explicit session ID
+xdcode fork --worktree --last: `xdcode fork --worktree` requires an explicit session ID
+xdcode exec resume --worktree session: `--worktree` cannot resume an existing session; use `xdcode exec fork --worktree`
+xdcode exec review --worktree: `--worktree` is not supported for code review
+xdcode resume --worktree session: `--worktree` supports new interactive sessions, `xdcode fork`, `xdcode exec`, and `xdcode exec fork`
+xdcode archive session --worktree: `--worktree` supports new interactive sessions, `xdcode fork`, `xdcode exec`, and `xdcode exec fork`
+xdcode queue --thread session --message hi --worktree: `--worktree` supports new interactive sessions, `xdcode fork`, `xdcode exec`, and `xdcode exec fork`

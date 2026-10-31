@@ -1,0 +1,70 @@
+[package]
+edition.workspace = true
+license.workspace = true
+name = "xdcode-core-plugins"
+version.workspace = true
+
+[lib]
+doctest = false
+name = "xdcode_core_plugins"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+xdcode-utils-process = { workspace = true }
+anyhow = { workspace = true }
+xdcode-analytics = { workspace = true }
+xdcode-app-server-protocol = { workspace = true }
+xdcode-config = { workspace = true }
+xdcode-connectors = { workspace = true }
+xdcode-core-plugin-common = { workspace = true }
+xdcode-exec-server = { workspace = true }
+xdcode-git-utils = { workspace = true }
+xdcode-hooks = { workspace = true }
+xdcode-http-client = { workspace = true }
+xdcode-login = { workspace = true }
+xdcode-mcp = { workspace = true }
+xdcode-model-provider = { workspace = true }
+xdcode-otel = { workspace = true }
+xdcode-plugin = { workspace = true }
+xdcode-protocol = { workspace = true }
+xdcode-skills = { workspace = true }
+xdcode-shell-command = { workspace = true }
+xdcode-tools = { workspace = true }
+xdcode-utils-absolute-path = { workspace = true }
+xdcode-utils-path = { workspace = true }
+xdcode-utils-path-uri = { workspace = true }
+xdcode-utils-plugins = { workspace = true }
+chrono = { workspace = true }
+dirs = { workspace = true }
+flate2 = { workspace = true }
+futures = { workspace = true }
+http = { workspace = true }
+regex = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+serde_with = { workspace = true }
+serde_yaml = { workspace = true }
+sha2 = { workspace = true }
+tar = { workspace = true }
+tempfile = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["fs", "macros", "rt", "time"] }
+toml = { workspace = true }
+tracing = { workspace = true }
+url = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }
+zip = { workspace = true }
+
+[dev-dependencies]
+xdcode-exec-server-test-support = { workspace = true }
+xdcode-utils-cargo-bin = { workspace = true }
+libc = { workspace = true }
+pretty_assertions = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
+tracing-subscriber = { workspace = true }
+tracing-test = { workspace = true, features = ["no-env-filter"] }
+wiremock = { workspace = true }

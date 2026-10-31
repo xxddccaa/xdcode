@@ -1,0 +1,6 @@
+load("//:defs.bzl", "xdcode_rust_crate")
+
+xdcode_rust_crate(
+    name = "cloud-client",
+    crate_name = "xdcode_cloud_client",
+)

@@ -1,0 +1,6 @@
+load("//:defs.bzl", "xdcode_rust_crate")
+
+xdcode_rust_crate(
+    name = "exec-server-protocol",
+    crate_name = "xdcode_exec_server_protocol",
+)

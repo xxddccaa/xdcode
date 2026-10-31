@@ -1,0 +1,51 @@
+[package]
+edition.workspace = true
+license.workspace = true
+name = "xdcode-guardian-v2"
+version.workspace = true
+
+[lib]
+name = "xdcode_guardian_v2"
+path = "src/lib.rs"
+doctest = false
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+xdcode-analytics = { workspace = true }
+xdcode-api = { workspace = true }
+xdcode-config = { workspace = true }
+xdcode-context-fragments = { workspace = true }
+xdcode-core = { workspace = true }
+xdcode-extension-api = { workspace = true }
+xdcode-features = { workspace = true }
+xdcode-guardian-context = { workspace = true }
+xdcode-guardian-reviewer = { workspace = true }
+xdcode-history = { workspace = true }
+xdcode-http-client = { workspace = true }
+xdcode-login = { workspace = true }
+xdcode-model-provider = { workspace = true }
+xdcode-protocol = { workspace = true }
+xdcode-prompts = { workspace = true }
+xdcode-websocket-client = { workspace = true }
+dirs = { workspace = true }
+http = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["time"] }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+xdcode-model-provider-info = { workspace = true }
+xdcode-protocol-test-support = { workspace = true }
+xdcode-utils-cargo-bin = { workspace = true }
+core_test_support = { workspace = true }
+insta = { workspace = true }
+pretty_assertions = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+wiremock = { workspace = true }
+zstd = { workspace = true }

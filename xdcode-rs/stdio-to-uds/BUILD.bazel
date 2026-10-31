@@ -1,0 +1,6 @@
+load("//:defs.bzl", "xdcode_rust_crate")
+
+xdcode_rust_crate(
+    name = "stdio-to-uds",
+    crate_name = "xdcode_stdio_to_uds",
+)

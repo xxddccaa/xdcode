@@ -1,0 +1,7 @@
+load("//:defs.bzl", "xdcode_rust_crate")
+
+xdcode_rust_crate(
+    name = "code-mode-runtime",
+    compile_data = ["src/runtime/settled.js"],
+    crate_name = "xdcode_code_mode_runtime",
+)

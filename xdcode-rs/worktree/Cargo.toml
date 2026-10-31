@@ -1,0 +1,25 @@
+[package]
+name = "xdcode-worktree"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+doctest = false
+
+[dependencies]
+anyhow = { workspace = true }
+xdcode-git-utils = { workspace = true }
+xdcode-protocol = { workspace = true }
+dunce = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }
+
+[dev-dependencies]
+xdcode-utils-cargo-bin = { workspace = true }
+pretty_assertions = { workspace = true }

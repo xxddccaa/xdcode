@@ -1,0 +1,31 @@
+[package]
+name = "xdcode-chatgpt"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true, features = ["derive"] }
+xdcode-connectors = { workspace = true }
+xdcode-core = { workspace = true }
+xdcode-git-utils = { workspace = true }
+xdcode-http-client = { workspace = true }
+xdcode-login = { workspace = true }
+xdcode-model-provider = { workspace = true }
+xdcode-plugin = { workspace = true }
+xdcode-utils-cli = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+tokio = { workspace = true, features = ["full"] }
+
+[dev-dependencies]
+xdcode-utils-cargo-bin = { workspace = true }
+pretty_assertions = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+
+[lib]
+doctest = false

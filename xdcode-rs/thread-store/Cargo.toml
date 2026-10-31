@@ -1,0 +1,44 @@
+[package]
+edition.workspace = true
+license.workspace = true
+name = "xdcode-thread-store"
+version.workspace = true
+
+[lib]
+name = "xdcode_thread_store"
+path = "src/lib.rs"
+doctest = false
+
+[lints]
+workspace = true
+
+[dependencies]
+chrono = { workspace = true, features = ["serde"] }
+xdcode-app-server-protocol = { workspace = true }
+xdcode-extension-items = { workspace = true }
+xdcode-git-utils = { workspace = true }
+xdcode-install-context = { workspace = true }
+xdcode-otel = { workspace = true }
+xdcode-protocol = { workspace = true }
+xdcode-rollout = { workspace = true }
+xdcode-state = { workspace = true }
+xdcode-utils-absolute-path = { workspace = true }
+xdcode-utils-path = { workspace = true }
+xdcode-utils-path-uri = { workspace = true }
+futures = { workspace = true }
+pulldown-cmark = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+sqlx-macros = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+zstd = { workspace = true }
+
+[dev-dependencies]
+xdcode-utils-absolute-path = { workspace = true }
+pretty_assertions = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+uuid = { workspace = true }

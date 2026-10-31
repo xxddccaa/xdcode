@@ -1,0 +1,7 @@
+load("//:defs.bzl", "xdcode_rust_crate")
+
+xdcode_rust_crate(
+    name = "protocol",
+    compile_data = glob(["src/prompts/**/*.md"]),
+    crate_name = "xdcode_protocol",
+)

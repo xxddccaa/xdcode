@@ -1,0 +1,6 @@
+load("//:defs.bzl", "xdcode_rust_crate")
+
+xdcode_rust_crate(
+    name = "mcp",
+    crate_name = "xdcode_mcp_extension",
+)

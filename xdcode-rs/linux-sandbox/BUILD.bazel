@@ -1,0 +1,13 @@
+load("//:defs.bzl", "xdcode_rust_crate")
+
+xdcode_rust_crate(
+    name = "linux-sandbox",
+    crate_name = "xdcode_linux_sandbox",
+    extra_binaries = [
+        "//xdcode-rs/bwrap:bwrap",
+    ],
+    rustc_env_files = select({
+        "@platforms//os:linux": ["//xdcode-rs/bwrap:bwrap-sha256-env"],
+        "//conditions:default": [],
+    }),
+)

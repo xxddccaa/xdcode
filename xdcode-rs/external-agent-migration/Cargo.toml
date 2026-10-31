@@ -1,0 +1,43 @@
+[package]
+name = "xdcode-external-agent-migration"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+doctest = false
+name = "xdcode_external_agent_migration"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+chrono = { workspace = true }
+xdcode-analytics = { workspace = true }
+xdcode-config = { workspace = true }
+xdcode-core = { workspace = true }
+xdcode-core-plugins = { workspace = true }
+xdcode-hooks = { workspace = true }
+xdcode-login = { workspace = true }
+xdcode-memories-write = { workspace = true }
+xdcode-otel = { workspace = true }
+xdcode-plugin = { workspace = true }
+xdcode-protocol = { workspace = true }
+xdcode-rollout = { workspace = true }
+xdcode-thread-store = { workspace = true }
+xdcode-utils-output-truncation = { workspace = true }
+linkify = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+sha2 = { workspace = true }
+toml = { workspace = true }
+tokio = { workspace = true, features = ["rt", "sync"] }
+tracing = { workspace = true }
+
+[dev-dependencies]
+xdcode-app-server-protocol = { workspace = true }
+pretty_assertions = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

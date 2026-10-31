@@ -1,0 +1,8 @@
+load("//:defs.bzl", "xdcode_rust_crate")
+
+xdcode_rust_crate(
+    name = "xdcode-mcp",
+    crate_name = "xdcode_mcp",
+    extra_binaries = ["//xdcode-rs/cli:xdcode"],
+    test_data_extra = glob(["src/**/snapshots/**"]),
+)

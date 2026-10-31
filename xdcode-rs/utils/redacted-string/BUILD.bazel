@@ -1,0 +1,6 @@
+load("//:defs.bzl", "xdcode_rust_crate")
+
+xdcode_rust_crate(
+    name = "redacted-string",
+    crate_name = "xdcode_utils_redacted_string",
+)

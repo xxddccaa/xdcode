@@ -1,0 +1,6 @@
+load("//:defs.bzl", "xdcode_rust_crate")
+
+xdcode_rust_crate(
+    name = "fuzzy-match",
+    crate_name = "xdcode_utils_fuzzy_match",
+)

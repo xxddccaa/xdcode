@@ -1,0 +1,24 @@
+[package]
+edition.workspace = true
+license.workspace = true
+name = "xdcode-connectors-extension"
+version.workspace = true
+
+[lib]
+name = "xdcode_connectors_extension"
+path = "src/lib.rs"
+doctest = false
+test = false
+
+[lints]
+workspace = true
+
+[dependencies]
+xdcode-connectors = { workspace = true }
+xdcode-core-plugins = { workspace = true }
+xdcode-file-system = { workspace = true }
+xdcode-plugin = { workspace = true }
+xdcode-utils-path-uri = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }

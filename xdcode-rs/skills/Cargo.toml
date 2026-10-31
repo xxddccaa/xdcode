@@ -1,0 +1,30 @@
+[package]
+edition.workspace = true
+license.workspace = true
+name = "xdcode-skills"
+version.workspace = true
+build = "build.rs"
+
+[lib]
+doctest = false
+name = "xdcode_skills"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+xdcode-protocol = { workspace = true }
+xdcode-shell-command = { workspace = true }
+xdcode-utils-absolute-path = { workspace = true }
+xdcode-utils-path-uri = { workspace = true }
+include_dir = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_yaml = { workspace = true }
+shlex = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }
+tempfile = { workspace = true }

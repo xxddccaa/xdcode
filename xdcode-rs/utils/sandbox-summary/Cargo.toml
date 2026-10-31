@@ -1,0 +1,19 @@
+[package]
+name = "xdcode-utils-sandbox-summary"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+xdcode-protocol = { workspace = true }
+xdcode-utils-path-uri = { workspace = true }
+
+[dev-dependencies]
+xdcode-utils-absolute-path = { workspace = true }
+pretty_assertions = { workspace = true }
+
+[lib]
+doctest = false

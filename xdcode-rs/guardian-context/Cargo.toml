@@ -1,0 +1,24 @@
+[package]
+edition.workspace = true
+license.workspace = true
+name = "xdcode-guardian-context"
+version.workspace = true
+
+[lib]
+doctest = false
+name = "xdcode_guardian_context"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+xdcode-context-fragments = { workspace = true }
+xdcode-history = { workspace = true }
+xdcode-protocol = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+xdcode-protocol-test-support = { workspace = true }
+pretty_assertions = { workspace = true }

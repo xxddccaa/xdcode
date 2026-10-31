@@ -1,0 +1,6 @@
+load("//:defs.bzl", "xdcode_rust_crate")
+
+xdcode_rust_crate(
+    name = "history-notes",
+    crate_name = "xdcode_history_notes_extension",
+)

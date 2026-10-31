@@ -1,0 +1,7 @@
+load("//:defs.bzl", "xdcode_rust_crate")
+
+xdcode_rust_crate(
+    name = "mermaid",
+    crate_name = "xdcode_mermaid",
+    test_data_extra = glob(["src/snapshots/**"]),
+)

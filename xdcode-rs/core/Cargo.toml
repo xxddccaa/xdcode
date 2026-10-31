@@ -1,0 +1,185 @@
+[package]
+edition.workspace = true
+license.workspace = true
+name = "xdcode-core"
+version.workspace = true
+
+[lib]
+name = "xdcode_core"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+xdcode-utils-process = { workspace = true }
+anyhow = { workspace = true }
+arc-swap = { workspace = true }
+async-channel = { workspace = true }
+base64 = { workspace = true }
+bm25 = { workspace = true }
+chrono = { workspace = true, features = ["serde"] }
+xdcode-analytics = { workspace = true }
+xdcode-agent-graph-store = { workspace = true }
+xdcode-agent-roles = { workspace = true }
+xdcode-api = { workspace = true }
+xdcode-app-server-protocol = { workspace = true }
+xdcode-apply-patch = { workspace = true }
+xdcode-async-utils = { workspace = true }
+xdcode-attachment-store = { workspace = true }
+xdcode-client = { workspace = true }
+xdcode-code-mode = { workspace = true }
+xdcode-connectors = { workspace = true }
+xdcode-context-fragments = { workspace = true }
+xdcode-config = { workspace = true }
+xdcode-core-plugins = { workspace = true }
+xdcode-diagnostics = { workspace = true }
+xdcode-exec-server = { workspace = true }
+xdcode-extension-api = { workspace = true }
+xdcode-extension-items = { workspace = true }
+xdcode-features = { workspace = true }
+xdcode-feedback = { workspace = true }
+xdcode-file-system = { workspace = true }
+xdcode-login = { workspace = true }
+xdcode-memories-read = { workspace = true }
+xdcode-mcp = { workspace = true }
+xdcode-model-provider-info = { workspace = true }
+xdcode-models-manager = { workspace = true }
+xdcode-shell-command = { workspace = true }
+xdcode-execpolicy = { workspace = true }
+xdcode-git-utils = { workspace = true }
+xdcode-guardian-context = { workspace = true }
+xdcode-guardian-reviewer = { workspace = true }
+xdcode-history = { workspace = true }
+xdcode-hooks = { workspace = true }
+xdcode-http-client = { workspace = true }
+xdcode-install-context = { workspace = true }
+xdcode-network-proxy = { workspace = true }
+xdcode-otel = { workspace = true }
+xdcode-plugin = { workspace = true }
+xdcode-model-provider = { workspace = true }
+xdcode-protocol = { workspace = true }
+xdcode-response-debug-context = { workspace = true }
+xdcode-prompts = { workspace = true }
+xdcode-rollout = { workspace = true }
+xdcode-rollout-trace = { workspace = true }
+xdcode-rmcp-client = { workspace = true }
+xdcode-sandboxing = { workspace = true }
+xdcode-skills = { workspace = true }
+xdcode-skills-extension = { workspace = true }
+xdcode-state = { workspace = true }
+xdcode-agent-message-board-extension = { workspace = true }
+xdcode-message-board = { workspace = true }
+xdcode-agent-message-board-client = { workspace = true }
+xdcode-terminal-detection = { workspace = true }
+xdcode-thread-store = { workspace = true }
+xdcode-tools = { workspace = true }
+xdcode-utils-absolute-path = { workspace = true }
+xdcode-utils-audio = { workspace = true }
+xdcode-utils-cache = { workspace = true }
+xdcode-utils-git-discovery = { workspace = true }
+xdcode-utils-image = { workspace = true }
+xdcode-utils-home-dir = { workspace = true }
+xdcode-utils-output-truncation = { workspace = true }
+xdcode-utils-path = { workspace = true }
+xdcode-utils-path-uri = { workspace = true }
+xdcode-utils-plugins = { workspace = true }
+xdcode-utils-pty = { workspace = true }
+xdcode-utils-string = { workspace = true }
+xdcode-utils-stream-parser = { workspace = true }
+xdcode-windows-sandbox = { package = "xdcode-windows-sandbox", path = "../windows-sandbox-rs" }
+dirs = { workspace = true }
+dunce = { workspace = true }
+eventsource-stream = { workspace = true }
+futures = { workspace = true }
+http = { workspace = true }
+hyper-util = { workspace = true }
+iana-time-zone = { workspace = true }
+image = { workspace = true, features = ["jpeg", "png", "webp"] }
+indexmap = { workspace = true }
+libc = { workspace = true }
+once_cell = { workspace = true }
+rand = { workspace = true }
+regex-lite = { workspace = true }
+rmcp = { workspace = true, default-features = false, features = [
+    "base64",
+    "macros",
+    "schemars",
+    "server",
+] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+sha1 = { workspace = true }
+shlex = { workspace = true }
+similar = { workspace = true }
+tempfile = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = [
+    "io-std",
+    "macros",
+    "process",
+    "rt-multi-thread",
+    "signal",
+] }
+tokio-util = { workspace = true, features = ["rt"] }
+tokio-tungstenite = { workspace = true }
+toml = { workspace = true }
+toml_edit = { workspace = true }
+tonic = { workspace = true }
+tower = { version = "0.5.3", features = ["util"] }
+tracing = { workspace = true, features = ["log"] }
+url = { workspace = true }
+uuid = { workspace = true, features = ["serde", "v4", "v5", "v7"] }
+which = { workspace = true }
+whoami = { workspace = true }
+
+# Build OpenSSL from source for musl builds.
+[target.x86_64-unknown-linux-musl.dependencies]
+openssl-sys = { workspace = true, features = ["vendored"] }
+
+# Build OpenSSL from source for musl builds.
+[target.aarch64-unknown-linux-musl.dependencies]
+openssl-sys = { workspace = true, features = ["vendored"] }
+
+[dev-dependencies]
+assert_cmd = { workspace = true }
+assert_matches = { workspace = true }
+xdcode-exec-server-test-support = { workspace = true }
+xdcode-image-generation-extension = { workspace = true }
+xdcode-home = { workspace = true }
+xdcode-mcp-extension = { workspace = true }
+xdcode-otel = { workspace = true }
+xdcode-protocol-test-support = { workspace = true }
+xdcode-test-binary-support = { workspace = true }
+xdcode-utils-cargo-bin = { workspace = true }
+xdcode-utils-redacted-string = { workspace = true }
+xdcode-web-search-extension = { workspace = true }
+xdcode-windows-sandbox-test-support = { workspace = true }
+core_test_support = { workspace = true }
+ctor = { workspace = true }
+insta = { workspace = true }
+maplit = { workspace = true }
+opentelemetry = { workspace = true }
+predicates = { workspace = true }
+pretty_assertions = { workspace = true }
+test-case = "3.3.1"
+opentelemetry_sdk = { workspace = true, features = [
+    "experimental_metrics_custom_reader",
+    "metrics",
+] }
+serial_test = { workspace = true }
+tempfile = { workspace = true }
+test-log = { workspace = true }
+tracing-opentelemetry = { workspace = true }
+tracing-subscriber = { workspace = true }
+tracing-test = { workspace = true, features = ["no-env-filter"] }
+walkdir = { workspace = true }
+wiremock = { workspace = true }
+zstd = { workspace = true }
+
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_Threading"] }
+
+[package.metadata.cargo-shear]
+ignored = ["openssl-sys"]
+ignored-paths = ["tests/remote_env_windows/*.rs"]

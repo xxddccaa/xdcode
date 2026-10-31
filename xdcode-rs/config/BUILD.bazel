@@ -1,0 +1,7 @@
+load("//:defs.bzl", "xdcode_rust_crate")
+
+xdcode_rust_crate(
+    name = "config",
+    compile_data = ["defaults.toml"],
+    crate_name = "xdcode_config",
+)

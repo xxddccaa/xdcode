@@ -1,0 +1,11 @@
+# Copy into your own XDCODE_HOME/config.toml; adjust URL/model if needed.
+# Keep the key in your environment/secret manager; never put it in this file.
+model = "gpt-5.6-sol"
+model_provider = "personal_proxy"
+
+[model_providers.personal_proxy]
+name = "My Responses proxy"
+base_url = "https://example.invalid/v1"
+env_key = "XDCODE_API_KEY"
+wire_api = "responses"
+requires_hosted_auth = false

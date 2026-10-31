@@ -1,0 +1,36 @@
+[package]
+name = "xdcode-arg0"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "xdcode_arg0"
+path = "src/lib.rs"
+doctest = false
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+xdcode-apply-patch = { workspace = true }
+xdcode-async-utils = { workspace = true }
+xdcode-exec-server = { workspace = true }
+xdcode-install-context = { workspace = true }
+xdcode-linux-sandbox = { workspace = true }
+xdcode-sandboxing = { workspace = true }
+xdcode-utils-absolute-path = { workspace = true }
+xdcode-utils-home-dir = { workspace = true }
+xdcode-utils-pty = { workspace = true }
+dotenvy = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+
+[target.'cfg(windows)'.dependencies]
+xdcode-windows-sandbox = { workspace = true }
+pathdiff = { workspace = true }
+
+[dev-dependencies]
+xdcode-utils-cargo-bin = { workspace = true }
+pretty_assertions = { workspace = true }

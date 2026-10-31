@@ -1,0 +1,50 @@
+[package]
+name = "xdcode-linux-sandbox"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "xdcode-linux-sandbox"
+path = "src/main.rs"
+
+[lib]
+name = "xdcode_linux_sandbox"
+path = "src/lib.rs"
+doctest = false
+
+[lints]
+workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+clap = { workspace = true, features = ["derive"] }
+xdcode-install-context = { workspace = true }
+xdcode-network-proxy = { workspace = true }
+xdcode-process-hardening = { workspace = true }
+xdcode-protocol = { workspace = true }
+xdcode-sandboxing = { workspace = true }
+xdcode-uds = { workspace = true }
+xdcode-utils-absolute-path = { workspace = true }
+globset = { workspace = true }
+landlock = { workspace = true }
+libc = { workspace = true }
+rustix = { workspace = true }
+seccompiler = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+url = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+xdcode-core = { workspace = true }
+xdcode-utils-cargo-bin = { workspace = true }
+pretty_assertions = { workspace = true }
+tempfile = { workspace = true }
+test-case = "3.3.1"
+tokio = { workspace = true, features = [
+    "io-std",
+    "macros",
+    "process",
+    "rt-multi-thread",
+    "signal",
+] }

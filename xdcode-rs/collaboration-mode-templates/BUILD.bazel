@@ -1,0 +1,12 @@
+load("//:defs.bzl", "xdcode_rust_crate")
+
+xdcode_rust_crate(
+    name = "collaboration-mode-templates",
+    compile_data = glob(["templates/*.md"]),
+    crate_name = "xdcode_collaboration_mode_templates",
+)
+
+exports_files(
+    glob(["templates/*.md"]),
+    visibility = ["//visibility:public"],
+)

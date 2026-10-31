@@ -1,0 +1,6 @@
+interface:
+  display_name: "xdcode Model Configuration"
+  short_description: "Add models, providers, and reasoning effort settings"
+  default_prompt: "Use $xdcode-model-config to add or update a model in my active xdcode configuration."
+policy:
+  allow_implicit_invocation: true

@@ -1,0 +1,10 @@
+---
+source: tui/src/chatwidget/tests/popups_and_settings.rs
+assertion_line: 4103
+expression: snapshot
+---
+"                                                                                "
+"                                                                                "
+"› Ask Xdcode to do anything                                                     "
+"                                                                                "
+"  GPT-5.5 max                                                                   "

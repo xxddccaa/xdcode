@@ -1,0 +1,26 @@
+
+[package]
+edition.workspace = true
+license.workspace = true
+name = "xdcode-utils-plugins"
+version.workspace = true
+
+[lib]
+doctest = false
+name = "xdcode_utils_plugins"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+xdcode-exec-server = { workspace = true }
+xdcode-exec-server-protocol = { workspace = true }
+xdcode-utils-absolute-path = { workspace = true }
+xdcode-utils-path-uri = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt"] }

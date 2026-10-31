@@ -1,0 +1,77 @@
+name: xdcode bug
+description: Report a problem with the xdcode CLI or its delivered package
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before submitting a new issue, please search for existing issues to see if your issue has already been reported.
+        Add useful reproduction details to an existing report when possible.
+
+        Use docs/xdcode.md for supported installation and provider setup.
+        Report security vulnerabilities privately using SECURITY.md.
+        Remove keys, private prompts and personal data from anything you share.
+
+        If your build supports it, run `xdcode doctor --json` and review the report before attaching it below.
+
+  - type: input
+    id: version
+    attributes:
+      label: xdcode version
+      description: Copy `xdcode --version`. If startup fails, give the package filename and error instead.
+    validations:
+      required: true
+  - type: input
+    id: build
+    attributes:
+      label: Build and source identity
+      description: Give build_id and source_commit from build-info.json, or the source revision and whether it has local changes for a development binary.
+  - type: input
+    id: model
+    attributes:
+      label: Which model were you using?
+      description: Give the configured model and provider name if relevant. Do not include credentials or private endpoint URLs.
+  - type: input
+    id: platform
+    attributes:
+      label: Operating system and architecture
+      description: |
+        Delivery currently targets Linux x86_64 with GNU libc. Include your distribution,
+        `uname -mprs` output and libc version when reporting installation or startup problems.
+  - type: input
+    id: terminal
+    attributes:
+      label: What terminal emulator and version are you using (if applicable)?
+      description: |
+        Also note any multiplexer in use (screen / tmux / zellij).
+  - type: textarea
+    id: doctor
+    attributes:
+      label: xdcode doctor report
+      description: |
+        Paste only reviewed, redacted output from `xdcode doctor --json`.
+        If your build does not support `doctor`, leave this empty.
+      render: json
+  - type: textarea
+    id: actual
+    attributes:
+      label: What issue are you seeing?
+      description: Please include the full error messages and prompts with PII redacted. If possible, please provide text instead of a screenshot.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: What steps can reproduce the bug?
+      description: Explain the bug and provide a code snippet that can reproduce it. Please include thread id if applicable.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What is the expected behavior?
+      description: If possible, please provide text instead of a screenshot.
+  - type: textarea
+    id: notes
+    attributes:
+      label: Additional information
+      description: Is there anything else you think we should know?

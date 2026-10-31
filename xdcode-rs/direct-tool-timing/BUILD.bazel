@@ -1,0 +1,6 @@
+load("//:defs.bzl", "xdcode_rust_crate")
+
+xdcode_rust_crate(
+    name = "direct-tool-timing",
+    crate_name = "xdcode_direct_tool_timing",
+)

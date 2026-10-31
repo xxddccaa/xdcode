@@ -1,0 +1,9 @@
+load("//:defs.bzl", "xdcode_rust_crate")
+
+xdcode_rust_crate(
+    name = "memories",
+    compile_data = glob([
+        "templates/**",
+    ]),
+    crate_name = "xdcode_memories_extension",
+)

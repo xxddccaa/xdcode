@@ -1,0 +1,33 @@
+[package]
+edition.workspace = true
+license.workspace = true
+name = "xdcode-web-search-extension"
+version.workspace = true
+
+[lib]
+name = "xdcode_web_search_extension"
+path = "src/lib.rs"
+doctest = false
+
+[lints]
+workspace = true
+
+[dependencies]
+xdcode-api = { workspace = true }
+xdcode-core = { workspace = true }
+xdcode-extension-api = { workspace = true }
+xdcode-extension-items = { workspace = true }
+xdcode-http-client = { workspace = true }
+xdcode-login = { workspace = true }
+xdcode-model-provider = { workspace = true }
+xdcode-model-provider-info = { workspace = true }
+xdcode-otel = { workspace = true }
+xdcode-protocol = { workspace = true }
+xdcode-tools = { workspace = true }
+http = { workspace = true }
+schemars = { workspace = true }
+serde_json = { workspace = true }
+url = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }

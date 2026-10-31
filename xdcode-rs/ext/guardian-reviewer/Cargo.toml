@@ -1,0 +1,36 @@
+[package]
+edition.workspace = true
+license.workspace = true
+name = "xdcode-guardian-reviewer"
+version.workspace = true
+
+[lib]
+doctest = false
+name = "xdcode_guardian_reviewer"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+xdcode-analytics = { workspace = true }
+xdcode-extension-api = { workspace = true }
+xdcode-feedback = { workspace = true }
+xdcode-guardian-context = { workspace = true }
+xdcode-mcp = { workspace = true }
+xdcode-otel = { workspace = true }
+xdcode-prompts = { workspace = true }
+xdcode-protocol = { workspace = true }
+rand = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true, features = ["rt"] }
+tracing = { workspace = true }
+
+[dev-dependencies]
+opentelemetry = { workspace = true }
+opentelemetry_sdk = { workspace = true, features = ["experimental_metrics_custom_reader", "metrics"] }
+test-case = "3.3.1"
+pretty_assertions = { workspace = true }

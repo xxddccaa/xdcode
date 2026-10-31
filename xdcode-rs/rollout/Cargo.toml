@@ -1,0 +1,60 @@
+[package]
+edition.workspace = true
+license.workspace = true
+name = "xdcode-rollout"
+version.workspace = true
+
+[lib]
+doctest = false
+name = "xdcode_rollout"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+xdcode-utils-process = { workspace = true }
+anyhow = { workspace = true }
+chrono = { workspace = true, features = ["serde"] }
+xdcode-extension-items = { workspace = true }
+xdcode-file-search = { workspace = true }
+xdcode-git-utils = { workspace = true }
+xdcode-history = { workspace = true }
+xdcode-otel = { workspace = true }
+xdcode-protocol = { workspace = true }
+xdcode-state = { workspace = true }
+xdcode-utils-absolute-path = { workspace = true }
+xdcode-utils-output-truncation = { workspace = true }
+xdcode-utils-path = { workspace = true }
+xdcode-utils-string = { workspace = true }
+futures = { workspace = true, features = ["alloc"] }
+memchr = { workspace = true }
+regex = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+time = { workspace = true, features = [
+    "formatting",
+    "local-offset",
+    "macros",
+    "parsing",
+] }
+tokio = { workspace = true, features = [
+    "fs",
+    "io-util",
+    "macros",
+    "process",
+    "rt",
+    "sync",
+    "time",
+] }
+tracing = { workspace = true }
+uuid = { workspace = true }
+zstd = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
+[dev-dependencies]
+xdcode-utils-absolute-path = { workspace = true }
+pretty_assertions = { workspace = true }

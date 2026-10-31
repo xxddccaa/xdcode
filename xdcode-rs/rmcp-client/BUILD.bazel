@@ -1,0 +1,9 @@
+load("//:defs.bzl", "xdcode_rust_crate")
+
+xdcode_rust_crate(
+    name = "rmcp-client",
+    crate_name = "xdcode_rmcp_client",
+    extra_binaries = [
+        "//xdcode-rs/cli:xdcode",
+    ],
+)

@@ -1,0 +1,43 @@
+[package]
+edition.workspace = true
+license.workspace = true
+name = "xdcode-image-generation-extension"
+version.workspace = true
+
+[lib]
+name = "xdcode_image_generation_extension"
+path = "src/lib.rs"
+doctest = false
+
+[lints]
+workspace = true
+
+[dependencies]
+base64 = { workspace = true }
+xdcode-api = { workspace = true }
+xdcode-attachment-store = { workspace = true }
+xdcode-core = { workspace = true }
+xdcode-exec-server = { workspace = true }
+xdcode-extension-api = { workspace = true }
+xdcode-extension-items = { workspace = true }
+xdcode-http-client = { workspace = true }
+xdcode-login = { workspace = true }
+xdcode-model-provider = { workspace = true }
+xdcode-model-provider-info = { workspace = true }
+xdcode-protocol = { workspace = true }
+xdcode-tools = { workspace = true }
+xdcode-utils-absolute-path = { workspace = true }
+xdcode-utils-image = { workspace = true }
+xdcode-utils-path-uri = { workspace = true }
+http = { workspace = true }
+schemars = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+image = { workspace = true, features = ["png"] }
+pretty_assertions = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

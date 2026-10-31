@@ -1,0 +1,52 @@
+[package]
+edition.workspace = true
+license.workspace = true
+name = "xdcode-skills-extension"
+version.workspace = true
+
+[lib]
+name = "xdcode_skills_extension"
+path = "src/lib.rs"
+doctest = false
+
+[lints]
+workspace = true
+
+[dependencies]
+blake3 = { workspace = true }
+xdcode-analytics = { workspace = true }
+xdcode-config = { workspace = true }
+xdcode-exec-server = { workspace = true }
+xdcode-extension-api = { workspace = true }
+xdcode-mcp = { workspace = true }
+xdcode-otel = { workspace = true }
+xdcode-protocol = { workspace = true }
+xdcode-skills = { workspace = true }
+xdcode-tools = { workspace = true }
+xdcode-utils-absolute-path = { workspace = true }
+xdcode-utils-path-uri = { workspace = true }
+xdcode-utils-plugins = { workspace = true }
+xdcode-utils-string = { workspace = true }
+dirs = { workspace = true }
+futures = { workspace = true }
+schemars = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
+toml = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+assert_matches = { workspace = true }
+xdcode-attachment-store = { workspace = true }
+xdcode-core-plugin-common = { workspace = true }
+xdcode-models-manager = { workspace = true }
+xdcode-protocol-test-support = { workspace = true }
+xdcode-utils-cargo-bin = { workspace = true }
+dunce = { workspace = true }
+insta = { workspace = true }
+opentelemetry_sdk = { workspace = true }
+pretty_assertions = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
+tracing-subscriber = { workspace = true }

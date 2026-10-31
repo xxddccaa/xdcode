@@ -1,0 +1,57 @@
+[package]
+name = "core_test_support"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+path = "lib.rs"
+doctest = false
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+assert_cmd = { workspace = true }
+base64 = { workspace = true }
+xdcode-analytics = { workspace = true }
+xdcode-arg0 = { workspace = true }
+xdcode-attachment-store = { workspace = true }
+xdcode-config = { workspace = true }
+xdcode-core = { workspace = true }
+xdcode-extension-api = { workspace = true }
+xdcode-exec-server = { workspace = true }
+xdcode-guardian-v2 = { workspace = true }
+xdcode-home = { workspace = true }
+xdcode-features = { workspace = true }
+xdcode-hooks = { workspace = true }
+xdcode-login = { workspace = true }
+xdcode-model-provider-info = { workspace = true }
+xdcode-models-manager = { workspace = true }
+xdcode-protocol = { workspace = true }
+xdcode-thread-store = { workspace = true }
+xdcode-utils-absolute-path = { workspace = true }
+xdcode-utils-cargo-bin = { workspace = true }
+xdcode-utils-path-uri = { workspace = true }
+ctor = { workspace = true }
+futures = { workspace = true }
+notify = { workspace = true }
+opentelemetry = { workspace = true }
+opentelemetry_sdk = { workspace = true }
+regex-lite = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["net", "test-util", "time"] }
+tokio-tungstenite = { workspace = true }
+tracing = { workspace = true }
+tracing-opentelemetry = { workspace = true }
+tracing-subscriber = { workspace = true }
+walkdir = { workspace = true }
+wiremock = { workspace = true }
+shlex = { workspace = true }
+zstd = { workspace = true }
+
+[dev-dependencies]
+xdcode-http-client = { workspace = true }
+pretty_assertions = { workspace = true }

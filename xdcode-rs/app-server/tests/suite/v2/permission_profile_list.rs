@@ -1,0 +1,297 @@
+use std::time::Duration;
+
+use anyhow::Result;
+use app_test_support::TestAppServer;
+use pretty_assertions::assert_eq;
+use tempfile::TempDir;
+use tokio::time::timeout;
+use xdcode_app_server_protocol::PermissionProfileListParams;
+use xdcode_app_server_protocol::PermissionProfileListResponse;
+use xdcode_app_server_protocol::PermissionProfileSummary;
+use xdcode_core::config::set_project_trust_level;
+use xdcode_protocol::config_types::TrustLevel;
+use xdcode_protocol::models::BUILT_IN_PERMISSION_PROFILE_DANGER_FULL_ACCESS;
+use xdcode_protocol::models::BUILT_IN_PERMISSION_PROFILE_READ_ONLY;
+use xdcode_protocol::models::BUILT_IN_PERMISSION_PROFILE_WORKSPACE;
+
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
+
+#[tokio::test]
+async fn permission_profile_list_returns_builtin_and_configured_profiles() -> Result<()> {
+    let xdcode_home = TempDir::new()?;
+    std::fs::write(
+        xdcode_home.path().join("config.toml"),
+        r#"
+default_permissions = "dev"
+
+[permissions.dev]
+description = "Day-to-day coding work."
+
+[permissions.dev.filesystem]
+":workspace_roots" = "write"
+
+[permissions.audit]
+description = "Inspect without writes."
+
+[permissions.audit.filesystem]
+":workspace_roots" = "read"
+"#,
+    )?;
+
+    let mut mcp = TestAppServer::builder()
+        .with_xdcode_home(xdcode_home.path())
+        .without_auto_env()
+        .build_initialized_with_timeout(DEFAULT_TIMEOUT)
+        .await?;
+
+    let request_id = mcp
+        .send_permission_profile_list_request(PermissionProfileListParams {
+            cursor: None,
+            limit: None,
+            cwd: None,
+        })
+        .await?;
+    let actual = read_response::<PermissionProfileListResponse>(&mut mcp, request_id).await?;
+
+    assert_eq!(
+        actual,
+        PermissionProfileListResponse {
+            data: vec![
+                PermissionProfileSummary {
+                    id: BUILT_IN_PERMISSION_PROFILE_READ_ONLY.to_string(),
+                    description: None,
+                    allowed: true,
+                },
+                PermissionProfileSummary {
+                    id: BUILT_IN_PERMISSION_PROFILE_WORKSPACE.to_string(),
+                    description: None,
+                    allowed: true,
+                },
+                PermissionProfileSummary {
+                    id: BUILT_IN_PERMISSION_PROFILE_DANGER_FULL_ACCESS.to_string(),
+                    description: None,
+                    allowed: true,
+                },
+                PermissionProfileSummary {
+                    id: "audit".to_string(),
+                    description: Some("Inspect without writes.".to_string()),
+                    allowed: true,
+                },
+                PermissionProfileSummary {
+                    id: "dev".to_string(),
+                    description: Some("Day-to-day coding work.".to_string()),
+                    allowed: true,
+                },
+            ],
+            next_cursor: None,
+        }
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn permission_profile_list_resolves_project_profiles_and_paginates() -> Result<()> {
+    let xdcode_home = TempDir::new()?;
+    let workspace = TempDir::new()?;
+    let project_config_dir = workspace.path().join(".xdcode");
+    std::fs::create_dir_all(&project_config_dir)?;
+    std::fs::write(
+        xdcode_home.path().join("config.toml"),
+        r#"
+default_permissions = ":workspace"
+"#,
+    )?;
+    std::fs::write(
+        project_config_dir.join("config.toml"),
+        r#"
+[permissions.project]
+description = "Project-scoped profile."
+
+[permissions.project.filesystem]
+":workspace_roots" = "write"
+"#,
+    )?;
+    set_project_trust_level(xdcode_home.path(), workspace.path(), TrustLevel::Trusted)?;
+
+    let mut mcp = TestAppServer::builder()
+        .with_xdcode_home(xdcode_home.path())
+        .without_auto_env()
+        .build_initialized_with_timeout(DEFAULT_TIMEOUT)
+        .await?;
+
+    let first_request_id = mcp
+        .send_permission_profile_list_request(PermissionProfileListParams {
+            cursor: None,
+            limit: Some(3),
+            cwd: Some(workspace.path().to_string_lossy().into_owned()),
+        })
+        .await?;
+    let first = read_response::<PermissionProfileListResponse>(&mut mcp, first_request_id).await?;
+    assert_eq!(
+        first,
+        PermissionProfileListResponse {
+            data: vec![
+                PermissionProfileSummary {
+                    id: BUILT_IN_PERMISSION_PROFILE_READ_ONLY.to_string(),
+                    description: None,
+                    allowed: true,
+                },
+                PermissionProfileSummary {
+                    id: BUILT_IN_PERMISSION_PROFILE_WORKSPACE.to_string(),
+                    description: None,
+                    allowed: true,
+                },
+                PermissionProfileSummary {
+                    id: BUILT_IN_PERMISSION_PROFILE_DANGER_FULL_ACCESS.to_string(),
+                    description: None,
+                    allowed: true,
+                },
+            ],
+            next_cursor: Some("3".to_string()),
+        }
+    );
+
+    let second_request_id = mcp
+        .send_permission_profile_list_request(PermissionProfileListParams {
+            cursor: first.next_cursor,
+            limit: Some(3),
+            cwd: Some(workspace.path().to_string_lossy().into_owned()),
+        })
+        .await?;
+    let second =
+        read_response::<PermissionProfileListResponse>(&mut mcp, second_request_id).await?;
+    assert_eq!(
+        second,
+        PermissionProfileListResponse {
+            data: vec![PermissionProfileSummary {
+                id: "project".to_string(),
+                description: Some("Project-scoped profile.".to_string()),
+                allowed: true,
+            }],
+            next_cursor: None,
+        }
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn permission_profile_list_discovers_project_profiles_without_default_selection() -> Result<()>
+{
+    let xdcode_home = TempDir::new()?;
+    let workspace = TempDir::new()?;
+    let project_config_dir = workspace.path().join(".xdcode");
+    std::fs::create_dir_all(&project_config_dir)?;
+    std::fs::write(
+        project_config_dir.join("config.toml"),
+        r#"
+[permissions.project]
+description = "Project-scoped profile."
+
+[permissions.project.filesystem]
+":workspace_roots" = "write"
+"#,
+    )?;
+    set_project_trust_level(xdcode_home.path(), workspace.path(), TrustLevel::Trusted)?;
+
+    let mut mcp = TestAppServer::builder()
+        .with_xdcode_home(xdcode_home.path())
+        .without_auto_env()
+        .build_initialized_with_timeout(DEFAULT_TIMEOUT)
+        .await?;
+
+    let request_id = mcp
+        .send_permission_profile_list_request(PermissionProfileListParams {
+            cursor: None,
+            limit: None,
+            cwd: Some(workspace.path().to_string_lossy().into_owned()),
+        })
+        .await?;
+    let actual = read_response::<PermissionProfileListResponse>(&mut mcp, request_id).await?;
+
+    assert_eq!(
+        actual,
+        PermissionProfileListResponse {
+            data: vec![
+                PermissionProfileSummary {
+                    id: BUILT_IN_PERMISSION_PROFILE_READ_ONLY.to_string(),
+                    description: None,
+                    allowed: true,
+                },
+                PermissionProfileSummary {
+                    id: BUILT_IN_PERMISSION_PROFILE_WORKSPACE.to_string(),
+                    description: None,
+                    allowed: true,
+                },
+                PermissionProfileSummary {
+                    id: BUILT_IN_PERMISSION_PROFILE_DANGER_FULL_ACCESS.to_string(),
+                    description: None,
+                    allowed: true,
+                },
+                PermissionProfileSummary {
+                    id: "project".to_string(),
+                    description: Some("Project-scoped profile.".to_string()),
+                    allowed: true,
+                },
+            ],
+            next_cursor: None,
+        }
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn permission_profile_list_resolves_roots_against_requested_cwd() -> Result<()> {
+    let xdcode_home = TempDir::new()?;
+    let workspace = TempDir::new()?;
+    let unsafe_cwd = workspace.path().join("[workspace]");
+    std::fs::create_dir_all(&unsafe_cwd)?;
+    std::fs::write(
+        xdcode_home.path().join("config.toml"),
+        r#"
+default_permissions = ":workspace"
+
+[permissions.scoped.workspace_roots]
+"private/*.env" = true
+
+[permissions.scoped.filesystem]
+":workspace_roots" = "write"
+"#,
+    )?;
+    let mut mcp = TestAppServer::builder()
+        .with_xdcode_home(xdcode_home.path())
+        .without_auto_env()
+        .build_initialized_with_timeout(DEFAULT_TIMEOUT)
+        .await?;
+
+    for (cwd, allowed) in [(unsafe_cwd.as_path(), false), (workspace.path(), true)] {
+        let request_id = mcp
+            .send_permission_profile_list_request(PermissionProfileListParams {
+                cursor: None,
+                limit: None,
+                cwd: Some(cwd.to_string_lossy().into_owned()),
+            })
+            .await?;
+        let response = read_response::<PermissionProfileListResponse>(&mut mcp, request_id).await?;
+        assert_eq!(
+            response
+                .data
+                .into_iter()
+                .find(|profile| profile.id == "scoped"),
+            Some(PermissionProfileSummary {
+                id: "scoped".to_string(),
+                description: None,
+                allowed,
+            }),
+            "cwd={}",
+            cwd.display(),
+        );
+    }
+    Ok(())
+}
+
+async fn read_response<T: serde::de::DeserializeOwned>(
+    mcp: &mut TestAppServer,
+    request_id: i64,
+) -> Result<T> {
+    timeout(DEFAULT_TIMEOUT, mcp.read_response(request_id)).await?
+}

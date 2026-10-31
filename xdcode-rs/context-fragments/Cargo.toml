@@ -1,0 +1,22 @@
+[package]
+edition.workspace = true
+license.workspace = true
+name = "xdcode-context-fragments"
+version.workspace = true
+
+[lib]
+name = "xdcode_context_fragments"
+path = "src/lib.rs"
+doctest = false
+
+[lints]
+workspace = true
+
+[dependencies]
+xdcode-protocol = { workspace = true }
+xdcode-utils-string = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+xdcode-protocol-test-support = { workspace = true }
+pretty_assertions = { workspace = true }

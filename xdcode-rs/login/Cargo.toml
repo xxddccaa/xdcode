@@ -1,0 +1,61 @@
+[package]
+name = "xdcode-login"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+xdcode-utils-process = { workspace = true }
+anyhow = { workspace = true }
+base64 = { workspace = true }
+chrono = { workspace = true, features = ["serde"] }
+xdcode-agent-identity = { workspace = true }
+xdcode-http-client = { workspace = true }
+xdcode-config = { workspace = true }
+xdcode-keyring-store = { workspace = true }
+xdcode-model-provider-info = { workspace = true }
+xdcode-otel = { workspace = true }
+xdcode-protocol = { workspace = true }
+xdcode-secrets = { workspace = true }
+xdcode-terminal-detection = { workspace = true }
+xdcode-utils-template = { workspace = true }
+xdcode-workload-identity = { workspace = true }
+http = { workspace = true }
+once_cell = { workspace = true }
+os_info = { workspace = true }
+rand = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+tiny_http = { workspace = true }
+tokio = { workspace = true, features = [
+    "io-std",
+    "macros",
+    "process",
+    "rt-multi-thread",
+    "signal",
+] }
+tracing = { workspace = true }
+url = { workspace = true }
+urlencoding = { workspace = true }
+webbrowser = { workspace = true }
+
+[dev-dependencies]
+xdcode-utils-cargo-bin = { workspace = true }
+opentelemetry_sdk = { workspace = true, features = ["testing"] }
+core_test_support = { workspace = true }
+jsonwebtoken = { workspace = true }
+keyring = { workspace = true }
+pretty_assertions = { workspace = true }
+regex-lite = { workspace = true }
+serial_test = { workspace = true }
+tempfile = { workspace = true }
+tracing-subscriber = { workspace = true }
+wiremock = { workspace = true }
+
+[lib]
+doctest = false

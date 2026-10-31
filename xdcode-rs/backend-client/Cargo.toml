@@ -1,0 +1,32 @@
+[package]
+name = "xdcode-backend-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+path = "src/lib.rs"
+doctest = false
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+http = { workspace = true }
+url = { workspace = true }
+xdcode-backend-openapi-models = { path = "../xdcode-backend-openapi-models" }
+xdcode-api = { workspace = true }
+xdcode-http-client = { workspace = true }
+xdcode-login = { workspace = true }
+xdcode-model-provider = { workspace = true }
+xdcode-protocol = { workspace = true }
+tokio = { workspace = true, features = ["time"] }
+
+[dev-dependencies]
+pretty_assertions = "1"
+tokio = { workspace = true, features = ["macros", "rt"] }
+wiremock = { workspace = true }

@@ -1,0 +1,151 @@
+name: xdcode delivery
+
+on:
+  push:
+    paths:
+      - scripts/xdcode/**
+      - scripts/xdcode_package/**
+      - xdcode-rs/bwrap/**
+      - xdcode-rs/vendor/bubblewrap/**
+      - upstream.json
+      - README.md
+      - docs/xdcode.md
+      - .github/workflows/xdcode.yml
+  pull_request:
+    paths:
+      - scripts/xdcode/**
+      - scripts/xdcode_package/**
+      - xdcode-rs/bwrap/**
+      - xdcode-rs/vendor/bubblewrap/**
+      - upstream.json
+      - .github/workflows/xdcode.yml
+  workflow_dispatch:
+    inputs:
+      build_package:
+        description: Run the expensive Linux x86_64 GNU release build
+        type: boolean
+        default: false
+      build_macos:
+        description: Build and verify the Apple Silicon macOS package
+        type: boolean
+        default: false
+      build_id:
+        description: Optional personal revision ID (default derives from source commit)
+        type: string
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  macos-arm64-package:
+    if: github.event_name == 'workflow_dispatch' && inputs.build_macos
+    needs: delivery-tests
+    runs-on: macos-15
+    timeout-minutes: 360
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
+      RUST_MIN_STACK: '8388608'
+      XDCODE_REPO_ROOT: ${{ github.workspace }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: '3.11'
+      - name: Check native Apple Silicon runner and install pinned Rust
+        run: |
+          test "$(uname -s)" = Darwin
+          test "$(uname -m)" = arm64
+          toolchain="$(python3.11 -c 'import tomllib; print(tomllib.load(open("xdcode-rs/rust-toolchain.toml", "rb"))["toolchain"]["channel"])')"
+          rustup toolchain install "$toolchain" --profile minimal --target aarch64-apple-darwin
+      - name: Test package assembly and macOS release checks
+        run: |
+          python3.11 -m unittest discover -s scripts/xdcode_package -p 'test_*.py'
+          python3.11 -m unittest discover -s scripts/xdcode/tests -p 'test_macos.py'
+      - name: Build, sign locally, and validate native package
+        run: python3.11 scripts/xdcode/macos.py
+      - name: Verify agent tools, MCP, identity, state isolation, and resume
+        run: python3.11 scripts/verify_xdcode_runtime.py target/xdcode-macos-package/bin/xdcode
+      - name: Verify Plan exit, rate-limit recovery, and cancellation
+        run: python3.11 scripts/verify_xdcode_reliability.py target/xdcode-macos-package/bin/xdcode
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: xdcode-macos-arm64
+          path: target/xdcode-dist/xdcode-*-macos-arm64.tar.gz*
+          if-no-files-found: error
+
+  delivery-tests:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: '3.11'
+      - name: Test package and offline installer
+        # Hosted runner helpers can deny /proc/<pid>/exe to the runner uid.
+        # Keep the installer's fail-closed process gate and give its real-process
+        # tests permission to inspect those helpers instead of bypassing the gate.
+        run: sudo env PYTHONDONTWRITEBYTECODE=1 "$(command -v python3.11)" -m unittest discover -s scripts/xdcode/tests -p 'test_*.py' -v
+      - name: Check Python and whitespace
+        run: |
+          python3.11 -m py_compile scripts/xdcode/build.py scripts/xdcode/macos.py scripts/xdcode/package.py scripts/xdcode/install.py scripts/verify_xdcode_reliability.py scripts/xdcode/tests/test_delivery.py scripts/xdcode/tests/test_review_fixes.py
+          git diff --check
+
+  linux-gnu-package:
+    if: github.event_name == 'workflow_dispatch' && inputs.build_package
+    needs: delivery-tests
+    # Preserve compatibility with glibc 2.35 hosts.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: '3.11'
+      - name: Fetch pinned upstream source for build verification
+        run: |
+          set -euo pipefail
+          xdcode_upstream_commit="$(python3.11 -c 'import json; print(json.load(open("upstream.json"))["upstream_commit"])')"
+          if ! git cat-file -e "$xdcode_upstream_commit^{commit}" 2>/dev/null; then
+            git fetch --no-tags --depth=1 https://github.com/openai/codex.git "$xdcode_upstream_commit"
+          fi
+      - name: Install pinned Rust
+        run: |
+          toolchain="$(python3.11 -c 'import tomllib; print(tomllib.load(open("xdcode-rs/rust-toolchain.toml", "rb"))["toolchain"]["channel"])')"
+          rustup toolchain install "$toolchain" --profile minimal --target x86_64-unknown-linux-gnu
+      - name: Install native GNU build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential clang libclang-dev cmake pkg-config binutils libcap-dev libssl-dev libasound2-dev
+      - name: Build pinned source and package offline inputs
+        env:
+          PERSONAL_BUILD_ID: ${{ inputs.build_id }}
+        run: |
+          set -euo pipefail
+          build_args=()
+          if [[ -n "$PERSONAL_BUILD_ID" ]]; then
+            build_args+=(--build-id "$PERSONAL_BUILD_ID")
+          fi
+          python3.11 scripts/xdcode/build.py --output-dir "$GITHUB_WORKSPACE/target/xdcode-ci-build" "${build_args[@]}"
+          python3.11 scripts/xdcode/package.py --build-dir "$GITHUB_WORKSPACE/target/xdcode-ci-build"
+      - name: Install and load the real package in an isolated directory
+        run: |
+          set -euo pipefail
+          archives=("$GITHUB_WORKSPACE"/target/xdcode-dist/xdcode-*.tar.gz)
+          [[ ${#archives[@]} -eq 1 ]]
+          xdcode_smoke_root="$(mktemp -d "$GITHUB_WORKSPACE/target/install-smoke.XXXXXX")"
+          sudo "$(command -v python3.11)" scripts/xdcode/install.py "${archives[0]}" \
+            --install-root "$xdcode_smoke_root/lib/xdcode" \
+            --bin-dir "$xdcode_smoke_root/bin" \
+            --xdcode-home "$xdcode_smoke_root/runtime"
+          expected_version="$(python3.11 -c 'import json; print(json.load(open("upstream.json"))["version"])')"
+          actual_version="$(sudo env -i PATH=/usr/bin:/bin XDCODE_HOME="$xdcode_smoke_root/runtime" "$xdcode_smoke_root/bin/xdcode" --version)"
+          [[ "$actual_version" == "xdcode $expected_version" ]]
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: xdcode-linux-x86_64-gnu
+          path: target/xdcode-dist/xdcode-*
+          if-no-files-found: error

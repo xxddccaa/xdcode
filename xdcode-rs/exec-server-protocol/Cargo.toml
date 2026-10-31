@@ -1,0 +1,31 @@
+[package]
+name = "xdcode-exec-server-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "xdcode_exec_server_protocol"
+path = "src/lib.rs"
+doctest = false
+
+[lints]
+workspace = true
+
+[dependencies]
+base64 = { workspace = true }
+xdcode-file-system = { workspace = true }
+xdcode-install-context = { workspace = true }
+xdcode-network-proxy = { workspace = true }
+xdcode-protocol = { workspace = true }
+xdcode-shell-command = { workspace = true }
+xdcode-skills = { workspace = true }
+xdcode-utils-path-uri = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true, features = ["arbitrary_precision", "raw_value"] }
+
+[target.'cfg(windows)'.dependencies]
+xdcode-mxc-sandbox = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }

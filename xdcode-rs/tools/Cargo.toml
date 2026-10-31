@@ -1,0 +1,40 @@
+[package]
+edition.workspace = true
+license.workspace = true
+name = "xdcode-tools"
+version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+bitflags = { workspace = true }
+xdcode-attachment-store = { workspace = true }
+xdcode-code-mode = { workspace = true }
+xdcode-connectors = { workspace = true }
+xdcode-features = { workspace = true }
+xdcode-file-system = { workspace = true }
+xdcode-extension-items = { workspace = true }
+xdcode-protocol = { workspace = true }
+xdcode-utils-output-truncation = { workspace = true }
+xdcode-utils-path-uri = { workspace = true }
+xdcode-utils-string = { workspace = true }
+jsonptr = { workspace = true }
+rmcp = { workspace = true, default-features = false, features = [
+    "base64",
+    "macros",
+    "schemars",
+    "server",
+] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true, features = ["raw_value"] }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+urlencoding = { workspace = true }
+
+[dev-dependencies]
+xdcode-utils-cargo-bin = { workspace = true }
+pretty_assertions = { workspace = true }
+
+[lib]
+doctest = false

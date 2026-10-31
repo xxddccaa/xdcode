@@ -1,0 +1,20 @@
+[package]
+name = "xdcode-core-plugin-common"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "xdcode_core_plugin_common"
+path = "src/lib.rs"
+doctest = false
+
+[lints]
+workspace = true
+
+[dependencies]
+xdcode-utils-absolute-path = { workspace = true }
+semver = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
