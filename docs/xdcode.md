@@ -99,8 +99,8 @@ checks platform, ELF class/architecture and glibc, then loads all four staged
 executables before activation. The target needs `libcap.so.2` and `libgcc_s.so.1`
 as well as GNU libc and the ELF loader (Debian/Ubuntu packages `libcap2` and
 `libgcc-s1`). The minimum host is Linux x86_64 with GNU libc at least the
-receipt's `requires_glibc`; the default Ubuntu 24.04 CI build requires glibc
-2.39 or newer. Build on an older supported distribution to lower that baseline.
+receipt's `requires_glibc`; the default Ubuntu 22.04 CI build requires glibc
+2.35 or newer. Check the release receipt when using a package from another builder.
 These startup probes do not exercise sandbox operations or optional libraries
 loaded later. Check `ldd` and run the real package on intended deployment
 distributions before distributing it.
