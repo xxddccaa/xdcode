@@ -59,6 +59,21 @@ produces `target/xdcode-dist/xdcode-0.167.0-personal1-linux-x86_64.tar.gz`, its
 snapshot requires the explicit `--allow-dirty` option and records its content
 digest. No product version override is accepted.
 
+## Install from GitHub (Linux x86_64)
+
+After release `v0.167.0-ge8036a95a605` is published, install it with one command.
+Requires Bash, `curl`, Python 3.11 or newer available as `python3`, and a local
+proxy listening at `http://127.0.0.1:10826`:
+
+```bash
+bash -c 'set -e; package=xdcode-0.167.0-ge8036a95a605-linux-x86_64; cd "$(mktemp -d)"; for suffix in tar.gz tar.gz.sha256 install.py; do curl -fL -x http://127.0.0.1:10826 -O "https://github.com/xxddccaa/xdcode/releases/download/v0.167.0-ge8036a95a605/$package.$suffix"; done; python3 "$package.install.py" --force "$package.tar.gz"'
+```
+
+This command is not for macOS. `--force` skips only active-process checks;
+integrity verification and install locking remain enabled. Old builds and runtime
+data are retained. Existing sessions keep using their old build; restart the
+local daemon safely after active tasks finish to use the new build.
+
 ## Offline installation
 
 Transfer the archive, checksum and installer together from a trusted build:
