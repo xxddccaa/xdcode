@@ -134,6 +134,8 @@ use xdcode_utils_absolute_path::AbsolutePathBuf;
 use xdcode_utils_cargo_bin::cargo_bin;
 use xdcode_utils_path_uri::PathUri;
 
+#[path = "mcp_network_policy_compat_tests.rs"]
+mod network_policy_compat_tests;
 #[path = "mcp_oauth_refresh_tests.rs"]
 mod oauth_refresh_tests;
 #[path = "mcp_sandbox_tests.rs"]
@@ -1590,10 +1592,25 @@ async fn mcp_pagination_preserves_valid_tools_and_rejects_oversized_cursors(
         .build_with_auto_env(&server)
         .await?;
 
+    let mut started = std::collections::BTreeSet::new();
     let startup = loop {
         let event = fixture.xdcode.next_event().await?;
-        if let EventMsg::McpStartupComplete(startup) = event.msg {
-            break startup;
+        match event.msg {
+            EventMsg::McpStartupUpdate(update)
+                if matches!(update.server.as_str(), "paginated" | "rejected") =>
+            {
+                if matches!(update.status, McpStartupStatus::Starting) {
+                    started.insert(update.server);
+                } else {
+                    assert_eq!(
+                        started.len(),
+                        2,
+                        "both eager starts precede the first terminal status"
+                    );
+                }
+            }
+            EventMsg::McpStartupComplete(startup) => break startup,
+            _ => {}
         }
     };
     assert!(startup.ready.iter().any(|name| name == "paginated"));
@@ -2263,6 +2280,7 @@ async fn local_stdio_server_uses_runtime_fallback_cwd_when_config_omits_cwd() ->
     xdcode_skills_extension::install(&mut extensions, |config: &Config| {
         xdcode_skills_extension::SkillsExtensionConfig {
             include_instructions: config.include_skill_instructions,
+            catalog_deltas_enabled: config.features.enabled(Feature::SkillCatalogDeltas),
             max_context_tokens: config.skill_max_context_tokens,
             bundled_skills_enabled: config.bundled_skills_enabled(),
             cloud_skill_enabled: config.cloud_skill_enabled,

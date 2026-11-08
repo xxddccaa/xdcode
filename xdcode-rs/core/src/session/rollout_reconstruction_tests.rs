@@ -233,7 +233,18 @@ fn assistant_message(text: &str) -> ResponseItem {
 }
 
 fn annotated(items: Vec<ResponseItem>) -> Vec<ResponseItemEnvelope> {
-    items.into_iter().map(ResponseItemEnvelope::new).collect()
+    items
+        .into_iter()
+        .enumerate()
+        .map(|(index, item)| ResponseItemEnvelope {
+            item,
+            metadata: Some(xdcode_history::XdcodeHarnessMetadata {
+                history_sequence: Some(index as u64 + 1),
+                sampled_through_sequence: Some(0),
+                ..Default::default()
+            }),
+        })
+        .collect()
 }
 
 fn inter_agent_assistant_message(text: &str) -> ResponseItem {
@@ -458,10 +469,8 @@ async fn record_initial_history_resumed_bare_turn_context_does_not_hydrate_previ
         cwd: turn_context.cwd.clone(),
         approval_policy: turn_context.approval_policy(),
         approvals_reviewer: None,
-        sandbox_policy: turn_context.sandbox_policy(),
-        permission_profile: None,
+        permission_profile: turn_context.permission_profile(),
         active_permission_profile: None,
-        file_system_sandbox_policy: None,
         model: previous_model.to_string(),
         comp_hash: None,
         collaboration_mode: Some(turn_context.collaboration_mode()),
@@ -506,10 +515,8 @@ async fn record_initial_history_resumed_hydrates_previous_turn_settings_from_lif
         cwd: turn_context.cwd.clone(),
         approval_policy: turn_context.approval_policy(),
         approvals_reviewer: None,
-        sandbox_policy: turn_context.sandbox_policy(),
-        permission_profile: None,
+        permission_profile: turn_context.permission_profile(),
         active_permission_profile: None,
-        file_system_sandbox_policy: None,
         model: previous_model.to_string(),
         comp_hash: Some("comp-hash-a".to_string()),
         collaboration_mode: Some(turn_context.collaboration_mode()),
@@ -1609,11 +1616,11 @@ async fn bounded_replay_matches_full_replay_after_empty_turn_compactions(
             vec![
                 RolloutItem::Compacted(Box::new(CompactedItem {
                     message: String::new(),
-                    replacement_history: Some(annotated(vec![object!({
+                    replacement_history: Some(vec![ResponseItemEnvelope::new(object!({
                         "type": "compaction",
                         "id": format!("checkpoint-{window_number}"),
                         "encrypted_content": format!("summary-{window_number}"),
-                    })])),
+                    }))]),
                     retained_context: None,
                     guardian_history: Some(xdcode_history::GuardianHistoryCheckpoint(vec![
                         user_message("original task").into(),
@@ -1694,7 +1701,14 @@ async fn bounded_replay_matches_full_replay_after_empty_turn_compactions(
         bounded.guardian_history.as_ref(),
         Some(&xdcode_history::GuardianHistoryCheckpoint(vec![
             user_message("original task").into(),
-            assistant_message("continued working").into()
+            ResponseItemEnvelope {
+                item: assistant_message("continued working"),
+                metadata: Some(xdcode_history::XdcodeHarnessMetadata {
+                    history_sequence: Some(2),
+                    sampled_through_sequence: Some(0),
+                    ..Default::default()
+                }),
+            }
         ])),
     );
     if current {
@@ -2146,10 +2160,8 @@ async fn record_initial_history_resumed_turn_context_after_compaction_reestablis
         cwd: turn_context.cwd.clone(),
         approval_policy: turn_context.approval_policy(),
         approvals_reviewer: None,
-        sandbox_policy: turn_context.sandbox_policy(),
-        permission_profile: None,
+        permission_profile: turn_context.permission_profile(),
         active_permission_profile: None,
-        file_system_sandbox_policy: None,
         model: previous_model.to_string(),
         comp_hash: None,
         collaboration_mode: Some(turn_context.collaboration_mode()),
@@ -2246,10 +2258,8 @@ async fn record_initial_history_resumed_turn_context_after_compaction_reestablis
             cwd: turn_context.cwd.clone(),
             approval_policy: turn_context.approval_policy(),
             approvals_reviewer: None,
-            sandbox_policy: turn_context.sandbox_policy(),
-            permission_profile: None,
+            permission_profile: turn_context.permission_profile(),
             active_permission_profile: None,
-            file_system_sandbox_policy: None,
             model: previous_model.to_string(),
             comp_hash: None,
             collaboration_mode: Some(turn_context.collaboration_mode()),
@@ -2278,10 +2288,8 @@ async fn record_initial_history_resumed_aborted_turn_without_id_clears_active_tu
         cwd: turn_context.cwd.clone(),
         approval_policy: turn_context.approval_policy(),
         approvals_reviewer: None,
-        sandbox_policy: turn_context.sandbox_policy(),
-        permission_profile: None,
+        permission_profile: turn_context.permission_profile(),
         active_permission_profile: None,
-        file_system_sandbox_policy: None,
         model: previous_model.to_string(),
         comp_hash: None,
         collaboration_mode: Some(turn_context.collaboration_mode()),
@@ -2423,10 +2431,8 @@ async fn record_initial_history_resumed_unmatched_abort_preserves_active_turn_fo
         cwd: turn_context.cwd.clone(),
         approval_policy: turn_context.approval_policy(),
         approvals_reviewer: None,
-        sandbox_policy: turn_context.sandbox_policy(),
-        permission_profile: None,
+        permission_profile: turn_context.permission_profile(),
         active_permission_profile: None,
-        file_system_sandbox_policy: None,
         model: current_model.to_string(),
         comp_hash: None,
         collaboration_mode: Some(turn_context.collaboration_mode()),
@@ -2560,10 +2566,8 @@ async fn record_initial_history_resumed_trailing_incomplete_turn_compaction_clea
         cwd: turn_context.cwd.clone(),
         approval_policy: turn_context.approval_policy(),
         approvals_reviewer: None,
-        sandbox_policy: turn_context.sandbox_policy(),
-        permission_profile: None,
+        permission_profile: turn_context.permission_profile(),
         active_permission_profile: None,
-        file_system_sandbox_policy: None,
         model: previous_model.to_string(),
         comp_hash: None,
         collaboration_mode: Some(turn_context.collaboration_mode()),
@@ -2747,10 +2751,8 @@ async fn record_initial_history_resumed_replaced_incomplete_compacted_turn_clear
         cwd: turn_context.cwd.clone(),
         approval_policy: turn_context.approval_policy(),
         approvals_reviewer: None,
-        sandbox_policy: turn_context.sandbox_policy(),
-        permission_profile: None,
+        permission_profile: turn_context.permission_profile(),
         active_permission_profile: None,
-        file_system_sandbox_policy: None,
         model: previous_model.to_string(),
         comp_hash: None,
         collaboration_mode: Some(turn_context.collaboration_mode()),

@@ -308,7 +308,17 @@ impl MessageProcessor {
         // The thread store is intentionally process-scoped. Config reloads can
         // affect per-thread behavior, but they must not move newly started,
         // resumed, or forked threads to a different persistence backend/root.
-        let thread_store = xdcode_core::thread_store_from_config(config.as_ref(), state_db.clone());
+        let board_sqlite = config.sqlite_config().clone();
+        let thread_store = xdcode_core::thread_store_from_config_with_cleanup(
+            config.as_ref(),
+            state_db.clone(),
+            move |thread_ids| {
+                let sqlite = board_sqlite.clone();
+                Box::pin(
+                    async move { crate::delete_agent_message_boards(&sqlite, &thread_ids).await },
+                )
+            },
+        );
         // Queue persistence requires SQLite, so in-memory thread stores and
         // app servers without a state database do not have a queue backend.
         let queue_store: Option<Arc<dyn QueueStore>> = match &config.experimental_thread_store {
@@ -855,8 +865,16 @@ impl MessageProcessor {
         thread_id: ThreadId,
         connection_ids: Vec<ConnectionId>,
     ) {
+        let Ok(thread) = self
+            .thread_processor
+            .thread_manager
+            .get_thread(thread_id)
+            .await
+        else {
+            return;
+        };
         self.thread_processor
-            .try_attach_thread_listener(thread_id, connection_ids)
+            .try_attach_thread_listener(thread_id, thread, connection_ids)
             .await;
     }
 

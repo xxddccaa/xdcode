@@ -33,6 +33,7 @@ pub fn map_api_error(err: ApiError) -> XdcodeErr {
         | ApiError::ContextWindowExceeded
         | ApiError::QuotaExceeded
         | ApiError::UsageNotIncluded
+        | ApiError::SessionBudgetExceeded
         | ApiError::FlexUnavailable
         | ApiError::RateLimit(_)
         | ApiError::InvalidRequest { .. }
@@ -54,6 +55,7 @@ fn map_api_error_details(err: ApiError) -> XdcodeErr {
         ApiError::ContextWindowExceeded => XdcodeErr::ContextWindowExceeded,
         ApiError::QuotaExceeded => XdcodeErr::QuotaExceeded,
         ApiError::UsageNotIncluded => XdcodeErr::UsageNotIncluded,
+        ApiError::SessionBudgetExceeded => XdcodeErr::SessionBudgetExceeded,
         ApiError::Retryable { message, .. } => XdcodeErr::Stream(message),
         ApiError::RateLimitExceeded { message, .. } => {
             XdcodeErr::new(XdcodeErrorDetails::RateLimitExceeded(message))

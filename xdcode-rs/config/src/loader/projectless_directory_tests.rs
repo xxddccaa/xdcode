@@ -10,6 +10,7 @@ use crate::loader::tests::TestFileSystem;
 use pretty_assertions::assert_eq;
 use tempfile::TempDir;
 use toml::Value as TomlValue;
+use xdcode_protocol::config_types::TrustLevel;
 use xdcode_utils_absolute_path::AbsolutePathBuf;
 
 struct Fixture {
@@ -80,6 +81,51 @@ async fn unmarked_directory_is_projectless_even_with_saved_trust() -> anyhow::Re
             format!("[projects.{key}]\ntrust_level = \"{level}\"\n"),
         )?;
         assert!(fixture.load().await?.is_projectless(), "{level}");
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn discovered_project_retains_effective_trust_decision() -> anyhow::Result<()> {
+    let fixture = Fixture::new()?;
+    let project_config = fixture.cwd.join(".xdcode");
+    std::fs::create_dir(&project_config)?;
+    std::fs::write(
+        project_config.join("config.toml"),
+        "model = 'project-model'\n",
+    )?;
+    let trust_key = project_trust_key(fixture.cwd.as_path());
+    let key = TomlValue::String(trust_key.clone());
+    for (configured, expected) in [
+        ("", None),
+        ("trusted", Some(TrustLevel::Trusted)),
+        ("untrusted", Some(TrustLevel::Untrusted)),
+    ] {
+        let user_config = if configured.is_empty() {
+            String::new()
+        } else {
+            format!("[projects.{key}]\ntrust_level = '{configured}'\n")
+        };
+        std::fs::write(fixture.home.join("config.toml"), user_config)?;
+        let layers = fixture.load().await?;
+        let decision = layers
+            .project_trust
+            .as_ref()
+            .expect("discovered project trust");
+        assert_eq!(decision.trust_key, trust_key);
+        assert_eq!(decision.trust_level, expected);
+        let project = layers
+            .all_layers_low_to_high()
+            .find(|layer| matches!(layer.name, crate::ConfigLayerSource::Project { .. }))
+            .expect("discovered project config layer");
+        assert_eq!(project.is_disabled(), expected != Some(TrustLevel::Trusted));
+        assert_eq!(
+            layers
+                .effective_config()
+                .get("model")
+                .and_then(TomlValue::as_str),
+            (expected == Some(TrustLevel::Trusted)).then_some("project-model")
+        );
     }
     Ok(())
 }

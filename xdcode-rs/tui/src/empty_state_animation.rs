@@ -192,6 +192,7 @@ impl EmptyStateAnimation {
     /// on clear, without restarting or scheduling animation.
     pub(crate) fn render_first_screen(
         &mut self,
+        screen: Rect,
         available: Rect,
         buffer: &mut Buffer,
         composer: Option<ComposerState>,

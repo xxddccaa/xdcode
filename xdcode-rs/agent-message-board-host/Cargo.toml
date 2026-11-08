@@ -1,0 +1,25 @@
+[package]
+name = "xdcode-agent-message-board-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+test = false
+doctest = false
+
+[lints]
+workspace = true
+
+[dependencies]
+chrono = { workspace = true }
+xdcode-agent-message-board-client = { workspace = true }
+xdcode-agent-message-board-extension = { workspace = true }
+xdcode-core = { workspace = true }
+xdcode-extension-api = { workspace = true }
+xdcode-features = { workspace = true }
+xdcode-message-board = { workspace = true }
+xdcode-protocol = { workspace = true }
+xdcode-state = { workspace = true }
+xdcode-thread-store = { workspace = true }
+futures = { workspace = true }

@@ -13,10 +13,15 @@ pub(crate) mod provider_selection;
 #[cfg(test)]
 #[path = "app_server_session/provider_selection_tests.rs"]
 mod provider_selection_tests;
+mod read_state;
 mod realtime;
 mod rollout_history;
+pub(crate) use read_state::unread_revision;
+mod side_chat_history;
+use side_chat_history::side_context_checkpoint;
 mod startup_launch;
 mod thread_list;
+pub(crate) mod user_message_submission;
 mod web_search;
 
 #[cfg(test)]
@@ -29,6 +34,8 @@ pub(crate) use history::HISTORY_ITEM_SCAN_LIMIT;
 pub(crate) use history::HistoryHydrationScope;
 pub(crate) use history::INITIAL_HISTORY_TURN_LIMIT;
 pub(crate) use history::thread_items_page_params;
+pub(crate) use side_chat_history::SideChat;
+pub(crate) use side_chat_history::side_chat_prompt_preview;
 pub(crate) use startup_launch::StartupLaunchChoices;
 
 use crate::app_event::PermissionProfileSelection;
@@ -55,6 +62,8 @@ use std::sync::Mutex;
 use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 use std::time::Instant;
+use tokio::sync::Semaphore;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 use xdcode_app_server_client::AppServerClient;
 use xdcode_app_server_client::AppServerPath;
@@ -147,6 +156,7 @@ use xdcode_app_server_protocol::TurnSteerParams;
 use xdcode_app_server_protocol::TurnSteerResponse;
 use xdcode_app_server_protocol::UserInput;
 use xdcode_config::ConfigLayerSource;
+use xdcode_context_fragments::SideConversationPolicy;
 use xdcode_otel::TelemetryAuthMode;
 use xdcode_protocol::ThreadId;
 use xdcode_protocol::approvals::GuardianAssessmentEvent;
@@ -190,7 +200,32 @@ enum EmptyCatalogFallback {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ForkPresentation {
     Regular,
-    SideConversation,
+    SideConversation(SideChatStorage),
+}
+
+pub(crate) const ATTACHED_SIDE_CHAT_SOURCE: &str = "tui_side_chat";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SideChatStorage {
+    Temporary,
+    Attached,
+}
+
+impl SideChatStorage {
+    fn policy(self) -> SideConversationPolicy {
+        match self {
+            Self::Temporary => SideConversationPolicy::Temporary,
+            Self::Attached => SideConversationPolicy::Attached,
+        }
+    }
+
+    pub(crate) fn configure_fork(self, config: &mut Config) {
+        config.ephemeral = self == Self::Temporary;
+        config.developer_instructions = Some(
+            self.policy()
+                .instructions(config.developer_instructions.as_deref()),
+        );
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -324,9 +359,20 @@ pub(crate) struct AppServerBootstrap {
 
 pub(crate) struct AppServerSession {
     backend_id: crate::backend_id::BackendId,
-    client: AppServerClient,
+    /// Owns events and the connection lifetime for live sessions. Request-only views share the
+    /// request handle below and have no connection owner.
+    connection_owner: Option<AppServerClient>,
+    request_handle: AppServerRequestHandle,
+    request_id_namespace: Option<Uuid>,
     next_request_id: i64,
+    automatic_name_writes: HashMap<ThreadId, Arc<Semaphore>>,
+    /// The newest docked replay refresh on this connection.
+    pub(crate) pending_side_skills_refresh: Option<Uuid>,
     history_pagination: HashMap<ThreadId, history::ThreadHistoryPagination>,
+    pub(crate) focused_conversation: Option<ThreadId>,
+    pub(crate) attempted_revision: Option<String>,
+    pub(crate) frozen_receipt: Option<(ThreadId, String)>,
+    pub(crate) unread_revisions: HashMap<ThreadId, String>,
     task_tool_threads: HashSet<ThreadId>,
     task_tool_capabilities_dir: Option<AbsolutePathBuf>,
     task_search_generation: Arc<AtomicU64>,
@@ -346,6 +392,33 @@ pub(crate) struct AppServerSession {
         Option<Box<crate::legacy_core::config::ConfigBuilder>>,
 }
 
+/// An automatic save holds the gate only while writing, so a manual rename can skip a slow read.
+pub(crate) struct AutomaticThreadName {
+    session: AppServerSession,
+    thread_id: ThreadId,
+    gate: Arc<Semaphore>,
+}
+
+impl AutomaticThreadName {
+    pub(crate) async fn save(mut self, title: String, cancellation: &CancellationToken) {
+        let read = self.session.thread_read(self.thread_id, false);
+        let Some(Ok(thread)) = cancellation.run_until_cancelled(read).await else {
+            return;
+        };
+        if thread.name.is_some() {
+            return;
+        }
+        let Ok(_permit) = self.gate.acquire().await else {
+            return;
+        };
+        if !cancellation.is_cancelled()
+            && let Err(error) = self.session.thread_set_name(self.thread_id, title).await
+        {
+            tracing::debug!(%error, "failed to apply generated thread title");
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ThreadParamsMode {
     Embedded,
@@ -361,6 +434,8 @@ pub(crate) enum ResumeModelSettings {
     RestoreFromThread,
     /// Rejoins a loaded thread without changing any of its existing settings.
     PreserveExistingThread,
+    /// Restore the saved settings and reapply the side-chat instructions on cold resume.
+    PreserveSideConversation,
 }
 
 impl ThreadParamsMode {
@@ -372,6 +447,15 @@ impl ThreadParamsMode {
             Self::Remote => None,
         }
     }
+}
+
+#[derive(Debug)]
+pub(crate) struct SidebarFork {
+    pub(crate) thread: AppServerStartedThread,
+    pub(crate) boundary: Result<(), String>,
+    pub(crate) inherited_profile: bool,
+    pub(crate) storage: SideChatStorage,
+    legacy: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -447,11 +531,15 @@ pub(crate) struct UnsupportedLegacyPermissionProfile;
 impl AppServerSession {
     /// Platform of the app-server process, not necessarily its executor.
     pub(crate) fn app_server_platform_family(&self) -> Option<&str> {
-        self.client.platform_family()
+        self.connection_owner
+            .as_ref()
+            .and_then(AppServerClient::platform_family)
     }
 
     pub(crate) fn app_server_platform_os(&self) -> Option<&str> {
-        self.client.platform_os()
+        self.connection_owner
+            .as_ref()
+            .and_then(AppServerClient::platform_os)
     }
 
     pub(crate) fn new(
@@ -459,11 +547,29 @@ impl AppServerSession {
         client: AppServerClient,
         thread_params_mode: ThreadParamsMode,
     ) -> Self {
+        let request_handle = client.request_handle();
+        Self::from_parts(backend_id, Some(client), request_handle, thread_params_mode)
+    }
+
+    fn from_parts(
+        backend_id: crate::backend_id::BackendId,
+        connection_owner: Option<AppServerClient>,
+        request_handle: AppServerRequestHandle,
+        thread_params_mode: ThreadParamsMode,
+    ) -> Self {
         Self {
             backend_id,
-            client,
+            connection_owner,
+            request_handle,
+            request_id_namespace: None,
             next_request_id: 1,
+            automatic_name_writes: HashMap::new(),
+            pending_side_skills_refresh: None,
             history_pagination: HashMap::new(),
+            focused_conversation: None,
+            attempted_revision: None,
+            frozen_receipt: None,
+            unread_revisions: HashMap::new(),
             task_tool_threads: HashSet::new(),
             task_tool_capabilities_dir: None,
             task_search_generation: Arc::new(AtomicU64::new(0)),
@@ -484,6 +590,24 @@ impl AppServerSession {
 
     pub(crate) fn backend_id(&self) -> crate::backend_id::BackendId {
         self.backend_id
+    }
+
+    /// Creates a request-only view without transferring the live connection's events.
+    pub(crate) fn request_view(&self) -> Self {
+        let mut view = Self::from_parts(
+            self.backend_id,
+            /*connection_owner*/ None,
+            self.request_handle(),
+            self.thread_params_mode,
+        );
+        view.request_id_namespace = Some(Uuid::new_v4());
+        view.remote_cwd_override = self.remote_cwd_override.clone();
+        view.model_provider_override = self.model_provider_override.clone();
+        view.history_support = self.history_support;
+        view.thread_settings_update_supported = self.thread_settings_update_supported;
+        view.default_model = self.default_model.clone();
+        view.available_models = self.available_models.clone();
+        view
     }
 
     pub(crate) async fn start_dynamic_tool_mcp(
@@ -529,14 +653,11 @@ impl AppServerSession {
         } else {
             None
         };
-        let services = crate::dynamic_tools_mcp::ToolServices {
-            task_tools: !self.uses_embedded_app_server(),
-            worktrees,
-        };
-        if !services.task_tools && services.worktrees.is_none() {
-            return Ok(());
-        }
-        if config.mcp_servers.get().contains_key(services.namespace()) {
+        if config
+            .mcp_servers
+            .get()
+            .contains_key(crate::dynamic_tools::NAMESPACE)
+        {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::AlreadyExists,
                 "a user-configured MCP server already owns the TUI tools namespace",
@@ -548,12 +669,15 @@ impl AppServerSession {
             .mcp_servers
             .as_ref()
             .map(|requirements| {
-                requirements.value.get(services.namespace()).ok_or_else(|| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::PermissionDenied,
-                        "managed MCP requirements do not permit the TUI task-tools server",
-                    )
-                })
+                requirements
+                    .value
+                    .get(crate::dynamic_tools::NAMESPACE)
+                    .ok_or_else(|| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::PermissionDenied,
+                            "managed MCP requirements do not permit the TUI task-tools server",
+                        )
+                    })
             })
             .transpose()?;
         let mut thread_start_params = thread_start_params_from_config(
@@ -586,7 +710,7 @@ impl AppServerSession {
                 app_event_tx,
                 status_updates,
                 managed_requirement,
-                services,
+                worktrees,
             )
             .await?,
         ));
@@ -596,8 +720,6 @@ impl AppServerSession {
     pub(crate) fn thread_tool_transport(&self) -> ThreadToolTransport {
         if let Some(server) = self.dynamic_tool_mcp.as_ref() {
             ThreadToolTransport::Mcp(Arc::clone(server))
-        } else if self.uses_embedded_app_server() {
-            ThreadToolTransport::Disabled
         } else {
             ThreadToolTransport::Dynamic
         }
@@ -624,7 +746,7 @@ impl AppServerSession {
     }
 
     pub(crate) fn uses_embedded_app_server(&self) -> bool {
-        matches!(&self.client, AppServerClient::InProcess(_))
+        matches!(&self.connection_owner, Some(AppServerClient::InProcess(_)))
     }
 
     /// Carry capabilities that may exist only in memory when the optional cache is unwritable.
@@ -658,18 +780,20 @@ impl AppServerSession {
         &self,
         local_xdcode_home: &AbsolutePathBuf,
     ) -> Option<AppServerPath> {
-        self.client.xdcode_home(local_xdcode_home)
+        self.connection_owner
+            .as_ref()
+            .and_then(|client| client.xdcode_home(local_xdcode_home))
     }
 
     pub(crate) fn server_version(&self) -> Option<&str> {
-        let AppServerClient::Remote(client) = &self.client else {
+        let Some(AppServerClient::Remote(client)) = &self.connection_owner else {
             return None;
         };
         client.server_version()
     }
 
     pub(crate) fn server_xdcode_home(&self) -> Option<&str> {
-        let AppServerClient::Remote(client) = &self.client else {
+        let Some(AppServerClient::Remote(client)) = &self.connection_owner else {
             return None;
         };
         client.xdcode_home()
@@ -721,10 +845,11 @@ impl AppServerSession {
         let requirements_request_id = self.next_request_id();
         let (models, requirements, collaboration_modes) = tokio::try_join!(
             async {
-                self.client
+                self.request_handle
                     .request_typed::<ModelListResponse>(ClientRequest::ModelList {
                         request_id: model_request_id,
                         params: ModelListParams {
+                            model_provider: None,
                             cursor: None,
                             limit: None,
                             include_hidden: Some(true),
@@ -736,7 +861,7 @@ impl AppServerSession {
                     })
             },
             async {
-                self.client
+                self.request_handle
                     .request_typed::<ConfigRequirementsReadResponse>(
                         ClientRequest::ConfigRequirementsRead {
                             request_id: requirements_request_id,
@@ -875,13 +1000,18 @@ impl AppServerSession {
     }
 
     pub(crate) async fn next_event(&mut self) -> Option<AppServerSessionEvent> {
-        self.client
-            .next_event()
-            .await
-            .map(|event| AppServerSessionEvent {
-                backend_id: self.backend_id,
-                event,
-            })
+        let event = self.connection_owner.as_mut()?.next_event().await?;
+        if let xdcode_app_server_client::AppServerEvent::ServerNotification(notification) = &event
+            && let xdcode_app_server_protocol::ServerNotification::ThreadReadStateChanged(change) =
+                notification.as_ref()
+            && let Ok(id) = ThreadId::from_string(&change.thread_id)
+        {
+            self.remember_read_state(id, Some(change.read_state.clone()));
+        }
+        Some(AppServerSessionEvent {
+            backend_id: self.backend_id,
+            event,
+        })
     }
 
     #[cfg(test)]
@@ -904,6 +1034,26 @@ impl AppServerSession {
         remote_cwd_override: Option<&std::path::Path>,
         selected_profile: Option<&PermissionProfileSelection>,
     ) -> Result<AppServerStartedThread> {
+        self.start_thread_with_inherited_selection(
+            local_settings,
+            config,
+            session_start_source,
+            remote_cwd_override,
+            selected_profile,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn start_thread_with_inherited_selection(
+        &mut self,
+        local_settings: &LocalSettings,
+        config: &Config,
+        session_start_source: Option<ThreadStartSource>,
+        remote_cwd_override: Option<&std::path::Path>,
+        selected_profile: Option<&PermissionProfileSelection>,
+        inherited_selection: Option<&crate::session_state::NewSessionModelSelection>,
+    ) -> Result<AppServerStartedThread> {
         let request_id = self.next_request_id();
         let session_config = self.session_config_with_effective_service_tier(config);
         let mut params = thread_start_params_from_config(
@@ -916,6 +1066,10 @@ impl AppServerSession {
             .model_provider_override
             .clone()
             .or(params.model_provider);
+        if let Some(selection) = inherited_selection {
+            params.model_provider = Some(selection.provider.clone());
+            params.model = Some(selection.collaboration_mode.settings.model.clone());
+        }
         params.daybreak_enabled = (config.daybreak_enabled && !config.ephemeral).then_some(true);
         if let Some(selected_profile) = selected_profile {
             params.runtime_workspace_roots = None;
@@ -960,6 +1114,37 @@ impl AppServerSession {
         started.task_tools_available = task_tools_available;
         if task_tools_available {
             self.remember_task_tool_thread(started.session.thread_id);
+        }
+        if let Some(selection) = inherited_selection {
+            let confirmation = async {
+                if started.session.model_provider_id != selection.provider
+                    || started.session.model != selection.collaboration_mode.settings.model
+                {
+                    color_eyre::eyre::bail!(
+                        "The new thread did not apply the inherited provider and model"
+                    );
+                }
+                if !self
+                    .thread_settings_update(selection.update_params(started.session.thread_id))
+                    .await?
+                {
+                    color_eyre::eyre::bail!(
+                        "The server does not support confirming inherited model settings"
+                    );
+                }
+                Ok::<(), color_eyre::eyre::Report>(())
+            }
+            .await;
+            if let Err(error) = confirmation {
+                let _ = self.thread_unsubscribe(started.session.thread_id).await;
+                if started.turns.is_empty() {
+                    let _ = self.thread_archive(started.session.thread_id).await;
+                }
+                return Err(error).wrap_err(
+                    "New session settings were not confirmed; the previous session is unchanged",
+                );
+            }
+            selection.apply_to_session(&mut started.session);
         }
         Ok(started)
     }
@@ -1031,13 +1216,98 @@ impl AppServerSession {
         .await
     }
 
+    /// Fork and inject the side boundary on a request-only view. The live session
+    /// keeps receiving notifications and drawing frames while these RPCs run.
+    pub(crate) fn sidebar_fork(
+        &self,
+        settings: LocalSettings,
+        config: Config,
+        parent: ThreadId,
+        profile: Option<PermissionProfileSelection>,
+        preferred_storage: SideChatStorage,
+    ) -> impl Future<Output = Result<SidebarFork>> + Send + use<> {
+        let mut view = self
+            .request_view()
+            .with_thread_tool_transport(self.thread_tool_transport());
+        if self.task_tools_available(parent) {
+            view.remember_task_tool_thread(parent);
+        }
+        async move {
+            let mut storage = SideChatStorage::Temporary;
+            if preferred_storage == SideChatStorage::Attached
+                && view.attached_side_chat_query(parent).await?.is_some()
+                && {
+                    let thread = view.thread_read(parent, false).await?;
+                    !thread.ephemeral && thread.history_mode == ThreadHistoryMode::Paginated
+                }
+            {
+                storage = SideChatStorage::Attached;
+            }
+            let fork = view
+                .fork_side_thread(&settings, config.clone(), parent, profile.as_ref(), storage)
+                .await;
+            let thread = match fork {
+                Err(err)
+                    if storage == SideChatStorage::Attached
+                        && side_chat_history::is_attached_thread_store_unsupported(&err) =>
+                {
+                    storage = SideChatStorage::Temporary;
+                    view.fork_side_thread(&settings, config, parent, profile.as_ref(), storage)
+                        .await?
+                }
+                result => result?,
+            };
+            let child = thread.session.thread_id;
+            let items = storage.policy().fork_items();
+            let boundary = match view.thread_inject_items(child, items).await {
+                Ok(_) if storage == SideChatStorage::Attached => {
+                    match side_context_checkpoint(thread.session.rollout_path.as_deref()).await {
+                        Ok(Some(_)) => Ok(()),
+                        Ok(None) => Err("Side conversation context was not saved".to_string()),
+                        Err(err) => Err(err.to_string()),
+                    }
+                }
+                result => result.map(|_| ()).map_err(|err| err.to_string()),
+            };
+            if let Err(message) = &boundary
+                && storage == SideChatStorage::Attached
+            {
+                if let Err(error) = view.thread_delete(child).await {
+                    tracing::warn!(%child, %error, "failed to roll back attached side chat");
+                } else {
+                    color_eyre::eyre::bail!(
+                        "Failed to prepare side conversation {child}: {message}"
+                    );
+                }
+            }
+            Ok(SidebarFork {
+                thread,
+                boundary,
+                inherited_profile: profile.is_some(),
+                storage,
+                legacy: view.history_support == ThreadHistorySupport::LegacyOnly,
+            })
+        }
+    }
+
+    pub(crate) fn observe_sidebar_fork(&mut self, fork: &SidebarFork) {
+        if fork.legacy {
+            self.history_support = ThreadHistorySupport::LegacyOnly;
+        }
+        if fork.thread.task_tools_available {
+            self.remember_task_tool_thread(fork.thread.session.thread_id);
+        }
+    }
+
     pub(crate) async fn fork_side_thread(
         &mut self,
         local_settings: &LocalSettings,
-        config: Config,
+        mut config: Config,
         thread_id: ThreadId,
         selected_profile: Option<&PermissionProfileSelection>,
+        storage: SideChatStorage,
     ) -> Result<AppServerStartedThread> {
+        storage.configure_fork(&mut config);
         self.fork_thread_at_with_presentation(
             local_settings,
             config,
@@ -1045,7 +1315,7 @@ impl AppServerSession {
             /*last_turn_id*/ None,
             /*before_turn_id*/ None,
             ForkGoalContinuation::StartIfIdle,
-            ForkPresentation::SideConversation,
+            ForkPresentation::SideConversation(storage),
             selected_profile,
             ForkPermissionMode::InheritSaved,
             ForkConfigSource::Session,
@@ -1076,13 +1346,13 @@ impl AppServerSession {
                 .thread_read(thread_id, /*include_turns*/ false)
                 .await
                 .ok(),
-            ForkPresentation::SideConversation => None,
+            ForkPresentation::SideConversation(_) => None,
         };
         let exclude_turns = self.history_support == ThreadHistorySupport::Paginated
             && (fork_parent
                 .as_ref()
                 .is_some_and(|thread| thread.history_mode == ThreadHistoryMode::Paginated)
-                || presentation == ForkPresentation::SideConversation);
+                || presentation != ForkPresentation::Regular);
         let request_id = self.next_request_id();
         let session_config = if config.model.is_none() {
             // Avoid inferring a tier from the stale client default model.
@@ -1091,6 +1361,8 @@ impl AppServerSession {
             self.session_config_with_effective_service_tier(&config)
         };
         let mut params = ThreadForkParams {
+            attach_to_source: presentation
+                == ForkPresentation::SideConversation(SideChatStorage::Attached),
             last_turn_id,
             before_turn_id,
             defer_goal_continuation: goal_continuation == ForkGoalContinuation::DeferUntilNextTurn,
@@ -1102,6 +1374,10 @@ impl AppServerSession {
                 self.remote_cwd_override.as_deref(),
             )
         };
+        if params.attach_to_source {
+            params.thread_source =
+                Some(ThreadSource::Feature(ATTACHED_SIDE_CHAT_SOURCE.to_string()));
+        }
         params.model_provider = match config_source {
             ForkConfigSource::Local => self
                 .model_provider_override
@@ -1134,7 +1410,7 @@ impl AppServerSession {
         self.thread_tool_transport()
             .configure_mcp(&mut params.config);
         let response: ThreadForkResponse = match self
-            .client
+            .request_handle
             .request_typed(ClientRequest::ThreadFork {
                 request_id,
                 params: params.clone(),
@@ -1143,12 +1419,14 @@ impl AppServerSession {
         {
             Ok(response) => response,
             Err(TypedRequestError::Server { source, .. })
-                if params.exclude_turns && is_history_pagination_unsupported(&source) =>
+                if params.exclude_turns
+                    && !params.attach_to_source
+                    && is_history_pagination_unsupported(&source) =>
             {
                 self.history_support = ThreadHistorySupport::LegacyOnly;
                 params.exclude_turns = false;
                 let request_id = self.next_request_id();
-                self.client
+                self.request_handle
                     .request_typed(ClientRequest::ThreadFork { request_id, params })
                     .await
                     .map_err(|err| {
@@ -1199,7 +1477,7 @@ impl AppServerSession {
         if let Some(permissions) = selected_permissions {
             started.session.permission_profile = permissions;
         }
-        if presentation == ForkPresentation::SideConversation {
+        if presentation != ForkPresentation::Regular {
             started.session.daybreak_enabled = false;
         }
         started.session.fork_parent_title = fork_parent.and_then(|thread| thread.name);
@@ -1277,7 +1555,7 @@ impl AppServerSession {
         params: ThreadLoadedListParams,
     ) -> Result<ThreadLoadedListResponse> {
         let request_id = self.next_request_id();
-        self.client
+        self.request_handle
             .request_typed(ClientRequest::ThreadLoadedList { request_id, params })
             .await
             .wrap_err("failed to list loaded threads from app server")
@@ -1290,7 +1568,7 @@ impl AppServerSession {
     ) -> Result<Thread> {
         let request_id = self.next_request_id();
         let response = self
-            .client
+            .request_handle
             .request_typed::<ThreadReadResponse>(ClientRequest::ThreadRead {
                 request_id,
                 params: ThreadReadParams {
@@ -1300,14 +1578,19 @@ impl AppServerSession {
             })
             .await;
         let mut response: ThreadReadResponse = match response {
-            Ok(response) => return Ok(response.thread),
+            Ok(response) => {
+                if !include_turns {
+                    self.remember_read_state(thread_id, response.read_state);
+                }
+                return Ok(response.thread);
+            }
             Err(TypedRequestError::Server { source, .. })
                 if include_turns
                     && source.message
                         == "paginated threads do not support thread/read(includeTurns=true)" =>
             {
                 let request_id = self.next_request_id();
-                self.client
+                self.request_handle
                     .request_typed(ClientRequest::ThreadRead {
                         request_id,
                         params: ThreadReadParams {
@@ -1335,7 +1618,7 @@ impl AppServerSession {
     pub(crate) async fn thread_archive(&mut self, thread_id: ThreadId) -> Result<()> {
         let request_id = self.next_request_id();
         let _: ThreadArchiveResponse = self
-            .client
+            .request_handle
             .request_typed(ClientRequest::ThreadArchive {
                 request_id,
                 params: ThreadArchiveParams {
@@ -1350,7 +1633,7 @@ impl AppServerSession {
     pub(crate) async fn thread_delete(&mut self, thread_id: ThreadId) -> Result<()> {
         let request_id = self.next_request_id();
         let _: ThreadDeleteResponse = self
-            .client
+            .request_handle
             .request_typed(ClientRequest::ThreadDelete {
                 request_id,
                 params: ThreadDeleteParams {
@@ -1365,7 +1648,7 @@ impl AppServerSession {
     pub(crate) async fn thread_unarchive(&mut self, thread_id: ThreadId) -> Result<Thread> {
         let request_id = self.next_request_id();
         let response: ThreadUnarchiveResponse = self
-            .client
+            .request_handle
             .request_typed(ClientRequest::ThreadUnarchive {
                 request_id,
                 params: ThreadUnarchiveParams {
@@ -1383,7 +1666,7 @@ impl AppServerSession {
         branch: String,
     ) -> Result<ThreadMetadataUpdateResponse> {
         let request_id = self.next_request_id();
-        self.client
+        self.request_handle
             .request_typed(ClientRequest::ThreadMetadataUpdate {
                 request_id,
                 params: ThreadMetadataUpdateParams {
@@ -1410,7 +1693,7 @@ impl AppServerSession {
         }
         let request_id = self.next_request_id();
         match self
-            .client
+            .request_handle
             .request_typed::<ThreadSettingsUpdateResponse>(ClientRequest::ThreadSettingsUpdate {
                 request_id,
                 params,
@@ -1444,7 +1727,7 @@ impl AppServerSession {
             .collect::<std::result::Result<Vec<_>, _>>()
             .wrap_err("failed to encode thread/inject_items payload")?;
         let request_id = self.next_request_id();
-        self.client
+        self.request_handle
             .request_typed(ClientRequest::ThreadInjectItems {
                 request_id,
                 params: ThreadInjectItemsParams {
@@ -1460,6 +1743,7 @@ impl AppServerSession {
     pub(crate) async fn turn_start(
         &mut self,
         thread_id: ThreadId,
+        turn_trigger: &str,
         client_user_message_id: String,
         items: Vec<UserInput>,
         cwd: PathBuf,
@@ -1478,13 +1762,13 @@ impl AppServerSession {
         let request_id = self.next_request_id();
         let (sandbox_policy, permissions) =
             turn_permissions_overrides(permissions_override, cwd.as_path())?;
-        self.client
+        self.request_handle
             .request_typed(ClientRequest::TurnStart {
                 request_id,
                 params: TurnStartParams {
                     disabled_plugin_ids: None,
                     thread_id: thread_id.to_string(),
-                    turn_trigger: Some("user".to_string()),
+                    turn_trigger: Some(turn_trigger.to_string()),
                     parent_turn_id: None,
                     root_turn_id: None,
                     client_user_message_id: Some(client_user_message_id),
@@ -1523,7 +1807,7 @@ impl AppServerSession {
     ) -> std::result::Result<(), TypedRequestError> {
         let request_id = self.next_request_id();
         let _: TurnInterruptResponse = self
-            .client
+            .request_handle
             .request_typed(ClientRequest::TurnInterrupt {
                 request_id,
                 params: TurnInterruptParams {
@@ -1550,7 +1834,7 @@ impl AppServerSession {
         items: Vec<UserInput>,
     ) -> std::result::Result<TurnSteerResponse, TypedRequestError> {
         let request_id = self.next_request_id();
-        self.client
+        self.request_handle
             .request_typed(ClientRequest::TurnSteer {
                 request_id,
                 params: TurnSteerParams {
@@ -1566,14 +1850,37 @@ impl AppServerSession {
             .await
     }
 
+    pub(crate) fn automatic_thread_name_writer(
+        &mut self,
+        thread_id: ThreadId,
+    ) -> AutomaticThreadName {
+        self.automatic_name_writes
+            .retain(|_, gate| Arc::strong_count(gate) > 1);
+        let session = self.request_view();
+        let gate = self
+            .automatic_name_writes
+            .entry(thread_id)
+            .or_insert_with(|| Arc::new(Semaphore::new(1)));
+        AutomaticThreadName {
+            session,
+            thread_id,
+            gate: Arc::clone(gate),
+        }
+    }
+
     pub(crate) async fn thread_set_name(
         &mut self,
         thread_id: ThreadId,
         name: String,
     ) -> Result<()> {
+        let gate = self.automatic_name_writes.get(&thread_id).cloned();
+        let _permit = match &gate {
+            Some(gate) => Some(gate.acquire().await?),
+            None => None,
+        };
         let request_id = self.next_request_id();
         let _: ThreadSetNameResponse = self
-            .client
+            .request_handle
             .request_typed(ClientRequest::ThreadSetName {
                 request_id,
                 params: ThreadSetNameParams {
@@ -1583,6 +1890,10 @@ impl AppServerSession {
             })
             .await
             .wrap_err("thread/name/set failed in TUI")?;
+        if let Some(gate) = gate.as_ref() {
+            gate.close();
+            self.automatic_name_writes.remove(&thread_id);
+        }
         Ok(())
     }
 
@@ -1593,7 +1904,7 @@ impl AppServerSession {
     ) -> Result<()> {
         let request_id = self.next_request_id();
         let _: ThreadMemoryModeSetResponse = self
-            .client
+            .request_handle
             .request_typed(ClientRequest::ThreadMemoryModeSet {
                 request_id,
                 params: ThreadMemoryModeSetParams {
@@ -1609,7 +1920,7 @@ impl AppServerSession {
     pub(crate) async fn memory_reset(&mut self) -> Result<()> {
         let request_id = self.next_request_id();
         let _: MemoryResetResponse = self
-            .client
+            .request_handle
             .request_typed(ClientRequest::MemoryReset {
                 request_id,
                 params: None,
@@ -1624,7 +1935,7 @@ impl AppServerSession {
         thread_id: ThreadId,
     ) -> Result<ThreadGoalGetResponse> {
         let request_id = self.next_request_id();
-        self.client
+        self.request_handle
             .request_typed(ClientRequest::ThreadGoalGet {
                 request_id,
                 params: ThreadGoalGetParams {
@@ -1643,7 +1954,7 @@ impl AppServerSession {
         token_budget: Option<Option<i64>>,
     ) -> Result<ThreadGoalSetResponse> {
         let request_id = self.next_request_id();
-        self.client
+        self.request_handle
             .request_typed(ClientRequest::ThreadGoalSet {
                 request_id,
                 params: ThreadGoalSetParams {
@@ -1663,7 +1974,7 @@ impl AppServerSession {
         thread_id: ThreadId,
     ) -> Result<ThreadGoalClearResponse> {
         let request_id = self.next_request_id();
-        self.client
+        self.request_handle
             .request_typed(ClientRequest::ThreadGoalClear {
                 request_id,
                 params: ThreadGoalClearParams {
@@ -1682,7 +1993,7 @@ impl AppServerSession {
     pub(crate) async fn thread_unsubscribe(&mut self, thread_id: ThreadId) -> Result<()> {
         let request_id = self.next_request_id();
         let _: ThreadUnsubscribeResponse = self
-            .client
+            .request_handle
             .request_typed(ClientRequest::ThreadUnsubscribe {
                 request_id,
                 params: ThreadUnsubscribeParams {
@@ -1697,7 +2008,7 @@ impl AppServerSession {
     pub(crate) async fn thread_compact_start(&mut self, thread_id: ThreadId) -> Result<()> {
         let request_id = self.next_request_id();
         let _: ThreadCompactStartResponse = self
-            .client
+            .request_handle
             .request_typed(ClientRequest::ThreadCompactStart {
                 request_id,
                 params: ThreadCompactStartParams {
@@ -1716,7 +2027,7 @@ impl AppServerSession {
     ) -> Result<()> {
         let request_id = self.next_request_id();
         let _: ThreadShellCommandResponse = self
-            .client
+            .request_handle
             .request_typed(ClientRequest::ThreadShellCommand {
                 request_id,
                 params: ThreadShellCommandParams {
@@ -1737,7 +2048,7 @@ impl AppServerSession {
     ) -> Result<()> {
         let request_id = self.next_request_id();
         let _: ThreadApproveGuardianDeniedActionResponse = self
-            .client
+            .request_handle
             .request_typed(ClientRequest::ThreadApproveGuardianDeniedAction {
                 request_id,
                 params: ThreadApproveGuardianDeniedActionParams {
@@ -1757,7 +2068,7 @@ impl AppServerSession {
     ) -> Result<()> {
         let request_id = self.next_request_id();
         let _: ThreadBackgroundTerminalsCleanResponse = self
-            .client
+            .request_handle
             .request_typed(ClientRequest::ThreadBackgroundTerminalsClean {
                 request_id,
                 params: ThreadBackgroundTerminalsCleanParams {
@@ -1775,7 +2086,7 @@ impl AppServerSession {
         target: ReviewTarget,
     ) -> Result<ReviewStartResponse> {
         let request_id = self.next_request_id();
-        self.client
+        self.request_handle
             .request_typed(ClientRequest::ReviewStart {
                 request_id,
                 params: ReviewStartParams {
@@ -1792,8 +2103,9 @@ impl AppServerSession {
         &mut self,
         params: SkillsListParams,
     ) -> Result<SkillsListResponse> {
+        self.pending_side_skills_refresh = None;
         let request_id = self.next_request_id();
-        self.client
+        self.request_handle
             .request_typed(ClientRequest::SkillsList { request_id, params })
             .await
             .wrap_err("skills/list failed in TUI")
@@ -1802,7 +2114,7 @@ impl AppServerSession {
     pub(crate) async fn reload_user_config(&mut self) -> Result<()> {
         let request_id = self.next_request_id();
         let _: ConfigWriteResponse = self
-            .client
+            .request_handle
             .request_typed(ClientRequest::ConfigBatchWrite {
                 request_id,
                 params: ConfigBatchWriteParams {
@@ -1822,21 +2134,30 @@ impl AppServerSession {
         request_id: RequestId,
         result: serde_json::Value,
     ) -> std::io::Result<()> {
-        self.client.resolve_server_request(request_id, result).await
+        let client = self.connection_owner.as_ref().ok_or_else(|| {
+            std::io::Error::other("request-only session cannot resolve server requests")
+        })?;
+        client.resolve_server_request(request_id, result).await
     }
 
     pub(crate) async fn shutdown(self) -> std::io::Result<()> {
-        self.client.shutdown().await
+        match self.connection_owner {
+            Some(client) => client.shutdown().await,
+            None => Ok(()),
+        }
     }
 
     pub(crate) fn request_handle(&self) -> AppServerRequestHandle {
-        self.client.request_handle()
+        self.request_handle.clone()
     }
 
     pub(crate) fn next_request_id(&mut self) -> RequestId {
         let request_id = self.next_request_id;
         self.next_request_id += 1;
-        RequestId::Integer(request_id)
+        self.request_id_namespace.map_or_else(
+            || RequestId::Integer(request_id),
+            |namespace| RequestId::String(format!("picker-{namespace}-{request_id}")),
+        )
     }
 }
 
@@ -2268,9 +2589,9 @@ fn thread_resume_params_from_config(
             config.model.clone(),
             provider_selection::explicit_provider(&config),
         ),
-        ResumeModelSettings::RestoreFromThread | ResumeModelSettings::PreserveExistingThread => {
-            (None, None)
-        }
+        ResumeModelSettings::RestoreFromThread
+        | ResumeModelSettings::PreserveExistingThread
+        | ResumeModelSettings::PreserveSideConversation => (None, None),
     };
     let mut params = ThreadResumeParams {
         thread_id: thread_id.to_string(),
@@ -2704,6 +3025,47 @@ mod tests {
             .build()
             .await
             .expect("config should build")
+    }
+
+    #[test]
+    fn picker_views_use_distinct_request_id_namespaces() {
+        let (client, _commands, _events) = xdcode_app_server_client::CloudClient::channel(1);
+        let mut session = AppServerSession::new(
+            crate::backend_id::BackendId::new(),
+            AppServerClient::Cloud(client),
+            ThreadParamsMode::Remote,
+        );
+        let mut first = session.request_view();
+        let mut second = session.request_view();
+
+        let first_id = first.next_request_id();
+        assert_ne!(session.next_request_id(), first_id);
+        assert_ne!(first_id, second.next_request_id());
+    }
+
+    #[tokio::test]
+    async fn picker_view_shutdown_preserves_live_event_stream() {
+        let (client, _commands, events) = xdcode_app_server_client::CloudClient::channel(1);
+        let backend_id = crate::backend_id::BackendId::new();
+        let mut session = AppServerSession::new(
+            backend_id,
+            AppServerClient::Cloud(client),
+            ThreadParamsMode::Remote,
+        );
+
+        session.request_view().shutdown().await.unwrap();
+        events
+            .send(xdcode_app_server_client::AppServerEvent::Disconnected {
+                message: "still live".to_string(),
+            })
+            .unwrap();
+
+        let event = session.next_event().await.unwrap();
+        assert_eq!(event.backend_id, backend_id);
+        assert!(matches!(
+            event.event,
+            xdcode_app_server_client::AppServerEvent::Disconnected { .. }
+        ));
     }
 
     #[tokio::test]
@@ -3950,6 +4312,7 @@ mod tests {
                 ephemeral_config,
                 source_thread_id,
                 /*selected_profile*/ None,
+                crate::app_server_session::SideChatStorage::Temporary,
             )
             .await?;
 
@@ -4077,6 +4440,7 @@ mod tests {
                 side_config,
                 source_thread_id,
                 /*selected_profile*/ None,
+                crate::app_server_session::SideChatStorage::Temporary,
             )
             .await?;
 
@@ -4156,6 +4520,7 @@ mod tests {
                 config,
                 thread_id,
                 /*selected_profile*/ None,
+                crate::app_server_session::SideChatStorage::Temporary,
             )
             .await?;
 

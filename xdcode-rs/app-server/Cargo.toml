@@ -25,6 +25,7 @@ doctest = false
 workspace = true
 
 [dependencies]
+xdcode-agent-message-board-host = { workspace = true }
 xdcode-utils-process = { workspace = true }
 anyhow = { workspace = true }
 base64 = { workspace = true }
@@ -132,6 +133,7 @@ libc = { workspace = true }
 xdcode-windows-sandbox = { workspace = true }
 
 [dev-dependencies]
+xdcode-message-board = { workspace = true }
 zip = { workspace = true }
 xdcode-uds = { workspace = true }
 app_test_support = { workspace = true }

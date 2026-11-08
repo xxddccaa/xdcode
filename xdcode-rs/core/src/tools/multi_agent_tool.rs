@@ -15,7 +15,7 @@ use xdcode_tools::ToolName;
 use xdcode_tools::ToolSearchInfo;
 use xdcode_tools::ToolSpec;
 
-pub(crate) const MULTI_AGENT_V2_NAMESPACE_DESCRIPTION: &str =
+pub const MULTI_AGENT_V2_NAMESPACE_DESCRIPTION: &str =
     "Tools for spawning and managing sub-agents.";
 
 pub(super) fn multi_agent_v2_handler(

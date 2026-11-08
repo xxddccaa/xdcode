@@ -29,7 +29,9 @@ uuid = { workspace = true, features = ["serde", "v7"] }
 
 [dev-dependencies]
 xdcode-attachment-store = { workspace = true }
+xdcode-message-board-mcp = { workspace = true }
 xdcode-utils-output-truncation = { workspace = true }
 pretty_assertions = { workspace = true }
+rmcp = { workspace = true, features = ["client", "server", "transport-async-rw"] }
 tempfile = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["io-util", "macros", "rt-multi-thread"] }

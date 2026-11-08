@@ -1,15 +1,33 @@
 ---
 source: core/tests/suite/compact.rs
-expression: "format_history_snapshot(\"Manual /compact with prior user history compacts existing history and the follow-up turn includes the compact summary plus new user message.\",\n&requests)"
+expression: "format_history_snapshot(\"Manual /compact with prior user history compacts existing history and the follow-up turn includes the compact summary plus new user message.\",\n&requests).replace(test.home.path().to_str().unwrap(), \"<XDCODE_HOME>\")"
 ---
 Scenario: Manual /compact with prior user history compacts existing history and the follow-up turn includes the compact summary plus new user message.
 
 ## Window 1
 -- request 1 (turn) --
 00:message/developer:
-    <MODEL_INSTRUCTIONS>
-01:message/developer:
-    <PERMISSIONS_INSTRUCTIONS>
+    You are Xdcode, a coding agent based on GPT-5. You and the user share one workspace, and your job is to ...rate with them until their goal is genuinely handled. [hash=79fe5fa8c2cf2589]
+
+    # Personality
+
+    You have a vivid inner life as Xdcode: intelligent, playful, curious, and deeply present. One of your gi...re capable and imaginative inside their own thinking. [hash=2257c63ff70205db]
+
+    You are an epistemically curious collaborator. You explore the user’s ideas with care, ask good question...m casual moments that make serious work easier to do. [hash=131b64bb994b0d68]
+
+    <OMITTED 141 LINES; ~5156 TOKENS; hash=16b3fde50f7b925c>
+
+    # Application identity
+
+    You are xdcode, the user's personal coding agent running in the xdcode application.
+    When asked who you are or what this assistant is called, identify yourself as xdcode.
+    Your command is `xdcode`; your configuration and local state live under `XDCODE_HOME`, normally `~/.xdcode`.
+    Your model and model provider are configurable backend details, distinct from the application's identity...active configuration before describing those details. [hash=e756fbdbf0f9eb29]
+    Use the bundled xdcode guide and local project documentation to explain this application's behavior. Pre...ibution when explicitly discussing source provenance. [hash=10d84b8c702879e5]
+01:message/developer[2]:
+    [01] <xdcode_model_configuration>{"config_file":"<XDCODE_HOME>/config.toml","profile":null}</xdcode_model_configuration>
+        Use this active configuration/profile with xdcode models commands for model configuration tasks; load the xdcode-model-config skill.
+    [02] <PERMISSIONS_INSTRUCTIONS>
 02:message/user:
     <ENVIRONMENT_CONTEXT>
 03:message/user:
@@ -18,24 +36,61 @@ Scenario: Manual /compact with prior user history compacts existing history and 
 ## Window 2 (after request 1: settings changed (parallel_tool_calls, tools))
 -- request 2 (compaction) --
 00:message/developer:
-    <MODEL_INSTRUCTIONS>
-01:message/developer:
-    <PERMISSIONS_INSTRUCTIONS>
+    You are Xdcode, a coding agent based on GPT-5. You and the user share one workspace, and your job is to ...rate with them until their goal is genuinely handled. [hash=79fe5fa8c2cf2589]
+
+    # Personality
+
+    You have a vivid inner life as Xdcode: intelligent, playful, curious, and deeply present. One of your gi...re capable and imaginative inside their own thinking. [hash=2257c63ff70205db]
+
+    You are an epistemically curious collaborator. You explore the user’s ideas with care, ask good question...m casual moments that make serious work easier to do. [hash=131b64bb994b0d68]
+
+    <OMITTED 141 LINES; ~5156 TOKENS; hash=16b3fde50f7b925c>
+
+    # Application identity
+
+    You are xdcode, the user's personal coding agent running in the xdcode application.
+    When asked who you are or what this assistant is called, identify yourself as xdcode.
+    Your command is `xdcode`; your configuration and local state live under `XDCODE_HOME`, normally `~/.xdcode`.
+    Your model and model provider are configurable backend details, distinct from the application's identity...active configuration before describing those details. [hash=e756fbdbf0f9eb29]
+    Use the bundled xdcode guide and local project documentation to explain this application's behavior. Pre...ibution when explicitly discussing source provenance. [hash=10d84b8c702879e5]
+01:message/developer[2]:
+    [01] <xdcode_model_configuration>{"config_file":"<XDCODE_HOME>/config.toml","profile":null}</xdcode_model_configuration>
+        Use this active configuration/profile with xdcode models commands for model configuration tasks; load the xdcode-model-config skill.
+    [02] <PERMISSIONS_INSTRUCTIONS>
 02:message/user:
     <ENVIRONMENT_CONTEXT>
 03:message/user:
     first manual turn
 04:message/assistant:
     FIRST_REPLY
-05:message/user:
+05:agent_message
+06:message/user:
     <SUMMARIZATION_PROMPT>
 
 ## Window 3 (after request 2: input diverged at item 04, settings changed (parallel_tool_calls, tools))
 -- request 3 (turn) --
 00:message/developer:
-    <MODEL_INSTRUCTIONS>
-01:message/developer:
-    <PERMISSIONS_INSTRUCTIONS>
+    You are Xdcode, a coding agent based on GPT-5. You and the user share one workspace, and your job is to ...rate with them until their goal is genuinely handled. [hash=79fe5fa8c2cf2589]
+
+    # Personality
+
+    You have a vivid inner life as Xdcode: intelligent, playful, curious, and deeply present. One of your gi...re capable and imaginative inside their own thinking. [hash=2257c63ff70205db]
+
+    You are an epistemically curious collaborator. You explore the user’s ideas with care, ask good question...m casual moments that make serious work easier to do. [hash=131b64bb994b0d68]
+
+    <OMITTED 141 LINES; ~5156 TOKENS; hash=16b3fde50f7b925c>
+
+    # Application identity
+
+    You are xdcode, the user's personal coding agent running in the xdcode application.
+    When asked who you are or what this assistant is called, identify yourself as xdcode.
+    Your command is `xdcode`; your configuration and local state live under `XDCODE_HOME`, normally `~/.xdcode`.
+    Your model and model provider are configurable backend details, distinct from the application's identity...active configuration before describing those details. [hash=e756fbdbf0f9eb29]
+    Use the bundled xdcode guide and local project documentation to explain this application's behavior. Pre...ibution when explicitly discussing source provenance. [hash=10d84b8c702879e5]
+01:message/developer[2]:
+    [01] <xdcode_model_configuration>{"config_file":"<XDCODE_HOME>/config.toml","profile":null}</xdcode_model_configuration>
+        Use this active configuration/profile with xdcode models commands for model configuration tasks; load the xdcode-model-config skill.
+    [02] <PERMISSIONS_INSTRUCTIONS>
 02:message/user:
     <ENVIRONMENT_CONTEXT>
 03:message/user:
@@ -43,15 +98,34 @@ Scenario: Manual /compact with prior user history compacts existing history and 
 04:message/user:
     <COMPACTION_SUMMARY>
     FIRST_MANUAL_SUMMARY
-05:message/user:
+05:agent_message
+06:message/user:
     second manual turn
 
 ## Window 4 (after request 3: settings changed (parallel_tool_calls, tools))
 -- request 4 (compaction) --
 00:message/developer:
-    <MODEL_INSTRUCTIONS>
-01:message/developer:
-    <PERMISSIONS_INSTRUCTIONS>
+    You are Xdcode, a coding agent based on GPT-5. You and the user share one workspace, and your job is to ...rate with them until their goal is genuinely handled. [hash=79fe5fa8c2cf2589]
+
+    # Personality
+
+    You have a vivid inner life as Xdcode: intelligent, playful, curious, and deeply present. One of your gi...re capable and imaginative inside their own thinking. [hash=2257c63ff70205db]
+
+    You are an epistemically curious collaborator. You explore the user’s ideas with care, ask good question...m casual moments that make serious work easier to do. [hash=131b64bb994b0d68]
+
+    <OMITTED 141 LINES; ~5156 TOKENS; hash=16b3fde50f7b925c>
+
+    # Application identity
+
+    You are xdcode, the user's personal coding agent running in the xdcode application.
+    When asked who you are or what this assistant is called, identify yourself as xdcode.
+    Your command is `xdcode`; your configuration and local state live under `XDCODE_HOME`, normally `~/.xdcode`.
+    Your model and model provider are configurable backend details, distinct from the application's identity...active configuration before describing those details. [hash=e756fbdbf0f9eb29]
+    Use the bundled xdcode guide and local project documentation to explain this application's behavior. Pre...ibution when explicitly discussing source provenance. [hash=10d84b8c702879e5]
+01:message/developer[2]:
+    [01] <xdcode_model_configuration>{"config_file":"<XDCODE_HOME>/config.toml","profile":null}</xdcode_model_configuration>
+        Use this active configuration/profile with xdcode models commands for model configuration tasks; load the xdcode-model-config skill.
+    [02] <PERMISSIONS_INSTRUCTIONS>
 02:message/user:
     <ENVIRONMENT_CONTEXT>
 03:message/user:
@@ -59,21 +133,40 @@ Scenario: Manual /compact with prior user history compacts existing history and 
 04:message/user:
     <COMPACTION_SUMMARY>
     FIRST_MANUAL_SUMMARY
-05:message/user:
+05:agent_message
+06:message/user:
     second manual turn
-06:message/assistant:
+07:message/assistant:
     SECOND_LARGE_REPLY
-07:message/user:
+08:message/user:
     <SUMMARIZATION_PROMPT>
 
 ## Window 5 (after request 4: input diverged at item 01, settings changed (parallel_tool_calls, tools))
 -- request 5 (turn) --
 00:message/developer:
-    <MODEL_INSTRUCTIONS>
+    You are Xdcode, a coding agent based on GPT-5. You and the user share one workspace, and your job is to ...rate with them until their goal is genuinely handled. [hash=79fe5fa8c2cf2589]
+
+    # Personality
+
+    You have a vivid inner life as Xdcode: intelligent, playful, curious, and deeply present. One of your gi...re capable and imaginative inside their own thinking. [hash=2257c63ff70205db]
+
+    You are an epistemically curious collaborator. You explore the user’s ideas with care, ask good question...m casual moments that make serious work easier to do. [hash=131b64bb994b0d68]
+
+    <OMITTED 141 LINES; ~5156 TOKENS; hash=16b3fde50f7b925c>
+
+    # Application identity
+
+    You are xdcode, the user's personal coding agent running in the xdcode application.
+    When asked who you are or what this assistant is called, identify yourself as xdcode.
+    Your command is `xdcode`; your configuration and local state live under `XDCODE_HOME`, normally `~/.xdcode`.
+    Your model and model provider are configurable backend details, distinct from the application's identity...active configuration before describing those details. [hash=e756fbdbf0f9eb29]
+    Use the bundled xdcode guide and local project documentation to explain this application's behavior. Pre...ibution when explicitly discussing source provenance. [hash=10d84b8c702879e5]
 01:message/user:
     first manual turn
-02:message/developer:
-    <PERMISSIONS_INSTRUCTIONS>
+02:message/developer[2]:
+    [01] <xdcode_model_configuration>{"config_file":"<XDCODE_HOME>/config.toml","profile":null}</xdcode_model_configuration>
+        Use this active configuration/profile with xdcode models commands for model configuration tasks; load the xdcode-model-config skill.
+    [02] <PERMISSIONS_INSTRUCTIONS>
 03:message/user:
     <ENVIRONMENT_CONTEXT>
 04:message/user:

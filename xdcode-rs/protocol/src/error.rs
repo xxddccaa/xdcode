@@ -102,7 +102,7 @@ pub enum XdcodeErrorDetails {
     #[error("turn aborted. Something went wrong? Hit `/feedback` to report the issue.")]
     TurnAborted,
 
-    #[error("shared rollout token budget exhausted")]
+    #[error("budget reached")]
     SessionBudgetExceeded,
 
     /// Returned by ResponsesClient when the SSE stream disconnects or errors out **after** the HTTP

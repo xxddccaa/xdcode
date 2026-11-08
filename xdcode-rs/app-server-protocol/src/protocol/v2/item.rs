@@ -1551,6 +1551,7 @@ v2_enum_from_core! {
         #[default]
         Command,
         WriteStdin,
+        HumanCommand,
     }
 }
 

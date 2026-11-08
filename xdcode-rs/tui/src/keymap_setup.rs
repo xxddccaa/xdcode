@@ -822,6 +822,7 @@ mod tests {
     fn fast_mode_action_filter() -> KeymapActionFilter {
         KeymapActionFilter {
             fast_mode_enabled: true,
+            workspace_enabled: false,
         }
     }
 
@@ -1272,13 +1273,21 @@ mod tests {
 
     #[test]
     fn picker_all_tab_items_remain_searchable() {
-        let runtime = RuntimeKeymap::defaults();
-        let params = build_keymap_picker_params(&runtime, &TuiKeymap::default());
+        let keymap = TuiKeymap::default();
+        let runtime = RuntimeKeymap::for_session(&keymap, true).unwrap();
+        let params = build_keymap_picker_params_with_filter(
+            &runtime,
+            &keymap,
+            KeymapActionFilter {
+                workspace_enabled: true,
+                ..Default::default()
+            },
+        );
         let all_tab = selection_tab(&params, KEYMAP_ALL_TAB_ID);
         let snapshot = all_tab
             .items
             .iter()
-            .take(12)
+            .take(13)
             .map(|item| {
                 format!(
                     "{} | {} | {}",

@@ -1,8 +1,10 @@
 //! Retained response type for clients; independent builds never stage or upload feedback.
 
 use color_eyre::eyre::Result;
-use xdcode_app_server_client::{AppServerPath, AppServerRequestHandle};
-use xdcode_app_server_protocol::{FeedbackUploadParams, FeedbackUploadResponse};
+use xdcode_app_server_client::AppServerPath;
+use xdcode_app_server_client::AppServerRequestHandle;
+use xdcode_app_server_protocol::FeedbackUploadParams;
+use xdcode_app_server_protocol::FeedbackUploadResponse;
 use xdcode_feedback::XdcodeFeedback;
 
 pub(super) async fn fetch_feedback_upload(

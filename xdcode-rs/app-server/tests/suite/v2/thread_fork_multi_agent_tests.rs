@@ -4,7 +4,6 @@ use anyhow::Result;
 use app_test_support::MockResponsesConfig;
 use app_test_support::TestAppServer;
 use app_test_support::create_mock_responses_server_repeating_assistant;
-use app_test_support::write_models_cache_with_models;
 use core_test_support::load_default_config_for_test;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
@@ -47,7 +46,18 @@ async fn fork_before_first_turn_preserves_model_selected_multi_agent_version(
     let config = load_default_config_for_test(&xdcode_home).await;
     let mut model = xdcode_core::test_support::construct_model_info_offline("mock-model", &config);
     model.multi_agent_version = Some(MultiAgentVersion::V2);
-    write_models_cache_with_models(xdcode_home.path(), vec![model]).await?;
+    let catalog_path = xdcode_home.path().join("thread-model-catalog.json");
+    std::fs::write(
+        &catalog_path,
+        serde_json::to_vec(&serde_json::json!({"models": [model]}))?,
+    )?;
+    MockResponsesConfig::new(&server.uri())
+        .disable_feature(Feature::MultiAgentV2)
+        .with_root_config(&format!(
+            "model_catalog_json = {}",
+            serde_json::to_string(&catalog_path)?
+        ))
+        .write(xdcode_home.path())?;
     let mut mcp = TestAppServer::builder()
         .with_xdcode_home(xdcode_home.path())
         .build_initialized()

@@ -87,6 +87,14 @@ impl ChatWidget {
                 self.on_thread_settings_updated(notification);
             }
             ServerNotification::TurnStarted(notification) => {
+                if self
+                    .bottom_pane
+                    .dismiss_view_by_id(safety_recourse::VIEW_ID)
+                    && self.bottom_pane.no_modal_or_popup_active()
+                {
+                    self.on_modal_or_popup_closed();
+                }
+                self.safety_recourse = None;
                 if from_replay {
                     self.restore_realtime_transcripts_before_turn(&notification.turn.id);
                 } else {
@@ -106,6 +114,10 @@ impl ChatWidget {
                         self.on_replayed_task_started(notification.turn.started_at);
                     } else {
                         self.on_task_started();
+                        if self.turn_lifecycle.admitted_turn_id == self.turn_lifecycle.last_turn_id
+                        {
+                            self.turn_lifecycle.admitted_turn_id = None;
+                        }
                     }
                 }
             }
@@ -211,7 +223,7 @@ impl ChatWidget {
                             notification.error.additional_details,
                         );
                     }
-                } else {
+                } else if from_replay || !safety_recourse::defer_error(self, &notification) {
                     self.last_non_retry_error = Some((
                         notification.turn_id.clone(),
                         notification.error.message.clone(),
@@ -241,6 +253,11 @@ impl ChatWidget {
             }
             ServerNotification::ModelSafetyBufferingUpdated(notification) => {
                 self.on_model_safety_buffering_updated(notification, replay_kind)
+            }
+            ServerNotification::TurnModerationMetadata(notification) => {
+                if !from_replay {
+                    safety_recourse::on_metadata(self, notification);
+                }
             }
             ServerNotification::AuthRecoveryStarted(notification) => {
                 self.add_info_message(notification.message, /*hint*/ None)
@@ -388,7 +405,6 @@ impl ChatWidget {
             | ServerNotification::ExternalAgentConfigImportProgress(_)
             | ServerNotification::ExternalAgentConfigImportCompleted(_)
             | ServerNotification::FsChanged(_)
-            | ServerNotification::TurnModerationMetadata(_)
             | ServerNotification::FuzzyFileSearchSessionUpdated(_)
             | ServerNotification::FuzzyFileSearchSessionCompleted(_)
             | ServerNotification::ThreadRealtimeItemAdded(_)
@@ -425,11 +441,21 @@ impl ChatWidget {
         notification: TurnCompletedNotification,
         replay_kind: Option<ReplayKind>,
     ) {
+        if replay_kind.is_none()
+            && notification.turn.status != TurnStatus::InProgress
+            && self.turn_lifecycle.admitted_turn_id.as_deref()
+                == Some(notification.turn.id.as_str())
+        {
+            self.turn_lifecycle.admitted_turn_id = None;
+        }
         // User-message dedupe only suppresses the app-server echo of a prompt
         // this TUI already rendered locally. Once that turn ends, another
         // client can submit the same text and it still needs its own user cell.
         self.last_rendered_user_message_display = None;
         let mut question_drafts = None;
+        let live_turn =
+            replay_kind.is_none() && self.last_turn_id() == Some(notification.turn.id.as_str());
+        let mut recourse = self.safety_recourse.take_if(|_| live_turn);
         let was_replaying_turn_completion = self.thread_usage.replaying_turn_completion;
         self.thread_usage.replaying_turn_completion = replay_kind.is_some();
         match notification.turn.status {
@@ -499,13 +525,17 @@ impl ChatWidget {
                 } else {
                     TurnAbortReason::Interrupted
                 };
-                self.on_interrupted_turn(reason);
+                self.on_interrupted_server_turn(reason, &notification.turn.id);
             }
             TurnStatus::Failed => {
                 if replay_kind.is_none() {
                     question_drafts = self.take_question_drafts();
                 }
-                if let Some(error) = notification.turn.error {
+                let error = notification
+                    .turn
+                    .error
+                    .or_else(|| recourse.as_mut()?.deferred_error.take());
+                if let Some(error) = error {
                     if replay_kind.is_none()
                         && error.xdcode_error_info
                             == Some(AppServerXdcodeErrorInfo::MisalignmentPolicyViolation)
@@ -514,6 +544,8 @@ impl ChatWidget {
                             Some(notification.turn.id.clone()),
                             error.misalignment,
                         );
+                        self.last_non_retry_error = None;
+                    } else if safety_recourse::render_failure(self, recourse, &error) {
                         self.last_non_retry_error = None;
                     } else if self.last_non_retry_error.as_ref()
                         == Some(&(notification.turn.id.clone(), error.message.clone()))
@@ -683,4 +715,29 @@ impl ChatWidget {
             ),
         }
     }
+}
+
+/// Select the final reply that can be displayed when streaming events were missed.
+pub(crate) fn final_agent_message(
+    turn: &Turn,
+    realtime_delegated: bool,
+) -> Option<(&ThreadItem, &str)> {
+    turn.items.iter().rev().find_map(|item| match item {
+        ThreadItem::AgentMessage {
+            text,
+            phase: Some(MessagePhase::FinalAnswer) | None,
+            ..
+        } if !realtime_delegated || !realtime::is_private_realtime_agent_item(item) => {
+            Some((item, text.as_str()))
+        }
+        _ => None,
+    })
+}
+
+pub(crate) fn needs_agent_message(
+    last: Option<&(String, String)>,
+    turn: &str,
+    item: &ThreadItem,
+) -> bool {
+    last.is_none_or(|(turn_id, item_id)| turn_id != turn || item_id != item.id())
 }

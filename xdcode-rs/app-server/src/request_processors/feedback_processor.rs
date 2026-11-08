@@ -852,11 +852,8 @@ mod tests {
                         .expect("absolute feedback rollout directory"),
                     approval_policy: xdcode_protocol::protocol::AskForApproval::Never,
                     approvals_reviewer: None,
-                    sandbox_policy: xdcode_protocol::protocol::SandboxPolicy::new_read_only_policy(
-                    ),
-                    permission_profile: None,
+                    permission_profile: xdcode_protocol::models::PermissionProfile::read_only(),
                     active_permission_profile: None,
-                    file_system_sandbox_policy: None,
                     model: (*model).to_string(),
                     comp_hash: None,
                     collaboration_mode: None,

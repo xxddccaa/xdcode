@@ -56,17 +56,4 @@ where
         })
 }
 
-/// Construct a large test future outside its caller's poll frame before boxing it.
-/// `Box::pin(large_future())` can still reserve the future's full size on that stack.
-#[inline(never)]
-pub(crate) fn box_future<F: Future>(create: impl FnOnce() -> F) -> Pin<Box<F>> {
-    Box::pin(create())
-}
-
-// Keep boxed call sites shaped like ordinary calls, without closure indentation.
-macro_rules! boxed_future {
-    ($future:expr) => {
-        $crate::test_support::box_future(|| $future)
-    };
-}
-pub(crate) use boxed_future;
+pub(crate) use crate::boxed_future;

@@ -72,6 +72,7 @@ impl ChatWidget {
         self.bottom_pane.set_footer_hint_override(/*items*/ None);
         let current = self.bottom_pane.composer_draft_snapshot();
         if current.text != confirmed.text
+            || current.shell_mode != confirmed.shell_mode
             || current.text_elements != confirmed.text_elements
             || current.local_images != confirmed.local_images
             || current.remote_image_urls != confirmed.remote_image_urls

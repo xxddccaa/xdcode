@@ -873,10 +873,12 @@ async fn v2_reads_preserve_content_routes_with_bounded_installations() -> TestRe
             "next_cursor": null,
         }),
     );
-    assert_eq!(
-        call_tool(&tools, "installations", json!({"package": "e0/work"})).await?,
-        json!({"installations": locations, "next_cursor": null}),
-    );
+    for package in ["e0/work", first.name.as_str()] {
+        assert_eq!(
+            call_tool(&tools, "installations", json!({"package": package})).await?,
+            json!({"installations": locations, "next_cursor": null}),
+        );
+    }
     assert_eq!(
         call_tool(
             &tools,
@@ -922,15 +924,17 @@ async fn v2_reads_preserve_content_routes_with_bounded_installations() -> TestRe
         call_tool(&tools, "read", json!({"package": "e0/work"})).await?,
         read,
     );
-    assert_eq!(
-        call_tool(
-            &tools,
-            "read",
-            json!({"package": first.id.0, "source": source})
-        )
-        .await?,
-        selected,
-    );
+    for package in [&first.id.0, &first.name] {
+        assert_eq!(
+            call_tool(
+                &tools,
+                "read",
+                json!({"package": package, "source": source})
+            )
+            .await?,
+            selected,
+        );
+    }
     for source in [
         json!({"kind": "cloud"}),
         json!({"kind": "executor", "environment_id": "missing"}),

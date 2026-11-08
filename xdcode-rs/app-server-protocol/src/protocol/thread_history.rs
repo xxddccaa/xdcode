@@ -56,6 +56,7 @@ use xdcode_protocol::protocol::McpToolCallBeginEvent;
 use xdcode_protocol::protocol::McpToolCallEndEvent;
 use xdcode_protocol::protocol::PatchApplyBeginEvent;
 use xdcode_protocol::protocol::PatchApplyEndEvent;
+use xdcode_protocol::protocol::ThreadHistoryMode;
 use xdcode_protocol::protocol::ThreadRolledBackEvent;
 use xdcode_protocol::protocol::TurnAbortedEvent;
 use xdcode_protocol::protocol::TurnCompleteEvent;
@@ -356,13 +357,54 @@ impl ThreadHistoryBuilder {
             .map(|turn| turn.rollout_start_index)
     }
 
+    /// Keeps the latest assistant item in memory for live summaries. Full reconnects
+    /// load older text from history. Rollout replay uses the regular reducer.
+    pub fn handle_live_paginated_event(&mut self, event: &EventMsg) {
+        let previous_len = self
+            .current_turn
+            .as_ref()
+            .map_or(0, |turn| turn.items.len());
+        self.handle_event_for_history_mode(event, ThreadHistoryMode::Paginated);
+        if let EventMsg::ItemCompleted(completed) = event
+            && let xdcode_protocol::items::TurnItem::AgentMessage(item) = &completed.item
+            && let Some(turn) = self
+                .current_turn
+                .as_mut()
+                .filter(|turn| turn.id == completed.turn_id)
+        {
+            if turn.items.len() > previous_len {
+                if let Some(index) = turn.evictable_agent_item.replace(previous_len)
+                    && let ThreadItem::AgentMessage { text, .. } = &mut turn.items[index]
+                {
+                    *text = String::new();
+                }
+            } else if turn
+                .evictable_agent_item
+                .is_some_and(|index| turn.items[index].id() == item.id)
+            {
+                turn.evictable_agent_item = None;
+            }
+        }
+    }
+
     /// Shared reducer for persisted rollout replay and in-memory current-turn
     /// tracking used by running thread resume/rejoin.
     ///
     /// This function should handle all EventMsg variants that can be persisted in a rollout file.
     /// See `persisted_rollout_item` in `xdcode-rs/rollout/src/policy.rs`.
     pub fn handle_event(&mut self, event: &EventMsg) {
+        self.handle_event_for_history_mode(event, ThreadHistoryMode::Legacy);
+    }
+
+    /// Paginated live events retain canonical item IDs instead of their id-less legacy copies.
+    pub fn handle_event_for_history_mode(&mut self, event: &EventMsg, mode: ThreadHistoryMode) {
         match event {
+            EventMsg::UserMessage(_)
+            | EventMsg::AgentMessage(_)
+            | EventMsg::AgentReasoning(_)
+            | EventMsg::AgentReasoningRawContent(_)
+            | EventMsg::ContextCompacted(_)
+                if mode == ThreadHistoryMode::Paginated => {}
             EventMsg::UserMessage(payload) => self.handle_user_message(payload),
             EventMsg::AgentMessage(payload) => self.handle_agent_message(payload),
             EventMsg::AgentReasoning(payload) => self.handle_agent_reasoning(payload),
@@ -411,7 +453,7 @@ impl ThreadHistoryBuilder {
             EventMsg::EnteredReviewMode(payload) => self.handle_entered_review_mode(payload),
             EventMsg::ExitedReviewMode(payload) => self.handle_exited_review_mode(payload),
             EventMsg::ItemStarted(payload) => self.handle_item_started(payload),
-            EventMsg::ItemCompleted(payload) => self.handle_item_completed(payload),
+            EventMsg::ItemCompleted(payload) => self.handle_item_completed(payload, mode),
             EventMsg::HookStarted(_) | EventMsg::HookCompleted(_) => {}
             EventMsg::Error(payload) => self.handle_error(payload),
             EventMsg::TokenCount(_) => {}
@@ -623,8 +665,23 @@ impl ThreadHistoryBuilder {
         self.handle_materialized_item_lifecycle(&payload.turn_id, &payload.item);
     }
 
-    fn handle_item_completed(&mut self, payload: &ItemCompletedEvent) {
-        self.handle_materialized_item_lifecycle(&payload.turn_id, &payload.item);
+    fn handle_item_completed(&mut self, payload: &ItemCompletedEvent, mode: ThreadHistoryMode) {
+        if mode == ThreadHistoryMode::Paginated
+            && matches!(
+                payload.item,
+                xdcode_protocol::items::TurnItem::UserMessage(_)
+                    | xdcode_protocol::items::TurnItem::AgentMessage(_)
+                    | xdcode_protocol::items::TurnItem::Reasoning(_)
+                    | xdcode_protocol::items::TurnItem::ContextCompaction(_)
+            )
+        {
+            let item = ThreadItem::from(payload.item.clone());
+            if !matches!(&item, ThreadItem::AgentMessage { text, .. } if text.is_empty()) {
+                self.upsert_item_in_turn_id(&payload.turn_id, item);
+            }
+        } else {
+            self.handle_materialized_item_lifecycle(&payload.turn_id, &payload.item);
+        }
     }
 
     fn handle_materialized_item_lifecycle(
@@ -1428,6 +1485,7 @@ impl ThreadHistoryBuilder {
             root_turn_id: None,
             items: Vec::new(),
             item_index: TurnItemIndex::default(),
+            evictable_agent_item: None,
             error: None,
             status: TurnStatus::Completed,
             started_at: None,
@@ -1708,6 +1766,7 @@ struct PendingTurn {
     root_turn_id: Option<String>,
     items: Vec<ThreadItem>,
     item_index: TurnItemIndex,
+    evictable_agent_item: Option<usize>,
     error: Option<TurnError>,
     status: TurnStatus,
     started_at: Option<i64>,
@@ -4041,6 +4100,43 @@ mod tests {
                 }],
             }
         );
+    }
+
+    #[test]
+    fn live_paginated_turn_releases_superseded_agent_text() {
+        let mut builder = ThreadHistoryBuilder::new();
+        let turn_id = builder.ensure_turn().id.clone();
+        for (id, text) in [
+            ("a", "old"),
+            ("b", "draft"),
+            ("b", "corrected"),
+            ("c", "latest"),
+        ] {
+            builder.handle_live_paginated_event(&EventMsg::ItemCompleted(ItemCompletedEvent {
+                thread_id: ThreadId::default(),
+                turn_id: turn_id.clone(),
+                item: CoreTurnItem::AgentMessage(xdcode_protocol::items::AgentMessageItem {
+                    id: id.into(),
+                    content: vec![xdcode_protocol::items::AgentMessageContent::Text {
+                        text: text.into(),
+                    }],
+                    phase: None,
+                    memory_citation: None,
+                    delivery: None,
+                    questions: None,
+                }),
+                started_at_ms: None,
+                completed_at_ms: 1,
+            }));
+        }
+        let mut texts = builder.current_turn.unwrap().items.into_iter().map(|item| {
+            let ThreadItem::AgentMessage { text, .. } = item else {
+                panic!("expected assistant item")
+            };
+            text
+        });
+        assert_eq!(texts.next().unwrap().capacity(), 0);
+        assert_eq!(texts.collect::<Vec<_>>(), ["corrected", "latest"]);
     }
 
     #[test]

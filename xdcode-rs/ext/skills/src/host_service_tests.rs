@@ -7,6 +7,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::Weak;
 use tempfile::TempDir;
 use xdcode_config::CONFIG_TOML_FILE;
 use xdcode_config::ConfigLayerEntry;
@@ -25,6 +26,83 @@ use xdcode_utils_path_uri::PathUri;
 use xdcode_utils_plugins::PluginIdentity;
 use xdcode_utils_plugins::PluginSkillRoot;
 use xdcode_utils_plugins::SkillDiscoveryMode;
+
+#[tokio::test]
+async fn local_host_skills_and_cached_reads_obey_the_current_filesystem_permissions() {
+    use xdcode_exec_server::EnvironmentAccess;
+    use xdcode_exec_server::FileSystemSandboxContext;
+    use xdcode_protocol::models::PermissionProfile;
+    use xdcode_protocol::permissions::FileSystemAccessMode;
+    use xdcode_protocol::permissions::FileSystemPath;
+    use xdcode_protocol::permissions::FileSystemSandboxEntry;
+
+    let home = tempfile::tempdir().expect("skill home");
+    let cwd = tempfile::tempdir().expect("repository");
+    let skill_root = home.path().join("skills/demo");
+    fs::create_dir_all(&skill_root).expect("skill directory");
+    fs::write(
+        skill_root.join("SKILL.md"),
+        "---\nname: demo\ndescription: Demo.\n---\nPrivate skill body\n",
+    )
+    .expect("skill");
+    let cwd_uri = PathUri::from_host_native_path(cwd.path()).expect("cwd URI");
+    let service = HostSkillsService::new(home.path().abs(), false);
+    let input = HostSkillsLoadInput::new(cwd.path().abs(), Vec::new(), config_stack(&home, ""));
+    let unrestricted = FileSystemEnvironmentAccessor::unrestricted(&LOCAL_FS);
+    let snapshot = service
+        .snapshot_for_config(&input, Some(&unrestricted))
+        .await;
+    let skill = snapshot
+        .outcome()
+        .skills
+        .iter()
+        .find(|skill| skill.name == "demo")
+        .expect("user skill");
+    let initial = PermissionProfile::read_only();
+    let mut policy = initial.file_system_sandbox_policy();
+    policy.entries.push(FileSystemSandboxEntry {
+        path: FileSystemPath::Path {
+            path: PathUri::from_host_native_path(home.path()).expect("home URI"),
+        },
+        access: FileSystemAccessMode::Deny,
+        missing_path_behavior: None,
+    });
+    let permissions = PermissionProfile::from_runtime_permissions_with_enforcement(
+        initial.enforcement(),
+        &policy,
+        initial.network_sandbox_policy(),
+    );
+    let denied = FileSystemEnvironmentAccessor::new(
+        &LOCAL_FS,
+        FileSystemSandboxContext::from_permission_profile(permissions, cwd_uri),
+    );
+    let accessors: [&dyn EnvironmentAccess; 1] = [&denied];
+    assert!(
+        snapshot
+            .outcome()
+            .read_skill_text(skill, &accessors)
+            .await
+            .is_err()
+    );
+    let hidden = service.snapshot_for_config(&input, Some(&denied)).await;
+    assert!(
+        !hidden
+            .outcome()
+            .skills
+            .iter()
+            .any(|skill| skill.name == "demo")
+    );
+    let restored = service
+        .snapshot_for_config(&input, Some(&unrestricted))
+        .await;
+    assert!(
+        restored
+            .outcome()
+            .skills
+            .iter()
+            .any(|skill| skill.name == "demo")
+    );
+}
 
 #[derive(Default)]
 struct TestPluginSkillSnapshotCache {
@@ -175,7 +253,10 @@ async fn skills_for_config_with_stack(
         config_layer_stack.clone(),
     );
     skills_service
-        .snapshot_for_config(&skills_input, Some(Arc::clone(&LOCAL_FS)))
+        .snapshot_for_config(
+            &skills_input,
+            Some(&xdcode_exec_server::FileSystemEnvironmentAccessor::unrestricted(&LOCAL_FS)),
+        )
         .await
         .outcome()
         .clone()
@@ -248,7 +329,10 @@ async fn skills_for_config_bounds_plugin_generations_and_preserves_live_snapshot
             .clone()
             .with_plugin_skill_snapshots(Some(SkillRootSnapshots::new(owner)));
         let snapshot = skills_service
-            .snapshot_for_config(&input, Some(Arc::clone(&LOCAL_FS)))
+            .snapshot_for_config(
+                &input,
+                Some(&xdcode_exec_server::FileSystemEnvironmentAccessor::unrestricted(&LOCAL_FS)),
+            )
             .await;
 
         if generation == 0 {
@@ -260,7 +344,12 @@ async fn skills_for_config_bounds_plugin_generations_and_preserves_live_snapshot
         if generation == CONFIG_SKILLS_CACHE_CAPACITY - 1 {
             let (input, snapshot) = recent.as_ref().expect("first generation");
             let reused = skills_service
-                .snapshot_for_config(input, Some(Arc::clone(&LOCAL_FS)))
+                .snapshot_for_config(
+                    input,
+                    Some(
+                        &xdcode_exec_server::FileSystemEnvironmentAccessor::unrestricted(&LOCAL_FS),
+                    ),
+                )
                 .await;
             assert!(std::ptr::eq(snapshot.outcome(), reused.outcome()));
         }
@@ -350,7 +439,10 @@ async fn snapshot_for_config_merges_extension_host_and_legacy_plugin_roots() {
     );
 
     let snapshot = skills_service
-        .snapshot_for_config(&input, Some(Arc::clone(&LOCAL_FS)))
+        .snapshot_for_config(
+            &input,
+            Some(&xdcode_exec_server::FileSystemEnvironmentAccessor::unrestricted(&LOCAL_FS)),
+        )
         .await;
     let skills = snapshot
         .outcome()
@@ -514,7 +606,10 @@ async fn skills_for_config_refreshes_cache_when_remote_plugin_id_changes() {
     )
     .with_plugin_skill_snapshots(Some(test_plugin_skill_snapshots()));
     let plugin_snapshot = skills_service
-        .snapshot_for_config(&plugin_input, Some(Arc::clone(&LOCAL_FS)))
+        .snapshot_for_config(
+            &plugin_input,
+            Some(&xdcode_exec_server::FileSystemEnvironmentAccessor::unrestricted(&LOCAL_FS)),
+        )
         .await;
     fs::write(
         &skill_path,
@@ -741,11 +836,11 @@ async fn skills_for_config_disables_plugin_skills_by_name() {
 async fn skills_for_cwd_loads_repo_and_user_roots_with_local_fs() {
     let xdcode_home = tempfile::tempdir().expect("tempdir");
     let cwd = tempfile::tempdir().expect("tempdir");
-    let repo_dot_xdcode = cwd.path().join(".xdcode");
-    fs::create_dir_all(&repo_dot_xdcode).expect("create repo config dir");
+    let repo_dot_codex = cwd.path().join(".xdcode");
+    fs::create_dir_all(&repo_dot_codex).expect("create repo config dir");
 
     write_user_skill(&xdcode_home, "user", "user-skill", "from local user root");
-    let repo_skill_dir = repo_dot_xdcode.join("skills/repo");
+    let repo_skill_dir = repo_dot_codex.join("skills/repo");
     fs::create_dir_all(&repo_skill_dir).expect("create repo skill dir");
     fs::write(
         repo_skill_dir.join("SKILL.md"),
@@ -758,7 +853,7 @@ async fn skills_for_cwd_loads_repo_and_user_roots_with_local_fs() {
             user_config_layer(&xdcode_home, ""),
             ConfigLayerEntry::new(
                 ConfigLayerSource::Project {
-                    dot_xdcode_folder: repo_dot_xdcode.abs(),
+                    dot_xdcode_folder: repo_dot_codex.abs(),
                 },
                 toml::Value::Table(toml::map::Map::new()),
             ),
@@ -798,21 +893,51 @@ async fn skills_for_cwd_loads_repo_and_user_roots_with_local_fs() {
     assert!(loaded_names.contains("repo-skill"));
     let other_file_system: Arc<dyn xdcode_exec_server::ExecutorFileSystem> =
         Arc::new(xdcode_exec_server::LocalFileSystem::unsandboxed());
+    let other_access = FileSystemEnvironmentAccessor::unrestricted(&other_file_system);
     let other_snapshot = skills_service
-        .snapshot_for_config(&skills_input, Some(other_file_system))
+        .snapshot_for_config(&skills_input, Some(&other_access))
         .await;
     assert!(!std::ptr::eq(snapshot.outcome(), other_snapshot.outcome()));
+    let outcome = other_snapshot.outcome();
+    let repo_skill = outcome
+        .skills
+        .iter()
+        .find(|skill| skill.name == "repo-skill")
+        .unwrap();
+    let repo_skill_path = repo_skill.path_to_skills_md.to_abs_path().unwrap();
+    assert_eq!(
+        outcome.implicit_skill_for_doc_path(&repo_skill_path),
+        Some(repo_skill)
+    );
+    assert_eq!(
+        outcome.implicit_skill_for_scripts_dir(&repo_skill_path.parent().unwrap().join("scripts")),
+        Some(repo_skill)
+    );
+    let remote_snapshot = skills_service
+        .snapshot_for_config(
+            &skills_input.with_environment_id("remote"),
+            Some(&other_access),
+        )
+        .await;
+    let remote_outcome = remote_snapshot.outcome();
+    for skill in &remote_outcome.skills {
+        assert_eq!(
+            remote_outcome
+                .implicit_skill_for_doc_path(&skill.path_to_skills_md.to_abs_path().unwrap()),
+            (skill.scope != SkillScope::Repo).then_some(skill)
+        );
+    }
 }
 
 #[tokio::test]
 async fn skills_for_cwd_without_fs_skips_repo_roots() {
     let xdcode_home = tempfile::tempdir().expect("tempdir");
     let cwd = tempfile::tempdir().expect("tempdir");
-    let repo_dot_xdcode = cwd.path().join(".xdcode");
-    fs::create_dir_all(&repo_dot_xdcode).expect("create repo config dir");
+    let repo_dot_codex = cwd.path().join(".xdcode");
+    fs::create_dir_all(&repo_dot_codex).expect("create repo config dir");
 
     write_user_skill(&xdcode_home, "user", "user-skill", "from local user root");
-    let repo_skill_dir = repo_dot_xdcode.join("skills/repo");
+    let repo_skill_dir = repo_dot_codex.join("skills/repo");
     fs::create_dir_all(&repo_skill_dir).expect("create repo skill dir");
     fs::write(
         repo_skill_dir.join("SKILL.md"),
@@ -825,7 +950,7 @@ async fn skills_for_cwd_without_fs_skips_repo_roots() {
             user_config_layer(&xdcode_home, ""),
             ConfigLayerEntry::new(
                 ConfigLayerSource::Project {
-                    dot_xdcode_folder: repo_dot_xdcode.abs(),
+                    dot_xdcode_folder: repo_dot_codex.abs(),
                 },
                 toml::Value::Table(toml::map::Map::new()),
             ),
@@ -909,8 +1034,9 @@ async fn skills_for_cwd_uses_cached_result_until_force_reload() {
         .clone()
         .with_plugin_skill_snapshots(Some(test_plugin_skill_snapshots()));
     let request = skills_service.for_request();
+    let access = xdcode_exec_server::FileSystemEnvironmentAccessor::unrestricted(&LOCAL_FS);
     let (config_snapshot, snapshot_a) = tokio::join!(
-        skills_service.snapshot_for_config(&config_input, Some(Arc::clone(&LOCAL_FS))),
+        skills_service.snapshot_for_config(&config_input, Some(&access)),
         request.snapshot_for_cwd(
             &base_input,
             /*force_reload*/ false,

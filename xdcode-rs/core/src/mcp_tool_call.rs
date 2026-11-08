@@ -138,7 +138,7 @@ pub(crate) async fn handle_mcp_tool_call(
     call_id: String,
     originating_call: Option<ToolCallOrigin>,
     tool_info: &ToolInfo,
-    prepared_call: Option<PreparedMcpCall>,
+    prepared_call: anyhow::Result<PreparedMcpCall>,
     hook_tool_name: HookToolName,
     invocation_tool_name: ToolName,
     source: &crate::tools::context::ToolCallSource,
@@ -170,32 +170,17 @@ pub(crate) async fn handle_mcp_tool_call(
         arguments: arguments_value.clone(),
     };
 
-    let Some(prepared_call) = prepared_call else {
-        let item_metadata =
-            McpToolCallItemMetadata::from_tool_metadata(&server, /*metadata*/ None);
-        let result = notify_mcp_tool_call_skip(
-            sess.as_ref(),
-            turn_context.as_ref(),
-            &call_id,
-            invocation,
-            item_metadata,
-            format!("MCP tool `{server}/{tool_name}` is not available to the model"),
-            /*already_started*/ false,
-        )
-        .await;
-        return HandledMcpToolCall {
-            result: CallToolResult::from_result(result),
-            tool_input: arguments_value
-                .unwrap_or_else(|| JsonValue::Object(serde_json::Map::new())),
-        };
-    };
-    let metadata = match mcp_tool_metadata(
-        prepared_call.tool_info(),
-        prepared_call.plugin_id(),
-        invocation.arguments.as_ref(),
-    ) {
-        Ok(metadata) => metadata,
-        Err(err) => {
+    let prepared = prepared_call.and_then(|call| {
+        let metadata = mcp_tool_metadata(
+            call.tool_info(),
+            call.plugin_id(),
+            invocation.arguments.as_ref(),
+        )?;
+        Ok((call, metadata))
+    });
+    let (prepared_call, metadata) = match prepared {
+        Ok(prepared) => prepared,
+        Err(error) => {
             let item_metadata =
                 McpToolCallItemMetadata::from_tool_metadata(&server, /*metadata*/ None);
             let result = notify_mcp_tool_call_skip(
@@ -204,7 +189,7 @@ pub(crate) async fn handle_mcp_tool_call(
                 &call_id,
                 invocation,
                 item_metadata,
-                err.to_string(),
+                format!("{error:#}"),
                 /*already_started*/ false,
             )
             .await;

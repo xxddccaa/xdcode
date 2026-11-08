@@ -837,8 +837,17 @@ async fn warm_plugins_and_skills_for_session_init(
         effective_skill_roots,
         turn_environments,
     );
+    let access = fs.map(|environment| environment.fs_accessor(None));
     skills_service
-        .snapshot_for_config(&skills_input, fs)
+        .snapshot_for_config_on_executor(
+            &skills_input,
+            fs.zip(access.as_ref()).map(|(environment, access)| {
+                (
+                    environment.environment().filesystem_ref(),
+                    access as &dyn xdcode_file_system::EnvironmentAccess,
+                )
+            }),
+        )
         .await
         .outcome()
         .errors
@@ -852,11 +861,7 @@ impl Session {
         environments: Vec<TurnEnvironmentSelection>,
     ) -> ThreadConfigSnapshot {
         let mut snapshot = configuration.thread_config_snapshot(environments);
-        let model_info = Box::pin(configuration.step_settings.resolve_model_info(
-            self.services.models_manager.as_ref(),
-            &configuration.model_info_overrides,
-        ))
-        .await;
+        let model_info = Box::pin(self.configuration_model_info(configuration)).await;
         snapshot.service_tier = get_service_tier(
             snapshot.service_tier.take(),
             &configuration.original_config_do_not_use.features,
@@ -1757,11 +1762,8 @@ impl Session {
                 state.reasoning_effort_pin = pin.as_ref().clone();
             }
             state.active_disabled_plugin_ids = session_configuration.disabled_plugin_ids.clone();
-            let managed_network_requirements_configured = config
-                .config_layer_stack
-                .requirements_toml()
-                .network
-                .is_some();
+            let managed_network_requirements_configured =
+                config.config_layer_stack.requirements().network.is_some();
             let managed_network_requirements_enabled =
                 config.managed_network_requirements_enabled();
             let network_approval = Arc::new(NetworkApprovalService::default());
@@ -1959,6 +1961,11 @@ impl Session {
                     .with_legacy_custom_ca_fallback(),
                 session_telemetry,
                 models_manager: Arc::clone(&models_manager),
+                model_catalog: crate::thread_manager::model_catalog::ThreadModelCatalog::new(
+                    &config,
+                    Arc::clone(&auth_manager),
+                    Arc::clone(&models_manager),
+                ),
                 git_root_discovery,
                 tool_approvals: Mutex::new(ApprovalStore::default()),
                 granted_permissions_by_environment_id: Arc::default(),

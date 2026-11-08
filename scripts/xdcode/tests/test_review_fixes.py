@@ -21,6 +21,23 @@ import package
 
 
 class ReviewTests(unittest.TestCase):
+    def test_product_version_can_differ_from_recorded_upstream_baseline(self):
+        info = {"version": "0.167.0", "upstream_version": "0.165.0",
+                "upstream_tag": "rust-v0.165.0", "upstream_commit": "a" * 40}
+        install.validate_upstream(info)
+        for value in (None, "", "0.0.0", "0.165.0-beta", "0.165.0+build", 165):
+            with self.subTest(value=value), self.assertRaises(install.DeliveryError):
+                install.validate_upstream({**info, "upstream_version": value})
+        with self.assertRaises(install.DeliveryError):
+            install.validate_upstream({**info, "upstream_tag": "rust-v0.167.0"})
+
+    def test_legacy_upstream_metadata_uses_product_version_as_baseline(self):
+        info = {"version": "0.165.0", "upstream_tag": "rust-v0.165.0",
+                "upstream_commit": "a" * 40}
+        install.validate_upstream(info)
+        with self.assertRaises(install.DeliveryError):
+            install.validate_upstream({**info, "version": "0.167.0"})
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="xdcode-review-test-")
         self.addCleanup(self.temporary.cleanup)

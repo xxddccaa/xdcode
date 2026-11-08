@@ -564,6 +564,7 @@ async fn check_acquisition(enabled: bool, supported: bool) -> Result<()> {
         )),
         |config: &Config| xdcode_skills_extension::SkillsExtensionConfig {
             include_instructions: true,
+            catalog_deltas_enabled: config.features.enabled(Feature::SkillCatalogDeltas),
             max_context_tokens: config.skill_max_context_tokens,
             bundled_skills_enabled: false,
             cloud_skill_enabled: false,
@@ -1090,6 +1091,7 @@ async fn auth_rotation_refreshes_plugin_acceptance_before_merged_skills() -> Res
             )),
         |_config: &Config| SkillsExtensionConfig {
             include_instructions: true,
+            catalog_deltas_enabled: false,
             max_context_tokens: None,
             bundled_skills_enabled: false,
             cloud_skill_enabled: true,

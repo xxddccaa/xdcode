@@ -86,6 +86,10 @@ impl ChatWidget {
         self.bottom_pane.set_status_line(status_line);
     }
 
+    pub(crate) fn status_line_text(&self) -> Option<String> {
+        self.bottom_pane.status_line_text()
+    }
+
     /// Sets the terminal hyperlink target for the currently rendered footer status line.
     pub(crate) fn set_status_line_hyperlink(&mut self, url: Option<String>) {
         self.bottom_pane.set_status_line_hyperlink(url);

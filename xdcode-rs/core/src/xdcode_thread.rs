@@ -13,6 +13,8 @@ use crate::session::session::Session;
 use crate::session::startup_prewarm::PrewarmInput;
 use crate::session::step_settings::StepSettingsUpdate;
 use crate::thread_startup_metadata::ThreadStartupMetadata;
+use chrono::DateTime;
+use chrono::Utc;
 use rmcp::model::ReadResourceRequestParams;
 use std::any::Any;
 use std::path::PathBuf;
@@ -258,7 +260,37 @@ impl XdcodeThread {
     }
 
     pub async fn submit(&self, op: Op) -> XdcodeResult<String> {
-        self.io.submit(op).await
+        self.submit_with_trace(op, /*trace*/ None).await
+    }
+
+    /// Returns the source used for registration and agent-reference resolution.
+    /// Internal runtimes can have a different source in their captured session settings.
+    pub fn session_source(&self) -> &SessionSource {
+        &self.session_source
+    }
+
+    /// Resolves an agent reference through this thread's controller without loading it.
+    pub async fn resolve_agent_reference(&self, target: &str) -> XdcodeResult<ThreadId> {
+        self.session
+            .services
+            .agent_control
+            .resolve(
+                self.session.thread_id,
+                self.session_source.parent_thread_id(),
+                &self.session_source,
+                target,
+            )
+            .await
+    }
+
+    /// Reads this thread's configured clock, including an external or simulated clock.
+    pub async fn current_time(&self) -> XdcodeResult<DateTime<Utc>> {
+        self.session
+            .services
+            .time_provider
+            .current_time(self.session.thread_id)
+            .await
+            .map_err(|error| XdcodeErr::Io(std::io::Error::other(error)))
     }
 
     /// Returns the session telemetry handle for thread-scoped production instrumentation.
@@ -403,11 +435,17 @@ impl XdcodeThread {
         op: Op,
         trace: Option<W3cTraceContext>,
     ) -> XdcodeResult<String> {
+        let residency_guard = if matches!(op, Op::InterAgentCommunication { .. }) {
+            self.session
+                .services
+                .local_agent_runtime
+                .pin_v2_residency(self)
+                .await?
+        } else {
+            None
+        };
         self.io
-            .submit_with_trace(
-                op, trace, /*parent_turn_id*/ None, /*root_turn_id*/ None,
-                /*residency_guard*/ None, /*message_delivery*/ None,
-            )
+            .submit_with_trace(op, trace, None, None, residency_guard, None)
             .await
     }
 
@@ -792,6 +830,11 @@ impl XdcodeThread {
         self.io.agent_status().await
     }
 
+    /// Returns whether the runtime has published its shutdown status.
+    pub fn has_shutdown_status(&self) -> bool {
+        matches!(*self.io.agent_status.borrow(), AgentStatus::Shutdown)
+    }
+
     pub async fn list_background_terminals(&self) -> Vec<BackgroundTerminalInfo> {
         self.session.list_background_terminals().await
     }
@@ -971,6 +1014,10 @@ impl XdcodeThread {
 
     pub fn state_db(&self) -> Option<StateDbHandle> {
         self.session.state_db()
+    }
+
+    pub async fn selected_model_info(&self) -> Arc<xdcode_protocol::model_types::ModelInfo> {
+        self.session.selected_model_info().await
     }
 
     pub async fn config_snapshot(&self) -> ThreadConfigSnapshot {
@@ -1191,14 +1238,14 @@ impl XdcodeThread {
     pub async fn read_mcp_resource_for_call(
         &self,
         call_id: &str,
-        uri: &str,
+        params: ReadResourceRequestParams,
     ) -> anyhow::Result<serde_json::Value> {
         self.session.refresh_mcp_if_dirty().await;
         let result = self
             .session
             .services
             .mcp_runtime
-            .read_resource_for_call(self.session.thread_id, call_id, uri)
+            .read_resource_for_call(self.session.thread_id, call_id, params)
             .await?;
 
         Ok(serde_json::to_value(result)?)

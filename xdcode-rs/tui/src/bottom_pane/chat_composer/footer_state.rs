@@ -69,6 +69,8 @@ pub(crate) enum CommandPopupPlacement {
 /// A borrowed presentation shared by measurement, painting, and cursor placement.
 #[derive(Clone, Copy, Default)]
 pub(crate) struct ComposerRenderOptions<'a> {
+    pub(crate) unfocused: bool,
+    pub(crate) floating_shortcuts: bool,
     /// Fullscreen limits the composer independently of activity and modal views.
     pub(crate) max_height: Option<u16>,
     pub(crate) image_previews: Option<&'a crate::transcript_image::composer::ComposerImages>,
@@ -81,6 +83,8 @@ pub(crate) struct ComposerRenderOptions<'a> {
     pub(crate) textarea_right_reserve: u16,
     /// Keep configured status below the composer while hints occupy the final row.
     pub(crate) separate_status_line: bool,
+    /// Topmost frame row available for suggestions overlaying the transcript.
+    pub(crate) overlay_top: u16,
     pub(crate) command_popup_placement: CommandPopupPlacement,
     pub(crate) footer: Option<&'a TranscriptFooter>,
 }
@@ -401,7 +405,6 @@ impl FooterState {
         self.flash = Some(FooterFlash { line, expires_at });
     }
 
-    #[cfg(test)]
     pub(super) fn status_line_text(&self) -> Option<String> {
         self.status_line_value.as_ref().map(|line| {
             line.spans

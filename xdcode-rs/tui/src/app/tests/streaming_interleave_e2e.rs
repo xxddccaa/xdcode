@@ -27,8 +27,8 @@ async fn command_start_before_message_completion_does_not_duplicate_preamble() -
                 gate: None,
                 body: responses::sse(vec![
                     responses::ev_response_created("response-1"),
-                    responses::ev_message_item_added("message-1", ""),
-                    responses::ev_output_text_delta(PREAMBLE),
+                    responses::ev_message_item_added("message-1", "I’ll inspect"),
+                    responses::ev_output_text_delta(" the **relevant streaming path"),
                     responses::ev_function_call(
                         "command-1",
                         "exec_command",
@@ -38,7 +38,11 @@ async fn command_start_before_message_completion_does_not_duplicate_preamble() -
             },
             StreamingSseChunk {
                 gate: Some(completion_gate),
-                body: responses::sse(vec![responses::ev_assistant_message("message-1", PREAMBLE)]),
+                body: responses::sse(vec![
+                    responses::ev_message_item_added("message-1", ""),
+                    responses::ev_output_text_delta(" first"),
+                    responses::ev_assistant_message("message-1", PREAMBLE),
+                ]),
             },
             StreamingSseChunk {
                 gate: None,
@@ -120,6 +124,8 @@ async fn command_start_before_message_completion_does_not_duplicate_preamble() -
                     let event = event.expect("embedded app-server should stay connected");
                     let turn_completed = matches!(&event.event, AppServerEvent::ServerNotification(notification)
                         if matches!(notification.as_ref(), ServerNotification::TurnCompleted(_)));
+                    let capture_preview = matches!(&event.event, AppServerEvent::ServerNotification(notification)
+                        if matches!(notification.as_ref(), ServerNotification::AgentMessageDelta(delta) if delta.delta == PREAMBLE));
                     if let AppServerEvent::ServerNotification(notification) = &event.event {
                         match notification.as_ref() {
                             ServerNotification::AgentMessageDelta(delta) if delta.delta == PREAMBLE => {
@@ -159,6 +165,16 @@ async fn command_start_before_message_completion_does_not_duplicate_preamble() -
                     }
                     app.handle_backend_event(&app_server, event).await;
                     app.drain_active_thread_events(&mut tui).await?;
+                    if capture_preview {
+                        let lines = app.chat_widget.active_cell_transcript_lines(80)
+                            .expect("opening reply should already be visible");
+                        let preview = ratatui::text::Text::from(lines).to_string();
+                        if observed_order.last() == Some(&"agent started") {
+                            insta::assert_snapshot!(preview, @"• I’ll inspect");
+                        } else {
+                            insta::assert_snapshot!(preview, @"• I’ll inspect the **relevant streaming path");
+                        }
+                    }
                     if turn_completed {
                         break Ok::<_, color_eyre::Report>(());
                     }
@@ -177,7 +193,13 @@ async fn command_start_before_message_completion_does_not_duplicate_preamble() -
 
     assert_eq!(
         observed_order,
-        vec!["agent delta", "command started", "agent completed"]
+        vec![
+            "agent started",
+            "agent delta",
+            "command started",
+            "resumed delta",
+            "agent completed"
+        ]
     );
     assert_eq!(
         completed_command,

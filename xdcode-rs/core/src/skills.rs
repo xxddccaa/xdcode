@@ -2,6 +2,7 @@ use crate::config::Config;
 use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
+use crate::session::turn_context::TurnEnvironment;
 use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -11,7 +12,8 @@ use xdcode_analytics::SkillInvocationLocation;
 use xdcode_analytics::TrackEventsContext;
 use xdcode_analytics::build_track_events_context;
 use xdcode_core_plugins::PluginsManager;
-use xdcode_exec_server::ExecutorFileSystem;
+use xdcode_exec_server::EnvironmentAccess;
+use xdcode_exec_server::EnvironmentAccessKey;
 use xdcode_extension_api::SkillInvocationInput;
 use xdcode_extension_api::SkillInvocationKind;
 use xdcode_otel::SkillInvocationEvent;
@@ -20,6 +22,7 @@ use xdcode_otel::sanitize_metric_tag_value;
 use xdcode_protocol::protocol::SkillScope;
 use xdcode_skills::SkillMetadata;
 use xdcode_skills_extension::HostSkillsLoadInput;
+use xdcode_skills_extension::HostSkillsSnapshot;
 use xdcode_skills_extension::InjectedHostSkillPrompts;
 use xdcode_skills_extension::detect_implicit_skill_invocation;
 use xdcode_skills_extension::record_plugin_turn_usage;
@@ -44,19 +47,18 @@ pub(crate) fn skills_load_input_from_config(
 
 /// Pair repository discovery inputs with their captured filesystem owner.
 /// Keep preparation synchronous so it adds no nested startup or resume future.
-pub(crate) fn skills_load_input_for_environments(
+pub(crate) fn skills_load_input_for_environments<'a>(
     config: &Config,
     plugins_manager: &PluginsManager,
     effective_skill_roots: Vec<PluginSkillRoot>,
-    environments: &TurnEnvironmentSnapshot,
-) -> (HostSkillsLoadInput, Option<Arc<dyn ExecutorFileSystem>>) {
-    // Preserve primary-repository discovery independently of the host config cwd.
+    environments: &'a TurnEnvironmentSnapshot,
+) -> (HostSkillsLoadInput, Option<&'a TurnEnvironment>) {
     let workspace = environments.primary().and_then(|environment| {
         environment
             .cwd()
             .to_abs_path()
             .ok()
-            .map(|cwd| (cwd, environment.environment.get_filesystem()))
+            .map(|cwd| (cwd, environment))
     });
     let (cwd, fs) = match workspace {
         Some((cwd, fs)) => (cwd, Some(fs)),
@@ -70,7 +72,73 @@ pub(crate) fn skills_load_input_for_environments(
     .with_plugin_skill_snapshots(
         plugins_manager.plugin_skill_snapshots_for_config(&config.plugins_config_input()),
     );
+    let input = match fs {
+        Some(environment) => input.with_environment_id(&environment.selection.environment_id),
+        None => input,
+    };
     (input, fs)
+}
+
+/// The snapshot and configuration resolved with one turn's filesystem access.
+pub(crate) struct HostSkillDiscovery {
+    pub(crate) input: Arc<HostSkillsLoadInput>,
+    pub(crate) repository: Option<(PathUri, EnvironmentAccessKey)>,
+    pub(crate) snapshot: Arc<HostSkillsSnapshot>,
+}
+
+impl Session {
+    pub(crate) async fn host_skills_for_step(
+        &self,
+        turn: &TurnContext,
+        environments: &TurnEnvironmentSnapshot,
+    ) -> Arc<HostSkillsSnapshot> {
+        let Some(cached) = turn.extension_data.get::<HostSkillDiscovery>() else {
+            return turn.skills_snapshot();
+        };
+        let workspace = environments.primary().and_then(|environment| {
+            let cwd = environment.cwd().to_abs_path().ok()?;
+            let grants = turn.granted_permissions(&environment.selection.environment_id);
+            Some((environment, cwd, environment.fs_accessor(grants)))
+        });
+        let repository = workspace
+            .as_ref()
+            .map(|(environment, _, access)| (environment.cwd().clone(), access.cache_key()));
+        if cached.repository == repository {
+            return Arc::clone(&cached.snapshot);
+        }
+
+        let cwd = workspace
+            .as_ref()
+            .map_or_else(|| turn.config.cwd.clone(), |(_, cwd, _)| cwd.clone());
+        let input = cached.input.for_cwd(cwd);
+        let input = Arc::new(match &workspace {
+            Some((environment, _, _)) => {
+                input.with_environment_id(&environment.selection.environment_id)
+            }
+            None => input,
+        });
+        let snapshot = Box::pin(
+            self.services
+                .skills_service
+                .snapshot_for_config_on_executor(
+                    &input,
+                    workspace.as_ref().map(|(environment, _, access)| {
+                        (
+                            environment.environment().filesystem_ref(),
+                            access as &dyn EnvironmentAccess,
+                        )
+                    }),
+                ),
+        )
+        .await;
+        let snapshot = Arc::new(snapshot);
+        turn.extension_data.insert(HostSkillDiscovery {
+            input,
+            repository,
+            snapshot: Arc::clone(&snapshot),
+        });
+        snapshot
+    }
 }
 
 pub(crate) async fn emit_explicit_skill_invocations(

@@ -73,6 +73,8 @@ impl ChatWidget {
         if previous_thread_id != Some(session.thread_id) {
             self.reset_catalog_session_state();
         }
+        self.catalog_selection_state.confirmed =
+            Some(crate::session_state::NewSessionModelSelection::from_session(&session));
         let connector_scope_changed = previous_thread_id != Some(session.thread_id)
             || self.config.cwd.as_path() != session.cwd.as_path();
         self.thread_id = Some(session.thread_id);
@@ -108,6 +110,7 @@ impl ChatWidget {
             self.clear_thread_usage_state();
         }
         self.turn_lifecycle.reset_thread();
+        self.safety_recourse = None;
         self.clear_safety_buffering();
         self.thread_name = session.thread_name.clone();
         self.current_goal_status_indicator = None;

@@ -129,7 +129,10 @@ class ModelProtocolArtifacts(unittest.TestCase):
                 self.assertIn("catalogId", schema["properties"], name)
                 self.assertNotIn("catalogId", schema["required"], name)
                 # Absent IDs are omitted by serde rather than emitted as null.
-                self.assertIn("catalogId?: string,", exports["typescript"][f"v2/{name}.ts"])
+                self.assertRegex(
+                    exports["typescript"][f"v2/{name}.ts"],
+                    r"\bcatalogId\?:\s*string[;,]",
+                )
         sdk = ast.parse((ROOT / "sdk/python/src/openai_xdcode/generated/v2_all.py").read_text())
         for name in ("ThreadStartResponse", "ThreadResumeResponse", "ThreadForkResponse"):
             model = next(node for node in sdk.body if isinstance(node, ast.ClassDef) and node.name == name)
@@ -140,10 +143,21 @@ class ModelProtocolArtifacts(unittest.TestCase):
             alias = next(value.value for value in metadata.keywords if value.arg == "alias")
             self.assertEqual(ast.literal_eval(alias), "catalogId")
 
-    def test_product_version_remains_upstream_stable(self):
-        self.assertEqual(json.loads((ROOT / "upstream.json").read_text())["version"], "0.165.0")
-        # Read the manifest as text: no dependency resolution or cargo invocation.
-        self.assertIn('version = "0.165.0"', (ROOT / "xdcode-rs/Cargo.toml").read_text())
+    def test_product_version_and_upstream_baseline_are_recorded_separately(self):
+        upstream = json.loads((ROOT / "upstream.json").read_text())
+        self.assertEqual(upstream["version"], "0.167.0")
+        self.assertEqual(upstream["upstream_version"], "0.165.0")
+        self.assertEqual(upstream["upstream_tag"], "rust-v0.165.0")
+        self.assertIn('version = "0.167.0"', (ROOT / "xdcode-rs/Cargo.toml").read_text())
+        self.assertEqual(json.loads((ROOT / "xdcode-cli/package.json").read_text())["version"], upstream["version"])
+
+    def test_internal_history_sampling_metadata_is_optional_and_not_model_visible(self):
+        schema = json.loads(self.stable["internal_json_schema"]["RolloutLine.json"])
+        metadata = schema["definitions"]["XdcodeHarnessMetadata"]
+        for field in ("history_sequence", "sampled_through_sequence"):
+            self.assertIn(field, metadata["properties"])
+            self.assertNotIn(field, metadata.get("required", []))
+            self.assertNotIn(field, json.dumps(schema["definitions"]["ResponseItem"]))
 
 
 if __name__ == "__main__":

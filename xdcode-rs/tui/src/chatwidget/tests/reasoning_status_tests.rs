@@ -36,9 +36,19 @@ fn complete(chat: &mut ChatWidget, id: &str) {
 async fn reasoning_status_accepts_bold_text_with_a_plain_suffix() {
     let (mut chat, _rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
     chat.on_task_started();
-    handle_agent_reasoning_started(&mut chat, "reasoning");
-
-    delta(&mut chat, "reasoning", "**Checking tests");
+    chat.handle_server_notification(
+        ServerNotification::ItemStarted(ItemStartedNotification {
+            thread_id: "thread-1".into(),
+            turn_id: "turn-1".into(),
+            item: AppServerThreadItem::Reasoning {
+                id: "reasoning".into(),
+                summary: vec!["**Checking tests".into()],
+                content: Vec::new(),
+            },
+            started_at_ms: 0,
+        }),
+        None,
+    );
     let before_close = chat
         .bottom_pane
         .status_widget()

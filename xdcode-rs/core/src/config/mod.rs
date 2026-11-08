@@ -191,6 +191,8 @@ pub use network_config::NetworkConfigInputs;
 pub use network_config::PreparedNetworkConfig;
 pub use network_config::project_environment_profile_network;
 pub use network_config::validate_environment_network_policy;
+#[cfg(test)]
+pub(crate) use network_proxy_spec::McpNetworkRoute;
 pub use network_proxy_spec::NetworkProxySpec;
 pub use network_proxy_spec::StartedNetworkProxy;
 pub use permission_profile_catalog::PermissionProfileCatalogEntry;
@@ -834,6 +836,9 @@ pub struct Config {
 
     /// Own the fullscreen transcript when the alternate screen is enabled.
     pub tui_fullscreen_transcript: bool,
+
+    /// Preferred docked sidebar width as a percentage of the terminal.
+    pub tui_sidebar_width_percent: Option<u8>,
 
     /// Mouse wheel speed multiplier for transcript scrolling; defaults to one row per event.
     pub tui_mouse_scroll_speed: Option<f64>,
@@ -1574,7 +1579,11 @@ impl ConfigBuilder {
         let cli_overrides = cli_overrides.unwrap_or_default();
         let mut harness_overrides = harness_overrides.unwrap_or_default();
         let loader_overrides = loader_overrides.unwrap_or_default();
-        let cwd_override = harness_overrides.cwd.as_deref().or(fallback_cwd.as_deref());
+        let cwd_override = harness_overrides
+            .cwd
+            .as_deref()
+            .or(fallback_cwd.as_deref())
+            .or(loader_overrides.default_cwd.as_deref());
         let cwd = match cwd_override {
             Some(path) => AbsolutePathBuf::relative_to_current_dir(path)?,
             None => AbsolutePathBuf::current_dir()?,
@@ -1952,6 +1961,7 @@ impl Config {
                 Vec::new()
             },
             protocol_mode: self.mcp_protocol_mode(),
+            discover_local_stdio: self.features.enabled(Feature::McpConnectionSharing),
             host_owned_apps_protocol_mode: if self.features.enabled(Feature::XdcodeAppsMcp20260728)
             {
                 McpProtocolMode::V20260728
@@ -4761,6 +4771,7 @@ impl Config {
                 .tui
                 .as_ref()
                 .is_none_or(|tui| tui.fullscreen_transcript),
+            tui_sidebar_width_percent: cfg.tui.as_ref().and_then(|tui| tui.sidebar_width_percent),
             tui_mouse_scroll_speed: cfg.tui.as_ref().and_then(|tui| tui.mouse_scroll_speed),
             tui_copy_on_select: cfg
                 .tui
@@ -4888,11 +4899,7 @@ impl Config {
         !matches!(
             self.permissions.permission_profile(),
             PermissionProfile::Disabled
-        ) && self
-            .config_layer_stack
-            .requirements_toml()
-            .network
-            .is_some()
+        ) && self.config_layer_stack.requirements().network.is_some()
     }
 
     /// Resolves a named permission profile from effective config and managed requirements.

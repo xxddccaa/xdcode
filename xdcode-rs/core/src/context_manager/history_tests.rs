@@ -44,7 +44,6 @@ use xdcode_protocol::protocol::AskForApproval;
 use xdcode_protocol::protocol::ENVIRONMENTS_INSTRUCTIONS_OPEN_TAG;
 use xdcode_protocol::protocol::InterAgentCommunication;
 use xdcode_protocol::protocol::PLUGINS_INSTRUCTIONS_OPEN_TAG;
-use xdcode_protocol::protocol::SandboxPolicy;
 use xdcode_protocol::protocol::TurnContextItem;
 use xdcode_protocol_test_support::ContentItemTestExt;
 use xdcode_utils_absolute_path::AbsolutePathBuf;
@@ -54,6 +53,87 @@ use xdcode_utils_output_truncation::truncate_text;
 const EXEC_FORMAT_MAX_BYTES: usize = 10_000;
 const EXEC_FORMAT_MAX_TOKENS: usize = 2_500;
 const TEST_WAV_SAMPLE_RATE: u32 = 8_000;
+
+#[test]
+fn sampling_checkpoint_excludes_input_appended_during_request() {
+    let mut history = create_history_with_items(vec![user_msg("included in the request")]);
+    let request_sequence = history.input_sequence();
+    history.record_items(
+        [&user_msg("arrived while sampling")],
+        TruncationPolicy::Tokens(10_000),
+    );
+    history.record_annotated_items(
+        &mut [ResponseItemEnvelope {
+            item: assistant_msg("response to the earlier request"),
+            metadata: Some(XdcodeHarnessMetadata {
+                sampled_through_sequence: Some(request_sequence),
+                ..Default::default()
+            }),
+        }],
+        TruncationPolicy::Tokens(10_000),
+    );
+    assert_eq!(
+        crate::context_manager::sampled_through(history.annotated_items()),
+        request_sequence,
+    );
+}
+
+#[test]
+fn restored_mixed_legacy_and_sequenced_mail_stays_pending_until_sampled() {
+    let mail = |id: &str| {
+        serde_json::from_value(json!({
+            "type": "agent_message", "id": id,
+            "author": "/root/worker", "recipient": "/root",
+            "content": [{"type": "input_text", "text": id}],
+        }))
+        .unwrap()
+    };
+    let mut history = ContextManager::new();
+    history.replace_annotated(vec![
+        ResponseItemEnvelope {
+            item: mail("legacy-mail"),
+            metadata: None,
+        },
+        ResponseItemEnvelope {
+            item: mail("sequenced-mail"),
+            metadata: Some(XdcodeHarnessMetadata {
+                history_sequence: Some(7),
+                sampled_through_sequence: Some(4),
+                ..Default::default()
+            }),
+        },
+    ]);
+    let first =
+        crate::compact_pending_input::pending_mail_sequence(history.annotated_items()).unwrap();
+    let retained = history
+        .annotated_items()
+        .iter()
+        .filter(|envelope| crate::compact_pending_input::is_retained_pending_mail(envelope, first))
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(retained.len(), 2);
+    let summary = ResponseItemEnvelope {
+        item: assistant_msg("summary"),
+        metadata: None,
+    };
+    let with_summary =
+        crate::compact_pending_input::insert_summary(retained, summary.clone(), Some(first));
+    assert_eq!(with_summary[0], summary);
+    history.record_annotated_items(
+        &mut [ResponseItemEnvelope {
+            item: assistant_msg("both messages consumed"),
+            metadata: Some(XdcodeHarnessMetadata {
+                sampled_through_sequence: Some(history.input_sequence()),
+                ..Default::default()
+            }),
+        }],
+        TruncationPolicy::Tokens(10_000),
+    );
+    assert_eq!(
+        crate::compact_pending_input::pending_mail_sequence(history.annotated_items()),
+        None
+    );
+}
 
 fn unknown_content_metadata() -> InternalChatMessageMetadataPassthrough {
     InternalChatMessageMetadataPassthrough {
@@ -739,10 +819,8 @@ fn reference_context_item() -> TurnContextItem {
         .expect("absolute reference cwd"),
         approval_policy: AskForApproval::OnRequest,
         approvals_reviewer: None,
-        sandbox_policy: SandboxPolicy::new_read_only_policy(),
-        permission_profile: None,
+        permission_profile: xdcode_protocol::models::PermissionProfile::read_only(),
         active_permission_profile: None,
-        file_system_sandbox_policy: None,
         model: "gpt-test".to_string(),
         comp_hash: None,
         collaboration_mode: None,
@@ -838,6 +916,8 @@ fn retains_only_harness_authored_configuration_updates() {
     let trusted = ResponseItemEnvelope {
         item: update.clone(),
         metadata: Some(XdcodeHarnessMetadata {
+            history_sequence: Some(4),
+            sampled_through_sequence: Some(0),
             harness_authored_configuration: true,
             ..Default::default()
         }),
@@ -903,6 +983,7 @@ fn drop_last_n_user_turns_removes_post_input_configuration_update_with_its_turn(
         ResponseItemEnvelope::new(assistant_msg("removed answer")),
     ]);
     history.record_annotated_items(&mut items, TruncationPolicy::Tokens(10_000));
+    let surviving = &items[..surviving.len()];
 
     history.drop_last_n_user_turns(/*num_turns*/ 1);
 
@@ -921,13 +1002,14 @@ fn non_last_reasoning_tokens_return_zero_when_no_user_messages() {
 
 #[test]
 fn non_last_reasoning_tokens_ignore_entries_after_last_user() {
-    let history = create_history_with_items(vec![
+    let mut history = create_history_with_items(vec![
         reasoning_with_encrypted_content(/*len*/ 900),
         user_msg("first"),
         reasoning_with_encrypted_content(/*len*/ 1_000),
         user_msg("second"),
         reasoning_with_encrypted_content(/*len*/ 2_000),
     ]);
+    history.update_token_info(&TokenUsage::default(), None, false, 0);
     // first: (900 * 0.75 - 650) / 4 = 6.25 tokens
     // second: (1000 * 0.75 - 650) / 4 = 25 tokens
     // first + second = 62.5
@@ -941,7 +1023,8 @@ fn total_token_usage_respects_saved_reasoning_accounting(
     includes_reasoning: Option<bool>,
     expected: i64,
 ) {
-    let mut history = create_history_with_items(vec![
+    let mut history = ContextManager::new();
+    history.replace(vec![
         reasoning_with_encrypted_content(/*len*/ 1_000),
         user_msg("second"),
         assistant_msg("counted reply"),
@@ -962,19 +1045,23 @@ fn total_token_usage_respects_saved_reasoning_accounting(
 }
 
 #[test]
-fn items_after_last_model_generated_tokens_include_user_and_tool_output() {
-    let history = create_history_with_items(vec![
-        assistant_msg("already counted by API"),
-        user_msg("new user message"),
-        custom_tool_call_output("call-tail", "new tool output"),
-    ]);
+fn items_since_last_usage_include_user_and_tool_output() {
+    let mut history = create_history_with_items(vec![assistant_msg("already counted by API")]);
+    history.update_token_info(&TokenUsage::default(), None, true, 0);
+    history.record_items(
+        [
+            &user_msg("new user message"),
+            &custom_tool_call_output("call-tail", "new tool output"),
+        ],
+        TruncationPolicy::Tokens(10_000),
+    );
     let expected_tokens = estimate_item_token_count(&user_msg("new user message")).saturating_add(
         estimate_item_token_count(&custom_tool_call_output("call-tail", "new tool output")),
     );
 
     assert_eq!(
         history
-            .items_after_last_model_generated_item()
+            .items_since_last_usage()
             .map(estimate_item_token_count)
             .fold(0i64, i64::saturating_add),
         expected_tokens
@@ -982,15 +1069,15 @@ fn items_after_last_model_generated_tokens_include_user_and_tool_output() {
 }
 
 #[test]
-fn items_after_last_model_generated_tokens_are_zero_without_model_generated_items() {
+fn items_since_last_usage_include_initial_input() {
     let history = create_history_with_items(vec![user_msg("no model output yet")]);
 
     assert_eq!(
         history
-            .items_after_last_model_generated_item()
+            .items_since_last_usage()
             .map(estimate_item_token_count)
             .fold(0i64, i64::saturating_add),
-        0
+        estimate_item_token_count(&user_msg("no model output yet"))
     );
 }
 
@@ -1039,7 +1126,11 @@ fn cloned_history_shares_items_until_mutated() {
 fn annotated_history_apis_preserve_envelopes() {
     let first_envelope = ResponseItemEnvelope {
         item: assistant_msg("first"),
-        metadata: Some(XdcodeHarnessMetadata::default()),
+        metadata: Some(XdcodeHarnessMetadata {
+            history_sequence: Some(7),
+            sampled_through_sequence: Some(4),
+            ..Default::default()
+        }),
     };
     let mut history = ContextManager::new();
 
@@ -1129,7 +1220,11 @@ fn for_prompt_annotated_preserves_metadata_while_normalizing_item() {
             phase: None,
             internal_chat_message_metadata_passthrough: None,
         },
-        metadata: Some(XdcodeHarnessMetadata::default()),
+        metadata: Some(XdcodeHarnessMetadata {
+            history_sequence: Some(7),
+            sampled_through_sequence: Some(4),
+            ..Default::default()
+        }),
     };
     let mut history = ContextManager::new();
     history.replace_annotated(vec![envelope.clone()]);
@@ -1168,8 +1263,9 @@ fn legacy_inter_agent_assistant_messages_are_not_turn_boundaries() {
     assert!(!is_user_turn_boundary(&item));
 }
 
-#[test]
-fn total_token_usage_includes_all_items_after_last_model_generated_item() {
+#[test_case(false; "exclusive count")]
+#[test_case(true; "inclusive count")]
+fn total_token_usage_includes_all_items_since_last_usage(includes_reasoning: bool) {
     let mut history = create_history_with_items(vec![assistant_msg("already counted by API")]);
     history.update_token_info(
         &TokenUsage {
@@ -1177,7 +1273,8 @@ fn total_token_usage_includes_all_items_after_last_model_generated_item() {
             ..Default::default()
         },
         /*model_context_window*/ None,
-        /*includes_reasoning*/ true,
+        includes_reasoning,
+        0,
     );
     let added_user = user_msg("new user message");
     let added_tool_output = custom_tool_call_output("tool-tail", "new tool output");
@@ -1190,6 +1287,51 @@ fn total_token_usage_includes_all_items_after_last_model_generated_item() {
         history.get_total_token_usage(),
         100 + estimate_item_token_count(&added_user)
             + estimate_item_token_count(&added_tool_output)
+    );
+
+    let input_item_count = history.raw_items().len();
+    history.update_token_info(
+        &TokenUsage {
+            total_tokens: 100,
+            ..Default::default()
+        },
+        None,
+        includes_reasoning,
+        input_item_count,
+    );
+    assert_eq!(history.get_total_token_usage(), 100);
+
+    let partial = reasoning_with_encrypted_content(2_000);
+    history.record_items([&partial], TruncationPolicy::Tokens(10_000));
+    let mut spending = history.token_info().expect("saved usage");
+    spending.total_token_usage.total_tokens += 15;
+    history.set_token_info(Some(spending));
+    history.record_items([&added_user], TruncationPolicy::Tokens(10_000));
+    let expected =
+        100 + estimate_item_token_count(&partial) + estimate_item_token_count(&added_user);
+    assert_eq!(history.get_total_token_usage(), expected);
+
+    history.record_items(
+        [&assistant_msg("next response"), &added_tool_output],
+        TruncationPolicy::Tokens(10_000),
+    );
+    history.update_token_info(
+        &TokenUsage {
+            total_tokens: 100,
+            ..Default::default()
+        },
+        None,
+        includes_reasoning,
+        input_item_count,
+    );
+    let prior_reasoning = if includes_reasoning {
+        0
+    } else {
+        estimate_item_token_count(&partial)
+    };
+    assert_eq!(
+        history.get_total_token_usage(),
+        100 + prior_reasoning + estimate_item_token_count(&added_tool_output)
     );
 }
 

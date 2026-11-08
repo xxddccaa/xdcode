@@ -1,4 +1,4 @@
-//! New-session configuration from server defaults and explicit launch settings.
+//! New-session configuration from defaults, with confirmed model inheritance for `/new` only.
 //!
 //! Build the replacement configuration without replacing the active task's settings.
 
@@ -60,6 +60,20 @@ pub(super) fn overlay_new_session_defaults(
 }
 
 impl App {
+    pub(super) async fn confirmed_new_session_selection(
+        &self,
+    ) -> Result<Option<crate::session_state::NewSessionModelSelection>> {
+        if self.chat_widget.thread_id().is_none() {
+            return Ok(None);
+        }
+        if let Some(selection) = self.chat_widget.confirmed_model_selection() {
+            return Ok(Some(selection));
+        }
+        color_eyre::eyre::bail!(
+            "Wait for the current session settings to be confirmed before starting a new session"
+        )
+    }
+
     pub(super) async fn load_new_session_config(
         &mut self,
         app_server: &AppServerSession,

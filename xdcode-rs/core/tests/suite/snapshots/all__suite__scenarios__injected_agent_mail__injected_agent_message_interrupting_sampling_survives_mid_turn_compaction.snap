@@ -1,0 +1,40 @@
+---
+source: core/tests/suite/scenarios_injected_agent_mail.rs
+expression: "context_snapshot::format_context_snapshot(\"An injected agent message that interrupts sampling is included in the first request after mid-turn compaction.\",\n&entries,\n&ContextSnapshotOptions::default().rewrite_known_segments(),).replace(test.home.path().to_str().unwrap(),\n\"<XDCODE_HOME>\")"
+---
+Scenario: An injected agent message that interrupts sampling is included in the first request after mid-turn compaction.
+
+## Window 1
+-- request 1 (request) --
+00:message/developer:
+    You are xdcode, the user's personal coding agent running in a terminal. You are expected to be precise, safe, and helpful.
+
+    Your capabilities:
+
+    - Receive user prompts and other context provided by the harness, such as files in the workspace.
+    - Communicate with the user by streaming thinking & responses, and by making & updating plans.
+    - Emit function calls to run terminal commands and apply patches. Depending on how this specific run is ... More on this in the "Sandbox and approvals" section. [hash=31cf026fa7b25d6d]
+
+    <OMITTED 186 LINES; ~4074 TOKENS; hash=c667a73226fa59da>
+
+    # Application identity
+
+    You are xdcode, the user's personal coding agent running in the xdcode application.
+    When asked who you are or what this assistant is called, identify yourself as xdcode.
+    Your command is `xdcode`; your configuration and local state live under `XDCODE_HOME`, normally `~/.xdcode`.
+    Your model and model provider are configurable backend details, distinct from the application's identity...active configuration before describing those details. [hash=e756fbdbf0f9eb29]
+    Use the bundled xdcode guide and local project documentation to explain this application's behavior. Pre...ibution when explicitly discussing source provenance. [hash=10d84b8c702879e5]
+01:message/developer[2]:
+    [01] <xdcode_model_configuration>{"config_file":"<XDCODE_HOME>/config.toml","profile":null}</xdcode_model_configuration>
+        Use this active configuration/profile with xdcode models commands for model configuration tasks; load the xdcode-model-config skill.
+    [02] <PERMISSIONS_INSTRUCTIONS>
+02:message/user:
+    <ENVIRONMENT_CONTEXT>
+03:message/user:
+    Plan the next action.
+-- request 2 (request) --
+04:reasoning:summary=reasoning reasoning reasoning reasoning reasoning reasoning reasoning reasoning reasoning reasoning reas...ing reasoning reasoning reasoning reasoning reasoning [hash=ca3a0b1992c1437f]:encrypted=true
+-- request 3 (request) --
+05:message/assistant:
+    AUTO_COMPACT_SUMMARY
+06:agent_message

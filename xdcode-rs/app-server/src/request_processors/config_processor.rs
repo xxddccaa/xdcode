@@ -72,6 +72,8 @@ const SUPPORTED_EXPERIMENTAL_FEATURE_ENABLEMENT: &[&str] = &[
     BACKGROUND_PAGINATED_ROLLOUT_MIGRATION_FEATURE,
     "xdcode_apps_mcp_2026_07_28",
     "mcp_2026_07_28",
+    "mcp_connection_sharing",
+    "mcp_lazy_stdio_startup",
     "memories",
     "mentions_v2",
     "remote_control",
@@ -253,6 +255,9 @@ impl ConfigRequestProcessor {
         &self,
         params: ConfigValueWriteParams,
     ) -> Result<ConfigWriteResponse, JSONRPCErrorError> {
+        let refresh_models = params.key_path == "models"
+            || params.key_path == "model_providers"
+            || params.key_path.starts_with("model_providers.");
         let pending_changes = xdcode_core_plugins::toggles::collect_plugin_enabled_candidates(
             [(&params.key_path, &params.value)].into_iter(),
         );
@@ -262,6 +267,9 @@ impl ConfigRequestProcessor {
             .await
             .map_err(map_error)?;
         self.emit_plugin_toggle_events(pending_changes).await;
+        if refresh_models {
+            self.model_catalog.invalidate().await;
+        }
         Ok(response)
     }
 
@@ -269,6 +277,11 @@ impl ConfigRequestProcessor {
         &self,
         params: ConfigBatchWriteParams,
     ) -> Result<ConfigWriteResponse, JSONRPCErrorError> {
+        let refresh_models = params.edits.iter().any(|edit| {
+            edit.key_path == "models"
+                || edit.key_path == "model_providers"
+                || edit.key_path.starts_with("model_providers.")
+        });
         let pending_changes = xdcode_core_plugins::toggles::collect_plugin_enabled_candidates(
             params
                 .edits
@@ -281,6 +294,9 @@ impl ConfigRequestProcessor {
             .await
             .map_err(map_error)?;
         self.emit_plugin_toggle_events(pending_changes).await;
+        if refresh_models {
+            self.model_catalog.invalidate().await;
+        }
         Ok(response)
     }
 
@@ -451,6 +467,12 @@ pub(crate) fn map_requirements_to_api(
         }
         None => ConfigRequirementsToml::default(),
     };
+    let network = requirements
+        .permissions
+        .as_ref()
+        .and_then(|permissions| permissions.network.as_deref())
+        .cloned()
+        .or_else(|| requirements.network.clone());
 
     Some(ConfigRequirements {
         model_provider: requirements.model_provider,
@@ -576,7 +598,7 @@ pub(crate) fn map_requirements_to_api(
         enforce_residency: requirements
             .enforce_residency
             .map(map_residency_requirement_to_api),
-        network: requirements.network.map(map_network_requirements_to_api),
+        network: network.map(map_network_requirements_to_api),
         auto_review: requirements
             .auto_review
             .map(|auto_review| AutoReviewRequirements {

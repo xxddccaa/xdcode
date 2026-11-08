@@ -9,6 +9,75 @@ use sqlx::sqlite::SqlitePoolOptions;
 use xdcode_utils_absolute_path::test_support::PathExt;
 
 #[tokio::test]
+async fn current_schema_opens_while_another_connection_has_writer_reservation() -> anyhow::Result<()>
+{
+    let home = crate::runtime::test_support::unique_temp_dir();
+    tokio::fs::create_dir_all(&home).await?;
+    let _cleanup = scopeguard::guard(home.clone(), |home| {
+        let _ = std::fs::remove_dir_all(home);
+    });
+    let sqlite = SqliteConfig::new_for_testing(home.as_path().abs());
+    sqlite.is_nfs.set(true)?;
+    let migrator = crate::migrations::runtime_thread_history_migrator();
+    let pool = sqlite.open_thread_history_db(&migrator, None).await?;
+    pool.close().await;
+    let connection = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(SqliteConnectOptions::new().filename(sqlite.thread_history_db_path()))
+        .await?;
+    sqlx::query("PRAGMA journal_mode = DELETE")
+        .execute(&connection)
+        .await?;
+    let transaction = connection.begin_with("BEGIN IMMEDIATE").await?;
+    let reopened = sqlite.open_thread_history_db(&migrator, None).await?;
+    let check: String = sqlx::query_scalar("PRAGMA integrity_check")
+        .fetch_one(&reopened)
+        .await?;
+    assert_eq!(check, "ok");
+    transaction.rollback().await?;
+    reopened.close().await;
+    connection.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn concurrent_openers_apply_schema_migrations_once() -> anyhow::Result<()> {
+    let home = crate::runtime::test_support::unique_temp_dir();
+    tokio::fs::create_dir_all(&home).await?;
+    let _cleanup = scopeguard::guard(home.clone(), |home| {
+        let _ = std::fs::remove_dir_all(home);
+    });
+    let sqlite = SqliteConfig::new_for_testing(home.as_path().abs());
+    sqlite.is_nfs.set(true)?;
+    let migrator = crate::migrations::runtime_thread_history_migrator();
+    let mut openers = tokio::task::JoinSet::new();
+    for _ in 0..8 {
+        let sqlite = sqlite.clone();
+        openers.spawn(async move {
+            sqlite
+                .open_thread_history_db(&crate::migrations::runtime_thread_history_migrator(), None)
+                .await
+        });
+    }
+    while let Some(result) = openers.join_next().await {
+        let pool = result??;
+        let versions =
+            sqlx::query_scalar::<_, i64>("SELECT version FROM _sqlx_migrations ORDER BY version")
+                .fetch_all(&pool)
+                .await?;
+        assert_eq!(
+            versions,
+            migrator
+                .iter()
+                .map(|migration| migration.version)
+                .collect::<Vec<_>>()
+        );
+        pool.close().await;
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn configured_log_directory_is_initialized_on_use_and_retries_after_failure()
 -> anyhow::Result<()> {
     let sqlite_home = crate::runtime::test_support::unique_temp_dir();

@@ -8,6 +8,30 @@
 use super::*;
 use std::borrow::Cow;
 
+pub(super) fn confirmed_user_message_ids<'a>(
+    turns: &'a [Turn],
+    events: impl Iterator<Item = &'a ThreadBufferedEvent>,
+) -> Vec<String> {
+    turns
+        .iter()
+        .flat_map(|turn| &turn.items)
+        .chain(events.filter_map(|event| {
+            let ThreadBufferedEvent::Notification(notification) = event else {
+                return None;
+            };
+            match notification.as_ref() {
+                ServerNotification::ItemStarted(notification) => Some(&notification.item),
+                ServerNotification::ItemCompleted(notification) => Some(&notification.item),
+                _ => None,
+            }
+        }))
+        .filter_map(|item| match item {
+            ThreadItem::UserMessage { client_id, .. } => client_id.clone(),
+            _ => None,
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct ThreadEventSnapshot {
     pub(super) session: Option<ThreadSessionState>,
@@ -74,12 +98,22 @@ pub(super) struct ThreadEventStore {
     pub(super) input_state: Option<ThreadInputState>,
     pub(super) capacity: usize,
     pub(super) active: bool,
+    /// Output received since deactivation can change the transcript rebuilt on replay.
+    pub(super) replay_may_have_output: bool,
     pub(super) buffered_agent_message_delta_bytes: usize,
     delegated_turns: VecDeque<String>,
     recap_progress: recap::RecapProgress,
 }
 
 impl ThreadEventStore {
+    pub(super) fn is_realtime_delegated_turn(&self, turn_id: &str) -> bool {
+        self.delegated_turns.iter().any(|id| id == turn_id)
+            || self
+                .turns
+                .iter()
+                .any(|turn| turn.id == turn_id && turn.items.iter().any(is_voice_handoff_item))
+    }
+
     pub(super) fn event_survives_session_refresh(event: &mut ThreadBufferedEvent) -> bool {
         if let ThreadBufferedEvent::Notification(notification) = event
             && let ServerNotification::ItemCompleted(notification) = notification.as_mut()
@@ -119,6 +153,7 @@ impl ThreadEventStore {
             input_state: None,
             capacity,
             active: false,
+            replay_may_have_output: false,
             buffered_agent_message_delta_bytes: 0,
             delegated_turns: VecDeque::new(),
             recap_progress: recap::RecapProgress::default(),
@@ -437,6 +472,7 @@ impl ThreadEventStore {
                         let key = (n.turn_id.clone(), id.clone());
                         if voice_started.contains(&n.turn_id) {
                             typed_items.remove(&key);
+                            return false;
                         } else {
                             typed_items.insert(key);
                         }

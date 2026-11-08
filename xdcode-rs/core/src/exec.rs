@@ -49,8 +49,6 @@ use xdcode_sandboxing::record_filesystem_sandbox_violation;
 use xdcode_sandboxing::resolve_windows_elevated_filesystem_overrides;
 #[cfg(test)]
 use xdcode_sandboxing::resolve_windows_restricted_token_filesystem_overrides;
-#[cfg(test)]
-use xdcode_sandboxing::unsupported_windows_restricted_token_sandbox_reason;
 #[cfg(any(test, target_os = "windows"))]
 use xdcode_sandboxing::windows_sandbox_uses_elevated_backend;
 use xdcode_utils_absolute_path::AbsolutePathBuf;
@@ -407,6 +405,7 @@ pub async fn build_exec_request(
         .transform(SandboxTransformRequest {
             command,
             permissions: permission_profile,
+            workspace_roots: None,
             sandbox: sandbox_type,
             enforce_managed_network,
             environment_id: network_environment_id.as_deref(),

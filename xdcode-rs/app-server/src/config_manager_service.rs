@@ -29,6 +29,7 @@ use xdcode_config::ShellEnvironmentPolicyFilterRepresentation;
 use xdcode_config::config_toml::ConfigToml;
 use xdcode_config::is_structured_feature_path;
 use xdcode_config::merge_toml_values;
+use xdcode_config::model_catalog::ConfigurationFile;
 use xdcode_config::shell_environment_filter_entry;
 use xdcode_config::validate_shell_environment_policy_filter_config;
 use xdcode_core::config::deserialize_config_toml_with_base;
@@ -238,6 +239,25 @@ impl ConfigManager {
             ));
         }
 
+        let transaction_path = provided_path.to_path_buf();
+        let mut transaction =
+            task::spawn_blocking(move || ConfigurationFile::open(&transaction_path))
+                .await
+                .map_err(|error| {
+                    ConfigManagerError::anyhow("config persistence task panicked", error.into())
+                })?
+                .map_err(|error| {
+                    ConfigManagerError::anyhow("failed to lock configuration", error)
+                })?;
+        transaction
+            .check_version(expected_version.as_deref(), true)
+            .map_err(|error| {
+                ConfigManagerError::write(
+                    ConfigWriteErrorCode::ConfigVersionConflict,
+                    error.to_string(),
+                )
+            })?;
+
         let layers = self
             .load_thread_agnostic_config()
             .await
@@ -246,15 +266,6 @@ impl ConfigManager {
             Some(layer) => Cow::Borrowed(layer),
             None => Cow::Owned(create_empty_user_layer(&allowed_path).await?),
         };
-
-        if let Some(expected) = expected_version.as_deref()
-            && expected != user_layer.version
-        {
-            return Err(ConfigManagerError::write(
-                ConfigWriteErrorCode::ConfigVersionConflict,
-                "Configuration was modified since last read. Fetch latest version and retry.",
-            ));
-        }
 
         let mut user_config = user_layer.config.clone();
         let mut credential_provider_edits = CredentialProviderEdits::new(&user_config);
@@ -443,12 +454,17 @@ impl ConfigManager {
             })?;
 
         if !config_edits.is_empty() {
-            ConfigEditsBuilder::for_config_path(provided_path.as_path())
-                .with_edits(config_edits)
-                .apply()
-                .await
-                .map_err(|err| ConfigManagerError::anyhow("failed to persist config.toml", err))?;
+            xdcode_core::config::edit::apply_to_document(transaction.document(), &config_edits)
+                .map_err(|error| {
+                    ConfigManagerError::anyhow("failed to apply config edits", error)
+                })?;
         }
+        task::spawn_blocking(move || transaction.finish(false))
+            .await
+            .map_err(|error| {
+                ConfigManagerError::anyhow("config persistence task panicked", error.into())
+            })?
+            .map_err(|error| ConfigManagerError::anyhow("failed to persist config.toml", error))?;
 
         let overridden = first_overridden_edit(&updated_layers, &effective, &parsed_segments);
         let status = overridden

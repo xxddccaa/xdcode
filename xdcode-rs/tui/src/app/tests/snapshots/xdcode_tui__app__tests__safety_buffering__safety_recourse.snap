@@ -1,0 +1,13 @@
+---
+source: tui/src/app/tests/safety_buffering.rs
+expression: "format!(\"{loading}\\n\\n{notice}\")"
+---
+ⓘ The provider declined this request
+  Check the response from your configured provider for details.
+• Finding an explanation and safer ways to continue…
+
+ⓘ The provider declined this request
+  We take extra caution with requests that could enable access to accounts or
+  systems beyond permitted scope. We can still help with an overview of
+  account security and recovery. Check the response from your configured
+  provider for details.

@@ -4,6 +4,7 @@ members = [
     "analytics",
     "agent-graph-store",
     "agent-message-board-client",
+    "agent-message-board-host",
     "agent-identity",
     "agent-roles",
     "backend-client",
@@ -90,6 +91,7 @@ members = [
     "memories/write",
     "mermaid",
     "message-board",
+    "message-board-mcp",
     "model-provider-info",
     "mxc-sandbox",
     "models-manager",
@@ -166,7 +168,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.165.0"
+version = "0.167.0"
 # Track the edition for all workspace crates in one place. Individual
 # crates can still override this value, but keeping it here means new
 # crates created with `cargo new -w ...` automatically inherit the 2024
@@ -216,7 +218,9 @@ xdcode-connectors = { path = "connectors" }
 xdcode-agent-extension = { path = "ext/agent" }
 xdcode-agent-message-board-client = { path = "agent-message-board-client" }
 xdcode-agent-message-board-extension = { path = "ext/agent-message-board" }
+xdcode-agent-message-board-host = { path = "agent-message-board-host" }
 xdcode-message-board = { path = "message-board" }
+xdcode-message-board-mcp = { path = "message-board-mcp" }
 xdcode-connectors-extension = { path = "ext/connectors" }
 xdcode-context-fragments = { path = "context-fragments" }
 xdcode-core = { path = "core" }

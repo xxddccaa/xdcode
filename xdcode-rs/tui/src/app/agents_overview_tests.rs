@@ -2,14 +2,32 @@
 mod discovery;
 
 use crate::app::app_server_requests::BufferedServerRequest;
+use crate::app::test_support::configure_provider_fixture;
 #[path = "agent_center_tests.rs"]
 mod command_center;
 
 use super::super::agents_overview_view::AgentsOverviewGrouping;
 use super::*;
-use crate::app::tests::make_test_app_with_channels;
 use crate::chatwidget::tests::helpers::normalize_agent_center_snapshot;
 use xdcode_config::types::AgentsOverviewGrouping as PersistedAgentsOverviewGrouping;
+
+async fn make_test_app() -> Box<App> {
+    let app = crate::app::test_support::make_test_app().await;
+    configure_provider_fixture(&app, &app.config.xdcode_home.join("config.toml"))
+        .expect("configure command-center fixture");
+    app
+}
+
+async fn make_test_app_with_channels() -> (
+    Box<App>,
+    tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
+    tokio::sync::mpsc::UnboundedReceiver<crate::app_command::AppCommand>,
+) {
+    let (app, events, operations) = crate::app::tests::make_test_app_with_channels().await;
+    configure_provider_fixture(&app, &app.config.xdcode_home.join("config.toml"))
+        .expect("configure command-center fixture");
+    (app, events, operations)
+}
 
 #[tokio::test]
 async fn overview_worktree_creation_busy_state() {
@@ -41,6 +59,8 @@ async fn overview_worktree_creation_busy_state() {
 async fn overview_thread_colors_match_footer_and_respect_color_suppression() {
     let mut app = make_test_app().await;
     let id = ThreadId::from_u128(/*value*/ 42);
+    let selected_id = ThreadId::from_u128(43);
+    app.agents_overview.unread.extend([id, selected_id]);
     let mut snapshot = Vec::new();
     for enabled in [true, false] {
         app.local_settings.tui.status_line_use_colors = enabled;
@@ -52,12 +72,9 @@ async fn overview_thread_colors_match_footer_and_respect_color_suppression() {
         );
         thread.name = Some("Named task".into());
         let mut selected = thread.clone();
-        selected.id = ThreadId::from_u128(/*value*/ 43).to_string();
+        selected.id = selected_id.to_string();
         selected.name = Some("Selected task".into());
-        let view = app.agents_overview_view(
-            vec![thread, selected],
-            Some(ThreadId::from_u128(/*value*/ 43)),
-        );
+        let view = app.agents_overview_view(vec![thread, selected], Some(selected_id));
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
         terminal
             .draw(|frame| view.render(frame.area(), frame.buffer_mut()))
@@ -65,16 +82,21 @@ async fn overview_thread_colors_match_footer_and_respect_color_suppression() {
         let buffer = terminal.backend().buffer();
         for row in buffer.content.chunks(100) {
             let text: String = row.iter().map(ratatui::buffer::Cell::symbol).collect();
-            if let Some(x) = text.find("Named task") {
-                let x = text[..x].chars().count();
-                let dot = row.iter().find(|cell| cell.symbol() == "○").unwrap();
-                let mut expected = ratatui::buffer::Cell::default();
-                expected.set_symbol("○").set_style(Style::default().cyan());
-                assert_eq!(dot, &expected);
+            if let Some(offset) = text.find("● Selected task") {
+                let column = text[..offset].chars().count();
                 snapshot.push(format!(
-                    "{} | title style: {:?}",
+                    "selected dot {:?} | title {:?}",
+                    row[column].style(),
+                    row[column + 2].style(),
+                ));
+            }
+            if let Some(offset) = text.find("Named task") {
+                let column = text[..offset].chars().count();
+                snapshot.push(format!(
+                    "{} | unread: {:?} | title style: {:?}",
                     normalize_agent_center_snapshot(&text),
-                    row[x].style()
+                    row[column - 2].fg,
+                    row[column].style()
                 ));
             }
         }
@@ -121,7 +143,6 @@ async fn older_server_notice_truncates_in_narrow_overview() {
     );
 }
 
-use crate::app::test_support::make_test_app;
 use crate::app_event::AgentsOverviewThreadRefresh;
 use crate::bottom_pane::BottomPaneView;
 use crate::chatwidget::tests::helpers::render_bottom_popup;
@@ -370,11 +391,12 @@ async fn shared_overview_keeps_rows_and_replays_changes_over_stale_reads() -> Re
         &app_server,
         request_id,
         Ok(AgentsOverviewThreadRefresh {
+            cleared_unread: Vec::new(),
             last_messages: HashMap::new(),
             threads: HashMap::from([
-                (retained, Some(retained_thread.clone())),
-                (archived, Some(archived_thread)),
-                (deleted, Some(deleted_thread)),
+                (retained, Some((retained_thread.clone(), false))),
+                (archived, Some((archived_thread, false))),
+                (deleted, Some((deleted_thread, false))),
             ]),
             recent_seed_complete: true,
             discovery: None,
@@ -395,6 +417,7 @@ async fn shared_overview_keeps_rows_and_replays_changes_over_stale_reads() -> Re
         &app_server,
         request_id,
         Ok(AgentsOverviewThreadRefresh {
+            cleared_unread: Vec::new(),
             last_messages: HashMap::new(),
             threads: HashMap::from([(retained, None)]),
             recent_seed_complete: true,
@@ -445,6 +468,7 @@ async fn shared_overview_keeps_rows_and_replays_changes_over_stale_reads() -> Re
                 &app_server,
                 request_id,
                 Ok(AgentsOverviewThreadRefresh {
+                    cleared_unread: Vec::new(),
                     threads: HashMap::new(),
                     last_messages,
                     recent_seed_complete: true,
@@ -611,6 +635,7 @@ async fn shared_overview_seeds_once_and_retains_locally_resumed_history() -> Res
         app.config.xdcode_home.join("config.toml"),
         "[tui]\nresume_cwd = \"session\"\n",
     )?;
+    configure_provider_fixture(&app, &app.config.xdcode_home.join("config.toml"))?;
     crate::legacy_core::config::set_project_trust_level(
         app.config.xdcode_home.as_path(),
         &test_path_buf("/"),
@@ -1504,66 +1529,6 @@ async fn shared_overview_shows_only_root_sessions() {
     assert!(app.last_rendered_history_tail.is_some());
 }
 
-#[cfg(any(unix, windows))]
-#[tokio::test]
-async fn embedded_sessions_offer_to_start_a_background_server_without_migrating() {
-    let mut app = make_test_app().await;
-    let app_server = crate::start_embedded_app_server_for_picker(app.chat_widget.config_ref())
-        .await
-        .expect("embedded app server");
-
-    app.open_agents_overview(&app_server);
-
-    insta::with_settings!({snapshot_path => "../snapshots"}, {
-        insta::assert_snapshot!(
-            "agents_overview_embedded",
-            render_bottom_popup(&app.chat_widget, /*width*/ 96)
-        );
-    });
-    app_server.shutdown().await.expect("shutdown app server");
-}
-
-#[cfg(any(unix, windows))]
-#[tokio::test]
-async fn daemon_start_result_snapshots() -> Result<()> {
-    let (mut app, mut app_event_rx, _op_rx) =
-        crate::app::tests::make_test_app_with_channels().await;
-    let mut app_server =
-        crate::start_embedded_app_server_for_picker(app.chat_widget.config_ref()).await?;
-    let mut tui = crate::tui::test_support::make_test_tui()?;
-
-    for (name, result) in [
-        ("agents_daemon_started", Ok(())),
-        (
-            "agents_daemon_start_failed",
-            Err("The host does not allow detached processes".to_string()),
-        ),
-    ] {
-        app.handle_event(
-            &mut tui,
-            &mut app_server,
-            AppEvent::AgentsDaemonStarted { result },
-        )
-        .await?;
-        let cell = match app_event_rx.try_recv()? {
-            AppEvent::InsertHistoryCell(cell) => cell,
-            other => panic!("expected daemon result history, got {other:?}"),
-        };
-        let rendered = cell
-            .display_lines(/*width*/ 80)
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join("\n");
-        insta::with_settings!({snapshot_path => "../snapshots"}, {
-            insta::assert_snapshot!(name, rendered);
-        });
-    }
-
-    app_server.shutdown().await?;
-    Ok(())
-}
-
 #[tokio::test]
 async fn filtered_dashboard_actions_use_configured_shortcuts() {
     let mut app = make_test_app().await;
@@ -1678,6 +1643,7 @@ async fn root_switch_preserves_vim_line_yank() -> Result<()> {
         app.local_settings.user_config_path.as_path(),
         "[tui]\nresume_cwd = \"session\"\n",
     )?;
+    configure_provider_fixture(&app, app.local_settings.user_config_path.as_path())?;
     let mut app_server = Box::pin(crate::start_embedded_app_server_for_picker(
         app.chat_widget.config_ref(),
     ))
@@ -1754,6 +1720,7 @@ async fn root_switch_loads_local_preferences_from_disk() -> Result<()> {
         app.local_settings.user_config_path.as_path(),
         "[tui]\ntheme = \"dracula\"\nresume_cwd = \"session\"\n[history]\npersistence = \"none\"\n",
     )?;
+    configure_provider_fixture(&app, app.local_settings.user_config_path.as_path())?;
     let config = Box::pin(app.rebuild_config_for_cwd(app.config.cwd.to_path_buf())).await?;
     let expected = crate::local_settings::LocalSettings::from(&config);
     let mut tui = crate::tui::test_support::make_test_tui()?;
@@ -1850,6 +1817,7 @@ async fn overview_selection_applies_user_permissions_only_to_unloaded_threads() 
         app.config.xdcode_home.join("config.toml"),
         "[tui]\nresume_cwd = \"session\"\n",
     )?;
+    configure_provider_fixture(&app, &app.config.xdcode_home.join("config.toml"))?;
     let mut server_config = app.config.clone();
     server_config
         .permissions
@@ -1923,6 +1891,7 @@ async fn overview_selection_applies_user_permissions_only_to_unloaded_threads() 
                 app.config.xdcode_home.join("config.toml"),
                 "approvals_reviewer = \"auto_review\"\n[tui]\nresume_cwd = \"session\"\n",
             )?;
+            configure_provider_fixture(&app, &app.config.xdcode_home.join("config.toml"))?;
             app.harness_overrides.sandbox_mode =
                 Some(xdcode_protocol::config_types::SandboxMode::WorkspaceWrite);
             app.harness_overrides.approval_policy =
@@ -2063,6 +2032,7 @@ async fn overview_cold_resume_honors_working_directory_selection() -> Result<()>
             app.config.xdcode_home.join("config.toml"),
             format!("[tui]\nresume_cwd = \"{mode}\"\n"),
         )?;
+        configure_provider_fixture(&app, &app.config.xdcode_home.join("config.toml"))?;
         crate::legacy_core::config::set_project_trust_level(
             app.config.xdcode_home.as_path(),
             &chosen,
@@ -2399,6 +2369,7 @@ async fn resume_picker_round_trip_preserves_each_threads_input() -> Result<()> {
         app.config.xdcode_home.join("config.toml"),
         "[tui]\nresume_cwd = \"current\"\n",
     )?;
+    configure_provider_fixture(&app, &app.config.xdcode_home.join("config.toml"))?;
     let mut server = Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
     let backend_id = server.backend_id();
     let mut targets = Vec::new();
@@ -2501,6 +2472,7 @@ async fn command_center_handles_resume_failure_and_success() -> Result<()> {
         app.config.xdcode_home.join("config.toml"),
         "[tui]\nresume_cwd = \"current\"\n",
     )?;
+    configure_provider_fixture(&app, &app.config.xdcode_home.join("config.toml"))?;
     let timestamp = "2025-01-05T12-00-00";
     let id = app_test_support::create_fake_rollout(
         app.config.xdcode_home.as_path(),
@@ -2576,6 +2548,7 @@ async fn command_center_attach_conflict_opens_read_only_and_retries() -> Result<
         app.config.xdcode_home.join("config.toml"),
         "[tui]\nresume_cwd = \"current\"\n",
     )?;
+    configure_provider_fixture(&app, &app.config.xdcode_home.join("config.toml"))?;
     for cwd in [test_path_buf("/"), app.config.cwd.to_path_buf()] {
         crate::legacy_core::config::set_project_trust_level(
             app.config.xdcode_home.as_path(),
@@ -2790,6 +2763,7 @@ async fn command_center_refresh_failure_is_inline_and_clears_on_success() -> Res
     for result in [
         Err("unavailable".into()),
         Ok(AgentsOverviewThreadRefresh {
+            cleared_unread: Vec::new(),
             threads: HashMap::new(),
             last_messages: HashMap::new(),
             recent_seed_complete: false,
@@ -2822,6 +2796,7 @@ async fn command_center_refresh_failure_is_inline_and_clears_on_success() -> Res
         &server,
         request_id,
         Ok(AgentsOverviewThreadRefresh {
+            cleared_unread: Vec::new(),
             threads: HashMap::new(),
             last_messages: HashMap::new(),
             recent_seed_complete: true,
@@ -2928,6 +2903,7 @@ async fn overview_fork_keeps_idle_source_input_queued() -> Result<()> {
             app.config.xdcode_home.join("config.toml"),
             "[tui]\nresume_cwd = \"session\"\n",
         )?;
+        configure_provider_fixture(&app, &app.config.xdcode_home.join("config.toml"))?;
         let source = ThreadId::from_string(
             &app_test_support::create_fake_rollout(
                 app.config.xdcode_home.as_path(),
@@ -3050,10 +3026,11 @@ mod usage;
 
 #[tokio::test]
 async fn overview_grouping_persists_across_config_reloads() -> Result<()> {
-    let (mut app, mut events, _ops) = crate::app::tests::make_test_app_with_channels().await;
+    let (mut app, mut events, _ops) = make_test_app_with_channels().await;
     let home = tempfile::tempdir()?;
     let config_path = home.path().join("work.config.toml");
     std::fs::write(&config_path, "[tui]\nanimations = false\n")?;
+    configure_provider_fixture(&app, &config_path)?;
     app.local_settings.user_config_path = AbsolutePathBuf::try_from(config_path.clone())?;
     let mut server = crate::start_embedded_app_server_for_picker(&app.config).await?;
     let mut tui = crate::tui::test_support::make_test_tui()?;

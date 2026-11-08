@@ -191,16 +191,74 @@ async fn catalog_groups_providers_case_insensitively_and_preserves_model_order()
 }
 
 #[tokio::test]
-async fn catalog_initial_focus_keeps_exact_id_for_duplicate_wire_models() {
+async fn catalog_initial_focus_starts_at_first_provider_without_changing_exact_id() {
     let (mut chat, mut events) = mixed_provider_picker().await;
     assert!(chat.try_open_catalog_model_popup());
     chat.handle_key_event(KeyCode::Enter.into());
     let selected = std::iter::from_fn(|| events.try_recv().ok()).find_map(|event| match event {
-        AppEvent::OpenCatalogReasoning { id } => Some(id),
+        AppEvent::OpenCatalogProvider { provider } => Some(provider),
         _ => None,
     });
-    assert_eq!(selected.as_deref(), Some("b-only"));
+    assert_eq!(selected.as_deref(), Some("a"));
+    assert_eq!(chat.current_catalog_id(), Some("b-only"));
     assert_eq!(chat.config.model_provider_id, "b");
+}
+
+#[tokio::test]
+async fn long_catalog_and_provider_pages_open_at_top_and_keep_exact_current_marker() {
+    let (mut chat, mut events, _ops) = make_chatwidget_manual(Some("shared-request-model")).await;
+    let mut raw = String::from(
+        r#"
+[model_providers.local]
+name = "Local provider"
+base_url = "http://127.0.0.1:1/v1"
+wire_api = "responses"
+experimental_bearer_token = "xdcode-picker-test-credential"
+"#,
+    );
+    for index in 0..40 {
+        raw.push_str(&format!("\n[[models]]\nid = \"entry-{index:02}\"\nname = \"Entry {index:02}\"\nprovider = \"local\"\nmodel = \"shared-request-model\"\nreasoning_efforts = []\n"));
+    }
+    let path =
+        xdcode_utils_absolute_path::AbsolutePathBuf::from_absolute_path(chat.catalog_config_path())
+            .unwrap();
+    std::fs::write(&path, &raw).unwrap();
+    chat.config.config_layer_stack = chat
+        .config
+        .config_layer_stack
+        .with_user_config(&path, toml::from_str(&raw).unwrap())
+        .unwrap();
+    chat.config.model_provider_id = "local".into();
+    chat.sync_catalog_identity(Some("entry-39".into()));
+    for provider_page in [false, true, false] {
+        if provider_page {
+            chat.open_catalog_provider("local".into());
+        } else {
+            assert!(chat.try_open_catalog_model_popup());
+        }
+        let rendered = render_bottom_popup(&chat, 100);
+        assert!(rendered.contains("[entry-00]"), "{rendered}");
+        assert!(!rendered.contains("[entry-39]"), "{rendered}");
+        chat.handle_key_event(KeyCode::Enter.into());
+        let selected =
+            std::iter::from_fn(|| events.try_recv().ok()).find_map(|event| match event {
+                AppEvent::OpenCatalogReasoning { id } => Some(id),
+                _ => None,
+            });
+        assert_eq!(selected.as_deref(), Some("entry-00"));
+        assert_eq!(chat.current_catalog_id(), Some("entry-39"));
+    }
+    assert!(chat.try_open_catalog_model_popup());
+    for character in "entry-39".chars() {
+        chat.handle_key_event(KeyCode::Char(character).into());
+    }
+    let rendered = render_bottom_popup(&chat, 100);
+    assert!(rendered.contains("[entry-39] (current)"), "{rendered}");
+    assert_eq!(rendered.matches("(current)").count(), 1);
+    chat.handle_key_event(KeyCode::Esc.into());
+    assert!(chat.try_open_catalog_model_popup());
+    assert!(render_bottom_popup(&chat, 100).contains("[entry-00]"));
+    assert_eq!(std::fs::read_to_string(path).unwrap(), raw);
 }
 
 #[tokio::test]

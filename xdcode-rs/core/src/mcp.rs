@@ -111,6 +111,7 @@ enum OrderedMcpOverlay {
 
 #[derive(Clone)]
 pub struct McpManager {
+    connection_pool: xdcode_mcp::McpConnectionPool,
     plugins_manager: Arc<PluginsManager>,
     extensions: Arc<ExtensionRegistry<Config>>,
     xdcode_apps_tools_cache: ConnectorRuntimeManager<ToolInfo>,
@@ -135,6 +136,7 @@ impl McpManager {
         xdcode_apps_tools_cache: ConnectorRuntimeManager<ToolInfo>,
     ) -> Self {
         Self {
+            connection_pool: xdcode_mcp::McpConnectionPool::default(),
             plugins_manager,
             extensions,
             xdcode_apps_tools_cache,
@@ -150,6 +152,10 @@ impl McpManager {
 
     pub fn tool_catalog_cache(&self) -> McpToolCatalogCache {
         self.tool_catalog_cache.clone()
+    }
+
+    pub(crate) fn connection_pool(&self) -> xdcode_mcp::McpConnectionPool {
+        self.connection_pool.clone()
     }
 
     pub(crate) fn shared_definitions(&self) -> &SharedMcpDefinitions {

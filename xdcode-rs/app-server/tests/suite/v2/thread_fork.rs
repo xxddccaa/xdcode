@@ -1024,6 +1024,33 @@ async fn thread_fork_defers_inherited_active_goal_until_next_turn() -> Result<()
         .await?
         .expect("source goal");
 
+    let ordinary_fork_id = mcp
+        .send_thread_fork_request(ThreadForkParams {
+            thread_id: source_thread.id.clone(),
+            ..Default::default()
+        })
+        .await?;
+    let ordinary_fork: ThreadForkResponse =
+        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(ordinary_fork_id)).await??;
+    let ordinary_thread_id = ThreadId::from_string(&ordinary_fork.thread.id)?;
+    assert_eq!(
+        state_db
+            .thread_goals()
+            .get_thread_goal(ordinary_thread_id)
+            .await?,
+        None
+    );
+    assert!(
+        !state_db
+            .thread_goals()
+            .has_thread_goal_continuation_deferral(ordinary_thread_id)
+            .await?
+    );
+    assert_eq!(
+        responses::received_responses_requests(&server).await.len(),
+        2
+    );
+
     let mut forked_threads = Vec::new();
     for (last_turn_id, before_turn_id, expected_turn_count) in [
         (None, None, 2),

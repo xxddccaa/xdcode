@@ -10797,6 +10797,14 @@
     "McpResourceReadParams": {
       "$schema": "http://json-schema.org/draft-07/schema#",
       "properties": {
+        "_meta": {
+          "additionalProperties": true,
+          "description": "Additional MCP request metadata. Account and turn routing keys are reserved.",
+          "type": [
+            "object",
+            "null"
+          ]
+        },
         "connectorId": {
           "type": [
             "string",
@@ -11758,6 +11766,12 @@
           "minimum": 0.0,
           "type": [
             "integer",
+            "null"
+          ]
+        },
+        "modelProvider": {
+          "type": [
+            "string",
             "null"
           ]
         }
@@ -13826,6 +13840,13 @@
           "format": "int32",
           "type": "integer"
         },
+        "outputDrainTimedOut": {
+          "description": "Whether output collection hit its post-exit deadline before seeing EOF or reaching the requested byte cap on either stream. Older servers omit this field.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "processHandle": {
           "description": "Client-supplied, connection-scoped `processHandle` from `process/spawn`.",
           "type": "string"
@@ -14041,6 +14062,16 @@
             "$ref": "#/definitions/UserInput"
           },
           "type": "array"
+        },
+        "responsesapiClientMetadata": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Metadata retained with this input, including across reconnect and restoration.",
+          "type": [
+            "object",
+            "null"
+          ]
         }
       },
       "required": [

@@ -10,7 +10,7 @@ use xdcode_network_proxy::ManagedNetworkSandboxContext;
 use xdcode_protocol::error::Result;
 use xdcode_protocol::error::SandboxErr;
 use xdcode_protocol::error::XdcodeErr;
-use xdcode_protocol::models::PermissionProfile;
+use xdcode_protocol::protocol::FileSystemSandboxPolicy;
 use xdcode_protocol::protocol::NetworkSandboxPolicy;
 use xdcode_utils_absolute_path::AbsolutePathBuf;
 
@@ -42,15 +42,14 @@ use seccompiler::apply_filter;
 ///
 /// Filesystem restrictions are normally handled by bubblewrap. The legacy
 /// Landlock implementation is only selected by `apply_landlock_fs`.
-pub(crate) fn apply_permission_profile_to_current_thread(
-    permission_profile: &PermissionProfile,
+pub(crate) fn apply_sandbox_policies_to_current_thread(
+    file_system_sandbox_policy: &FileSystemSandboxPolicy,
+    network_sandbox_policy: NetworkSandboxPolicy,
     cwd: &Path,
     apply_landlock_fs: bool,
     managed_network: Option<&ManagedNetworkSandboxContext>,
     proxy_routing_active: bool,
 ) -> Result<()> {
-    let (file_system_sandbox_policy, network_sandbox_policy) =
-        permission_profile.to_runtime_permissions();
     let network_seccomp_mode = network_seccomp_mode(
         network_sandbox_policy,
         managed_network.is_some(),

@@ -4,7 +4,9 @@ use super::*;
 
 impl ChatWidget {
     pub(crate) fn new_with_app_event(common: ChatWidgetInit) -> Self {
-        Self::new_with_op_target(common, XdcodeOpTarget::AppEvent)
+        let mut widget = Self::new_with_op_target(common, XdcodeOpTarget::AppEvent);
+        widget.bottom_pane.set_agents_navigation_enabled(true);
+        widget
     }
 
     pub(super) fn new_with_op_target(
@@ -74,7 +76,11 @@ impl ChatWidget {
             &header_model,
             &model_catalog.try_list_models().unwrap_or_default(),
         );
-        let runtime_keymap = RuntimeKeymap::from_config(&local_settings.tui.keymap).ok();
+        let runtime_keymap = RuntimeKeymap::for_session(
+            &local_settings.tui.keymap,
+            local_settings.workspace_enabled(&config),
+        )
+        .ok();
         let default_keymap = RuntimeKeymap::defaults();
         let copy_last_response_binding = runtime_keymap
             .as_ref()
@@ -195,6 +201,7 @@ impl ChatWidget {
             last_unified_wait: None,
             unified_exec_wait_streak: None,
             turn_lifecycle: TurnLifecycleState::new(prevent_idle_sleep),
+            safety_recourse: None,
             realtime_conversation: RealtimeConversationUiState::default(),
             realtime_conversation_available_for_thread: false,
             safety_buffering: SafetyBufferingState::default(),

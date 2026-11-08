@@ -276,6 +276,7 @@ pub enum ExecApprovalKind {
     #[default]
     Command,
     WriteStdin,
+    HumanCommand,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]

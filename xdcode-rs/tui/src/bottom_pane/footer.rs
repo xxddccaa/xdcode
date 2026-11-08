@@ -652,7 +652,7 @@ pub(crate) fn side_conversation_context_line(label: &str) -> Line<'static> {
         if index > 0 {
             line.push_span(" · ".set_style(secondary_text_style()));
         }
-        if let Some((keys, action)) = [" to switch", " to close", " for side"]
+        if let Some((keys, action)) = [" to switch", " to close", " to archive", " for side"]
             .into_iter()
             .find_map(|action| part.strip_suffix(action).map(|keys| (keys, action)))
         {
@@ -738,6 +738,15 @@ pub(crate) fn render_context_right(area: Rect, buf: &mut Buffer, line: &Line<'st
         buf.set_span(x, y, span, draw_width);
         x = x.saturating_add(span_width);
     }
+}
+
+pub(crate) fn render_unfocused_status(text: String, area: Rect, buf: &mut Buffer) {
+    let area = inset_footer_hint_area(area);
+    crate::line_truncation::truncate_line_with_ellipsis_if_overflow(
+        text.dim().into(),
+        usize::from(area.width),
+    )
+    .render(area, buf);
 }
 
 pub(crate) fn inset_footer_hint_area(mut area: Rect) -> Rect {

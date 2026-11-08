@@ -32,6 +32,11 @@ impl MessageBoardTool {
         Self::Post,
     ];
 
+    /// Bundled schema for discovery before a caller has been bound to a board.
+    pub fn spec(self) -> xdcode_tools::ToolSpec {
+        super::spec::tool(self, None, "", None)
+    }
+
     pub(super) fn name(self) -> &'static str {
         match self {
             Self::CreateChannel => "create_channel",

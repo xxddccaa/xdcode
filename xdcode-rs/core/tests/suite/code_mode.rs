@@ -119,6 +119,7 @@ use xdcode_protocol::models::ResponseItem;
 use xdcode_protocol::protocol::AskForApproval;
 use xdcode_protocol::protocol::EventMsg;
 use xdcode_protocol::protocol::Op;
+use xdcode_protocol::protocol::ReviewDecision;
 use xdcode_protocol::protocol::ThreadHistoryMode;
 use xdcode_protocol::protocol::ThreadSettingsOverrides;
 use xdcode_protocol::user_input::UserInput;
@@ -5918,10 +5919,12 @@ async fn code_mode_background_keeps_running_on_later_turn_without_wait() -> Resu
     let write_file_command = format!("printf resumed > {resumed_file_quoted}");
     let wait_for_file_command =
         format!("while [ ! -f {resumed_file_quoted} ]; do sleep 0.01; done; printf ready");
+    let barrier = serde_json::json!({"barrier": {"id": "background-command-approval", "participants": 2, "timeout_ms": 60_000}});
     let code = format!(
         r#"
 text("before yield");
 yield_control();
+await tools.test_sync_tool({barrier});
 await tools.exec_command({{ cmd: {write_file_command:?} }});
 text("after yield");
 "#
@@ -5945,7 +5948,12 @@ text("after yield");
     )
     .await;
 
-    test.submit_turn("start yielded exec").await?;
+    test.submit_turn_with_approval_and_permission_profile(
+        "start yielded exec",
+        AskForApproval::OnRequest,
+        PermissionProfile::read_only(),
+    )
+    .await?;
 
     let first_request = first_completion.single_request();
     let first_items = custom_tool_output_items(&first_request, "call-1");
@@ -5963,6 +5971,7 @@ text("after yield");
         &server,
         sse(vec![
             ev_response_created("resp-3"),
+            responses::ev_function_call("release-cell", "test_sync_tool", &barrier.to_string()),
             responses::ev_function_call(
                 "call-2",
                 "exec_command",
@@ -5983,7 +5992,34 @@ text("after yield");
     )
     .await;
 
-    test.submit_turn("wait for resumed file").await?;
+    test.xdcode
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "wait for resumed file".to_string(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    let servicing_turn = wait_for_event_match(&test.xdcode, |event| match event {
+        EventMsg::TurnStarted(turn) => Some(turn.turn_id.clone()),
+        _ => None,
+    })
+    .await;
+    let approval = wait_for_event_match(&test.xdcode, |event| match event {
+        EventMsg::ExecApprovalRequest(request) => Some(request.clone()),
+        _ => None,
+    })
+    .await;
+    assert_ne!(approval.turn_id, servicing_turn);
+    test.xdcode
+        .submit(Op::ExecApproval {
+            id: approval.effective_approval_id(),
+            turn_id: Some(approval.turn_id),
+            decision: ReviewDecision::Approved,
+        })
+        .await?;
+    wait_for_event(&test.xdcode, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
 
     let second_request = second_completion.single_request();
     assert!(

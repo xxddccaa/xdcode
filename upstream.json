@@ -1,11 +1,11 @@
 {
-  "version": "0.165.0",
+  "version": "0.167.0",
   "upstream_repository": "https://github.com/openai/codex.git",
   "upstream_tag": "rust-v0.165.0",
   "upstream_commit": "360319d8dee62d87e2d59fc0c21805d79519cfed",
   "upstream_release_commit": "360319d8dee62d87e2d59fc0c21805d79519cfed",
   "release_branch_base": "b559e6a3988489b636e1e79672eff330bf0679dc",
-  "version_selection": "Follow the upstream stable release tag exactly. Product version matches Codex; personal revisions use a separate build ID.",
+  "version_selection": "xdcode product version is independent of the recorded upstream baseline. Version 0.167.0 selectively backports fixes onto Codex 0.165.0; it is not a full Codex 0.167.0 synchronization.",
   "previous_baseline": {
     "version": "0.163.0",
     "upstream_commit": "83086188ae0614bd882818ff1aa23f3194962012"
@@ -108,6 +108,788 @@
         }
       ],
       "notes": "MODIFICATIONS.md"
+    },
+    {
+      "date": "2026-11-08",
+      "product_version": "0.167.0",
+      "commits": [
+        {
+          "commit": "0327a3ec34fd8fe9454eb57151a3798f127a53bf",
+          "feature": "Prioritize filename matches without losing limits, highlights, or cancellation"
+        },
+        {
+          "commit": "49f2fc2c1e4824b0a8eb0a15d3d7daeadc6c1523",
+          "feature": "Warn on truncated or skipped project instructions and refresh budget-sensitive caches"
+        },
+        {
+          "commit": "9e77fb4ad5ff4975f25c4d1d121aece3c40c5176",
+          "feature": "Serialize SQLite migration checks and updates with contention retries"
+        },
+        {
+          "commit": "c60cda34a3ba6975f698d63da9e8ca8a1616f0c9",
+          "feature": "Atomically persist observed thread metadata and retain failed writes for retry"
+        },
+        {
+          "commit": "7a030b97699b9fc7f997dd322a3926c03faaeb6c",
+          "feature": "Account for context retained after failed or usage-less responses"
+        },
+        {
+          "commit": "48524f337a84b570f0c2453ca43ec9a1a29375c0",
+          "feature": "Preserve unsampled agent messages across compaction and restore"
+        },
+        {
+          "commit": "fe16bc0a97d9ffe548b3afddb96ca6ae261f0d81",
+          "feature": "Evict superseded live assistant text and restore full paginated history"
+        },
+        {
+          "commit": "275a9a89b6a2689b5b5a8b3b4aa5dc3c02e7d64a",
+          "feature": "Keep leading bangs exposed by deletion literal"
+        },
+        {
+          "commit": "a09812981de703f18f38015cd5d500ab373f616c",
+          "feature": "Validate fork commands before consuming drafts and attachments"
+        }
+      ],
+      "notes": "UPSTREAM_0.167.0.md"
+    },
+    {
+      "date": "2026-11-08",
+      "comparison_main_commit": "c9b4267c370a755da12ec1c8648c2451163212b7",
+      "comparison_policy": "Pinned selective migration; upstream baseline remains 0.165.0; no rolling main tracking.",
+      "notes": "UPSTREAM_MAIN_C9B4267C.md",
+      "commits": [
+        {
+          "commit": "025f6d715d8e54581611506c3a2722dfd8be1382",
+          "feature": "Show unread results in the TUI command center (#58263)",
+          "batch": 5,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "0389e80f07871a51e7b5a7b7e393139c38e5cbf0",
+          "feature": "Refactor TUI clipboard and composer input handling (#60008)",
+          "batch": 5,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "054128c9d9324bf48cd1d280bad9a0f4488595e1",
+          "feature": "Fix TUI assistant messages interrupted by tool execution (#59700)",
+          "batch": 5,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "0712633d37d305eff38501afe6239db42f0517e2",
+          "feature": "Release message-board state before HTTP shutdown returns (#58933)",
+          "batch": 4,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "0768988e5563dd78a6802be5bdffc9cc3eceee09",
+          "feature": "Resolve skill display names in read and installations tools (#59954)",
+          "batch": 4,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "0b21a5b5264301bdb2e083c68c5ebd1d5cea0af9",
+          "feature": "Respect filesystem permissions when discovering repository skills (#59280)",
+          "batch": 2,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "0bc73bbeb18ddadf69c2e4c0da4322949de73dc6",
+          "feature": "Add opt-in protocol discovery for local stdio MCP servers (#57210)",
+          "batch": 4,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "0ed34eb9ceddc759e283f0d657be9339afc6b25a",
+          "feature": "Ensure side-chat policy reaches the first model request (#60067)",
+          "batch": 5,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "0ed9d6fa4bc10607fed02295d788f45005d5b20d",
+          "feature": "Handle `budget_reached` as a terminal session budget error (#59228)",
+          "batch": 1,
+          "status": "direct_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "118aae2a5f4865dd247b6cec2cd5d9c197892778",
+          "feature": "Explain safety policy blocks with turn-scoped recourse in the TUI (#57363)",
+          "batch": 5,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "119a547a31342b0c64fb15d2f6782f303bc3a5b7",
+          "feature": "Prevent idle Windows MCP pipes from blocking unrelated I/O (#59726)",
+          "batch": 4,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "11ca3f7531866b22b07bd7ed181e814f087b7ee5",
+          "feature": "Require explicit project trust in non-interactive runs (#60041)",
+          "batch": 2,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "12dc86beb3d407091f34a246b22af348933a79c2",
+          "feature": "Expose model metadata from each thread's catalog and settings (#59958)",
+          "batch": 3,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "1455fda735925389b59d43d185e865ff1de49455",
+          "feature": "Attach typed punctuation to completed skill mentions (#60180)",
+          "batch": 5,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "18c6dbe52b3b7cef89c13d52efa535ce39bbe27b",
+          "feature": "Add a standalone HTTP MCP server for the agent message board (#58904)",
+          "batch": 4,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "194f2662b8b63390416c44ebb7e6a3a35a845e3a",
+          "feature": "Add a sidebar chooser and floating workspace shortcut panels (#59739)",
+          "batch": 5,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "1cc3cf8060c5f1dbd4e3a4d75e1a77b523e0c1ad",
+          "feature": "Skip non-regular files when detecting pasted image paths (#57774)",
+          "batch": 5,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "2889d8e1bf564af2ed3a72dc929b583551561363",
+          "feature": "Normalize turn context permissions to a required profile (#59963)",
+          "batch": 2,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "2a32e7c9632e648c26fa51cca928293e42ca6465",
+          "feature": "Expand Linux sandbox deny globs in process (#59711)",
+          "batch": 2,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "2f02d8461deac546ab0fdaafc23ee98e5fd48c3a",
+          "feature": "Support update-boundary paging across forked thread histories (#59793)",
+          "batch": 1,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "358e46452858242bf6463923e1fac0f14e5c0549",
+          "feature": "Allow plugin starter prompts up to 512 characters (#60048)",
+          "batch": 4,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "3cacafa0b7c668b5378f83a1b0988da77ee8e7a9",
+          "feature": "Add incremental skill catalogs behind `skill_catalog_deltas` (#57262)",
+          "batch": 4,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "3cf4899cb529a71807a1fb8740855937199222e5",
+          "feature": "Render delegated thread messages as Markdown in the TUI (#59789)",
+          "batch": 5,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "44252e3f5de6349b9f2b034ce7d7815b7df9c382",
+          "feature": "Fix reasoning summary restoration in the TUI (#59698)",
+          "batch": 5,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "4437ff312b0355858565dcb7fb11993f925f7ec8",
+          "feature": "Extract agent message board hosting into a dedicated crate (#59473)",
+          "batch": 4,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "44ccf394573cabb95e1f751a59f9d76f6f79faf1",
+          "feature": "Preserve model catalogs when starting child agents (#60049)",
+          "batch": 3,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "4969675f0120bbd1052998b2669094496bdc97e0",
+          "feature": "Resolve network approval prompts when their requests end (#58350)",
+          "batch": 2,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "4a971492e765ef6f98012578a2de73098efdb8a2",
+          "feature": "Expose thread APIs for message board access (#59154)",
+          "batch": 4,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "4e2dfd22306985f846115758bbf7f9a59351bb29",
+          "feature": "Retry transient environment startup failures on the next turn (#57866)",
+          "batch": 1,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "4f6acbf02dac15297db5e3da232d55679664b412",
+          "feature": "Preserve transcript interaction when switching panes with arrow keys (#59472)",
+          "batch": 5,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "526f6099f623d88fbedfd360fc05970aff28f579",
+          "feature": "Preserve filesystem authority when loading skills (#59279)",
+          "batch": 2,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "536ae056ee102efe77af629413198c59fc80d433",
+          "feature": "Enable TUI task tools for embedded app-server sessions (#58240)",
+          "batch": 5,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "575cc5351efff4380396c0d76f0e93886e4c1806",
+          "feature": "Fix app-server thread listener startup and shutdown races (#57787)",
+          "batch": 1,
+          "status": "direct_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "57e64682f8ef83c09cc868c39010733dd6760805",
+          "feature": "Persist local workspace side chats and add tab close controls (#60152)",
+          "batch": 5,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "5e07d1f694972c0caa62c2e7d4108fa47695d2c7",
+          "feature": "Support OSC 52 clipboard forwarding through GNU screen (#58716)",
+          "batch": 5,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "5e3496e0ad6a85d7f57cbe3b6d576db3b317766c",
+          "feature": "Share eligible local stdio MCP connections across chats (#57211)",
+          "batch": 4,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "5fab289359a3101bcd585a86137ba41f7adc5993",
+          "feature": "Enable resizing the sidebar chooser (#59824)",
+          "batch": 5,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "632eee03e9707fbd2424b4a44f5d068605f857e6",
+          "feature": "Add fixed read views for local message boards (#59993)",
+          "batch": 4,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "6562117a81a9457c9d67a4d15b884bf80e7805f7",
+          "feature": "Preserve process output and control replies under backpressure (#57569)",
+          "batch": 1,
+          "status": "direct_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "6b2a2757de696c2506ee460c49c66a8e2bed65e0",
+          "feature": "Add shortcuts to focus the main composer and side conversation (#59208)",
+          "batch": 5,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "6c0db39b940a136b1e77145c8c7f01f3acfa80db",
+          "feature": "Offer safer rewrites after safety blocks in the TUI (#57365)",
+          "batch": 5,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "6c4fa86838df53578f454388b44ba1d248d57370",
+          "feature": "Add an in-memory launcher for the message-board MCP server (#58909)",
+          "batch": 4,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "74bfe33ec8a1aea060a5c68d59c55abc9e31f827",
+          "feature": "Add provider configuration editing to the TUI (#59779)",
+          "batch": 3,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "7689f21b79f8faf318bab98f1cd98dd5f5aa59ad",
+          "feature": "Enable the agent command center for embedded sessions (#58238)",
+          "batch": 5,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "78b1dda5f6b9f78a452d8b0b3d10b1d5fc1c6d51",
+          "feature": "Render typed prompts as Markdown in the TUI (#59983)",
+          "batch": 5,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "7ccf78dec4abcba68367b79172fda6f3fe609601",
+          "feature": "Preserve MCP sharing discovery when deferring cached stdio startup (#60037)",
+          "batch": 4,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "7d1492ffabc9a8d734d729aa5d184823f143de8b",
+          "feature": "Isolate MCP inputs and timeouts for callers sharing a connection (#57196)",
+          "batch": 4,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "7f1c09979c79579c43b953762effe22eabc20e06",
+          "feature": "Expose system proxy support as an experimental setting (#58157)",
+          "batch": 5,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "7f4d53e928d16ccbb47c00f0fdc39f6f16782437",
+          "feature": "Release app-server thread runtimes after shutdown (#57788)",
+          "batch": 1,
+          "status": "direct_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "7f60546e85efb3146cb4eb4d27deeb43ff43025e",
+          "feature": "Load up to eight plugins concurrently (#57819)",
+          "batch": 4,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "8044c6867ce14316876a6c7cec5efa44579f7eb7",
+          "feature": "Add keyboard and mouse navigation for sidebar tabs (#60181)",
+          "batch": 5,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "80f469ce8aeadcdb0b79b1a1daf6b88d92ff8799",
+          "feature": "Serialize manual network approval prompts per endpoint (#58351)",
+          "batch": 2,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "814347ecd21b49d25479f5499f168b9f7b7e1803",
+          "feature": "Improve sidebar chat selection and tab hover highlighting (#59928)",
+          "batch": 5,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "8a17396d137e07bdc0795bc50577dd90d734548e",
+          "feature": "Fix live stream reflow at the allocated conversation width (#58927)",
+          "batch": 5,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "8a1d42537d959392960a3c483a3c626c1490f095",
+          "feature": "Keep automatic thread title saves off the TUI event loop (#58970)",
+          "batch": 5,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "8c811e8d93839103b5185d1f6324ebd2671adff1",
+          "feature": "Support rendering TUI conversations within an inset area (#58718)",
+          "batch": 5,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "8fdf6472955749a731fd9e4b8ffc218e8e80c51d",
+          "feature": "Add per-chat leases for shared MCP connections (#57978)",
+          "batch": 4,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "9a7213ca37c6aa19127100027f041599d2d28eb9",
+          "feature": "Resolve workspace permissions at the sandbox launch boundary (#59530)",
+          "batch": 2,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "9c23d93d5b6f946ca7138d44c3b2bc0a7461c051",
+          "feature": "Add opt-in MCP discovery for in-memory agent message boards (#58973)",
+          "batch": 4,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "9da07658e28a8bd4b31063abec183f302a279882",
+          "feature": "Move agent message-board backend construction into the extension (#58986)",
+          "batch": 4,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "9df200a0680f5653ffb69725ecac6a201e2790fb",
+          "feature": "Add sidebar tabs and nonblocking side-chat creation (#59767)",
+          "batch": 5,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "a037e65ead8f6789f960e9450bfe6af5a87a0053",
+          "feature": "Preserve client metadata through queued submissions (#59826)",
+          "batch": 5,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "a142c90e2601d7b7bc9ab07e4d0552a3814b0501",
+          "feature": "Handle TUI message submission receipts and preserve uncertain drafts (#59817)",
+          "batch": 5,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "a90c80840869a8cfb313ef181d7721997b86c8e5",
+          "feature": "Centralize Windows sandbox filesystem override resolution (#60042)",
+          "batch": 2,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "a9e474c8fc7874cdb13b03ef8ffec0bead7c4fbd",
+          "feature": "Add an MCP adapter for message-board tools (#58341)",
+          "batch": 4,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "aa1399cbcd1a7f5e87714a9ce0d7b2c04af2a0e2",
+          "feature": "Forward caller metadata on MCP resource reads (#59509)",
+          "batch": 4,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "ad1dbba32db4b0204d2f769c762f329dc37c8895",
+          "feature": "Scope file change approval cancellation to the requesting turn (#59910)",
+          "batch": 2,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "af2e52c858cf7b16157e945725fd84bd6b90399a",
+          "feature": "Fail closed on unreadable glob search root metadata errors (#57186)",
+          "batch": 2,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "af9a98b07401cb9e5279eb4128e50078b18ee7c4",
+          "feature": "Add opt-in lazy startup for cached stdio MCP servers (#60039)",
+          "batch": 4,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "b7ca29d25b918fffaa62185594bc1970fc037226",
+          "feature": "Recover inherited history from alternate rollout copies (#58959)",
+          "batch": 1,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "b7d2321ef7b2405b72a4186447c810756866896b",
+          "feature": "Derive MCP network policy and preserve saved denials (#60046)",
+          "batch": 4,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "ba057e43758cb19beead2af9df19d10756cc4100",
+          "feature": "Drain queued side-conversation events before switching focus (#59458)",
+          "batch": 5,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "ba0dfd38979033f514a28d9514215bad46957a18",
+          "feature": "Prefer indexed rollout paths when resolving ancestors (#58960)",
+          "batch": 1,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "bf877af4180a40412794c64dad2ab49332c3def1",
+          "feature": "Enable the agent command center in embedded mode (#58239)",
+          "batch": 5,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "bfdbf01bfaeaa6ab23b10e2bd64ed031fd1e5619",
+          "feature": "Move agent message board host integration to app-server (#59162)",
+          "batch": 4,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "c2e4631a34cfcc89828e71952a7a0ffeb36858ac",
+          "feature": "Preserve unrelated side conversations when archiving or deleting threads (#58237)",
+          "batch": 5,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "c8e73bf7198152ecc1158b148105d054add7a525",
+          "feature": "Use the native clipboard for WSL SSH sessions with X11 forwarding (#57504)",
+          "batch": 5,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "c92700d2993707ee16eb63b35a1cdd7fcc563f69",
+          "feature": "Backfill exec completion items through paginated history (#57800)",
+          "batch": 1,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "cf39544acd74ad649d98b96ceb43320b6e9b88ec",
+          "feature": "Resolve startup models using thread creation options (#59987)",
+          "batch": 3,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "d63a3422563f526316318b5cde267bd5713e68b4",
+          "feature": "Support multiple side chats in the TUI sidebar (#59784)",
+          "batch": 5,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "d786ff91fad8e7ddab8653ee07bc6313a6fcb03d",
+          "feature": "Extract channel notification formatting into `PostPreview` (#59688)",
+          "batch": 4,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "d7b77a5e74370f7af4d52ca2dc6e51cb8126660a",
+          "feature": "Show unread sessions and acknowledge viewed transcripts in the picker (#58264)",
+          "batch": 5,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "d92aae550180544fa2b7f656173c837271de6df3",
+          "feature": "Centralize filesystem permission resolution for sandbox enforcement (#59009)",
+          "batch": 2,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "daa69c411c1ed611a357dd97b35edc089bc80399",
+          "feature": "Allow selecting a configured provider in `model/list` (#59776)",
+          "batch": 3,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "db227aed42df3c9d842986860993714de8e6e4d5",
+          "feature": "Add opt-in side conversation panes to the TUI (#58992)",
+          "batch": 5,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "db3c44414c2cd4ae33adaf4fa33382cb3dde6bd5",
+          "feature": "Add directional conversation focus shortcuts in workspace mode (#59287)",
+          "batch": 5,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "df769889c0b4d41afcc9e02502aab91bac862083",
+          "feature": "Reduce SQLite write overhead for thread activity and history (#60006)",
+          "batch": 1,
+          "status": "direct_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "e115d5f90d56d32785b9b01d4c376d7abf94ea7d",
+          "feature": "Keep threads on their saved model provider when defaults change (#59503)",
+          "batch": 3,
+          "status": "direct_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "e8e3197e84c650eea674321da2a434ee8851da28",
+          "feature": "Make side conversation panes resizable and interactive (#59527)",
+          "batch": 5,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "e977cb394d12aacdb4b24a70ddee5b0069062759",
+          "feature": "Preserve tool output versions and history order in rollout traces (#57311)",
+          "batch": 5,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "eab2603712f90ec08ac44207a04eed158be293a3",
+          "feature": "Reuse connected backends in the in-app resume picker (#58280)",
+          "batch": 5,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "eb15d3a0f57a0d7b8c5267885bf2c41ce7ca75c3",
+          "feature": "Add a shortcut to hide the focused side conversation pane (#59130)",
+          "batch": 5,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "ed8eac40832e6a79f30eaeb3c521912f231d43eb",
+          "feature": "Add keyboard controls for TUI pane resizing and zoom (#59595)",
+          "batch": 5,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "f05aa41da6d063cd820dbad207d1cfabae594ff2",
+          "feature": "Route message-board notifications through agent mailboxes (#59139)",
+          "batch": 4,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "f1b942164824353df84302293507874ea44e912c",
+          "feature": "Add model provider browsing to the TUI configuration panel (#59541)",
+          "batch": 3,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "f7167ac895c869c60ae00a2d7f518a9977cd1205",
+          "feature": "Move agent message board cleanup into the app server (#59167)",
+          "batch": 4,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "f732dce4470e2e06952426c6878e286ad427ec7b",
+          "feature": "Enable pane-local image previews in tmux (#59579)",
+          "batch": 5,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "fb2b06a829893a917142dda91089818bff084af4",
+          "feature": "Surface MCP server startup errors when preparing cached tool calls (#60038)",
+          "batch": 4,
+          "status": "adapted_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "ff2346f33f851bd4e90c8e42ae60abcc7e7f293b",
+          "feature": "Bound waits for the thread writer coordination lock (#57360)",
+          "batch": 1,
+          "status": "direct_backport",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "26f73fba8ffd4aeedf6d4734c423982d2fce734a",
+          "feature": "Preserve literal/shell bang semantics in composer draft snapshots",
+          "batch": 5,
+          "status": "adapted_backport",
+          "scope": "Only draft semantics. Host cycling, saved host defaults, and changing /new provider defaults are excluded."
+        },
+        {
+          "commit": "136d891a948177a16c289c5968c40587d463726d",
+          "feature": "Support network_proxy in managed requirements (#57286)",
+          "batch": 2,
+          "status": "adapted_backport",
+          "scope": "Local managed-network spelling compatibility, validation and source attribution needed by human approvals; no hosted configuration requests."
+        },
+        {
+          "commit": "dfcb5b59942a0c1139162a74b6d3a80fa4ca66e5",
+          "feature": "Support managed network requirements under permissions.network (#58182)",
+          "batch": 2,
+          "status": "adapted_backport",
+          "scope": "Independent filesystem/network precedence, conflicting spelling rejection, local policy projection and existing sandbox paths; Cloud validation and hosted policy discovery are excluded."
+        }
+      ],
+      "already_available": [
+        {
+          "commit": "020e0f77080f96a705227096ac943ad0c39184d4",
+          "feature": "Preserve timestamp ties when paginating threads (#58886)",
+          "batch": 1,
+          "status": "already_available",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        },
+        {
+          "commit": "6ba3a84680236c621b93e0b8dc140687a37f41fc",
+          "feature": "Restore spawned descendants when unarchiving a thread (#57635)",
+          "batch": 1,
+          "status": "already_available",
+          "scope": "Selected applicable behavior and necessary dependencies only; not the entire upstream commit."
+        }
+      ]
     }
-  ]
+  ],
+  "upstream_version": "0.165.0"
 }

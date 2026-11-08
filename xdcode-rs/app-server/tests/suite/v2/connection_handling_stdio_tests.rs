@@ -3,6 +3,7 @@
 use anyhow::Context;
 use anyhow::Result;
 use app_test_support::DISABLE_PLUGIN_STARTUP_TASKS_ARG;
+use app_test_support::MockResponsesConfig;
 use app_test_support::TestAppServer;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
@@ -33,7 +34,12 @@ use xdcode_utils_cargo_bin::cargo_bin;
 
 #[tokio::test]
 async fn stdio_sigterm_exits_with_open_pipes() -> Result<()> {
-    let mut app = TestAppServer::builder().build_initialized().await?;
+    let home = TempDir::new()?;
+    MockResponsesConfig::new("http://127.0.0.1:9").write(home.path())?;
+    let mut app = TestAppServer::builder()
+        .with_xdcode_home(home.path())
+        .build_initialized()
+        .await?;
 
     app.send_sigterm()?;
     // wait_for_exit leaves both pipes open and does not drain stdout. Success catches an
@@ -52,6 +58,7 @@ async fn stdio_sigterm_exits_with_open_pipes() -> Result<()> {
 async fn stdio_sigterm_times_out_with_blocked_stderr() -> Result<()> {
     // TestAppServer drains stderr, so keep this subprocess's stderr pipe unread.
     let xdcode_home = TempDir::new()?;
+    MockResponsesConfig::new("http://127.0.0.1:9").write(xdcode_home.path())?;
     let mut process = tokio::process::Command::new(cargo_bin("xdcode-app-server")?)
         .arg(DISABLE_PLUGIN_STARTUP_TASKS_ARG)
         .env("XDCODE_HOME", xdcode_home.path())
@@ -114,6 +121,7 @@ async fn stdio_sigterm_times_out_with_blocked_stderr() -> Result<()> {
 #[tokio::test]
 async fn stdio_shutdown_times_out_with_blocked_file_write(shutdown: Shutdown) -> Result<()> {
     let xdcode_home = TempDir::new()?;
+    MockResponsesConfig::new("http://127.0.0.1:9").write(xdcode_home.path())?;
     let path = xdcode_home.path().join("blocked-write");
     let status = Command::new("mkfifo").arg(&path).status()?;
     assert!(status.success(), "failed to create FIFO: {status}");
@@ -196,7 +204,12 @@ async fn stdio_shutdown_terminates_commands_and_children(shutdown: Shutdown) -> 
         "asserts that processes owned by the local app-server exit"
     );
     let workspace = TempDir::new()?;
-    let mut app = TestAppServer::builder().build_initialized().await?;
+    let home = TempDir::new()?;
+    MockResponsesConfig::new("http://127.0.0.1:9").write(home.path())?;
+    let mut app = TestAppServer::builder()
+        .with_xdcode_home(home.path())
+        .build_initialized()
+        .await?;
 
     let script = r#"sleep 120 & child=$!; printf '%s %s\n' "$$" "$child" > pids; wait "$child""#;
     app.send_command_exec_request(CommandExecParams {

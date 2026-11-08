@@ -134,10 +134,6 @@ fn full_disk_write_proxy_only_keeps_full_filesystem_but_unshares_network() {
 
 #[test]
 fn full_disk_write_with_unreadable_glob_still_wraps_and_masks_match() {
-    if !ripgrep_available() {
-        return;
-    }
-
     let temp_dir = TempDir::new().expect("temp dir");
     let root_env = temp_dir.path().join(".env");
     std::fs::write(&root_env, "secret").expect("write env");
@@ -1394,19 +1390,17 @@ fn assert_bind_data_uses_distinct_preserved_fds(args: &BwrapArgs) {
 
 #[test]
 fn unreadable_globs_expand_existing_matches_with_configured_depth() {
-    if !ripgrep_available() {
-        return;
-    }
-
     let temp_dir = TempDir::new().expect("temp dir");
     let root_env = temp_dir.path().join(".env");
     let nested_env = temp_dir.path().join("app").join(".env");
     let too_deep_env = temp_dir.path().join("app").join("deep").join(".env");
+    let literal_env = temp_dir.path().join("[literal.env");
     std::fs::create_dir_all(too_deep_env.parent().expect("parent")).expect("create parent");
     std::fs::write(temp_dir.path().join(".gitignore"), ".env\n").expect("write gitignore");
     std::fs::write(&root_env, "secret").expect("write root env");
     std::fs::write(&nested_env, "secret").expect("write nested env");
     std::fs::write(&too_deep_env, "secret").expect("write deep env");
+    std::fs::write(&literal_env, "secret").expect("write literal class env");
     let policy =
         default_policy_with_unreadable_glob(format!("{}/**/*.env", temp_dir.path().display()));
 
@@ -1430,15 +1424,35 @@ fn unreadable_globs_expand_existing_matches_with_configured_depth() {
         "max depth should keep deeper matches out of bwrap args: {:#?}",
         args.args
     );
+    for (glob, expected) in [
+        ("*.env", vec![root_env.clone(), literal_env.clone()]),
+        (
+            "**/*.env",
+            vec![root_env, literal_env.clone(), nested_env.clone()],
+        ),
+        ("app*/.env", vec![nested_env]),
+        ("[*.env", vec![literal_env.clone()]),
+        (r"\[*.env", vec![literal_env]),
+    ] {
+        assert_eq!(
+            expand_unreadable_globs(
+                &[format!("{}/{glob}", temp_dir.path().display())],
+                temp_dir.path(),
+                Some(2),
+            )
+            .expect("expand scanner glob"),
+            expected
+                .into_iter()
+                .map(|path| AbsolutePathBuf::from_absolute_path_checked(path)
+                    .expect("absolute path"))
+                .collect::<Vec<_>>(),
+        );
+    }
 }
 
 #[cfg(unix)]
 #[test]
 fn unreadable_globs_add_canonical_targets_for_symlink_matches() {
-    if !ripgrep_available() {
-        return;
-    }
-
     let temp_dir = TempDir::new().expect("temp dir");
     let real_root = temp_dir.path().join("real");
     let link_root = temp_dir.path().join("link");
@@ -1459,6 +1473,72 @@ fn unreadable_globs_add_canonical_targets_for_symlink_matches() {
     .expect("filesystem args");
 
     assert_file_masked(&args.args, &real_secret);
+}
+
+#[test]
+fn unreadable_glob_root_metadata_errors_fail_before_scanning() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let root = temp_dir.path().join("loop");
+    std::os::unix::fs::symlink(&root, &root).expect("create symlink loop");
+    let error = expand_unreadable_globs_with_ripgrep(
+        &[format!("{}.env", root.display())],
+        temp_dir.path(),
+        || Some(temp_dir.path().join("scanner-must-not-run")),
+        None,
+        |_| panic!("scanner must not run after a root metadata error"),
+    )
+    .expect_err("metadata errors must reject deny-glob expansion")
+    .to_string();
+
+    assert!(error.contains(&root.display().to_string()));
+    assert!(error.contains(&io::Error::from_raw_os_error(libc::ELOOP).to_string()));
+}
+
+#[test]
+fn unreadable_globs_skip_absent_and_non_directory_roots() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let missing = temp_dir.path().join("missing");
+    let file = temp_dir.path().join("file");
+    fs::write(&file, "ordinary file").expect("write file");
+
+    for root in [missing, file.join("child"), file] {
+        let paths = expand_unreadable_globs_with_ripgrep(
+            &[format!("{}.env", root.display())],
+            temp_dir.path(),
+            || None,
+            None,
+            |_| {},
+        )
+        .expect("roots without possible matches should be skipped");
+
+        assert_eq!(paths, Vec::<AbsolutePathBuf>::new());
+    }
+}
+
+#[test]
+fn unreadable_globs_follow_symlink_roots_without_ripgrep() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let root = temp_dir.path().join("data");
+    fs::create_dir(&root).expect("create directory");
+    let secret = root.join(".env");
+    fs::write(&secret, "secret").expect("write secret");
+    let link = temp_dir.path().join("link");
+    std::os::unix::fs::symlink(&root, &link).expect("create directory symlink");
+
+    let paths = expand_unreadable_globs_with_ripgrep(
+        &[format!("{}.env", link.display())],
+        temp_dir.path(),
+        || None,
+        None,
+        |_| panic!("fallback scanner must not launch ripgrep"),
+    )
+    .expect("expand deny glob");
+    let expected = [secret, link.join(".env")]
+        .into_iter()
+        .map(|path| AbsolutePathBuf::from_absolute_path_checked(path).expect("absolute path"))
+        .collect::<Vec<_>>();
+
+    assert_eq!(paths, expected);
 }
 
 #[test]

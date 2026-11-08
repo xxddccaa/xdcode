@@ -8,8 +8,11 @@ use xdcode_config::ConfigLayerSource;
 use xdcode_config::test_support::CloudConfigBundleFixture;
 use xdcode_core_plugins::PluginLoadOutcome;
 
+const RESPONSES_CONFIG: &str = "model = 'test-model'\nmodel_provider = 'test-responses'\n[model_providers.test-responses]\nname = 'Local Responses fixture'\nbase_url = 'http://127.0.0.1:9/v1'\nwire_api = 'responses'\n";
+
 async fn base_config() -> (tempfile::TempDir, Config) {
     let home = tempfile::tempdir().unwrap();
+    std::fs::write(home.path().join(CONFIG_TOML_FILE), RESPONSES_CONFIG).unwrap();
     let config = ConfigBuilder::without_managed_config_for_tests()
         .xdcode_home(home.path().to_path_buf())
         .fallback_cwd(Some(home.path().to_path_buf()))
@@ -26,7 +29,11 @@ async fn layered_config(
     requirements: &str,
     session: &str,
 ) -> Config {
-    std::fs::write(base.xdcode_home.join(CONFIG_TOML_FILE), user).unwrap();
+    std::fs::write(
+        base.xdcode_home.join(CONFIG_TOML_FILE),
+        format!("{RESPONSES_CONFIG}\n{user}"),
+    )
+    .unwrap();
     let overrides: toml::Table = toml::from_str(session).unwrap();
     ConfigBuilder::without_managed_config_for_tests()
         .xdcode_home(base.xdcode_home.to_path_buf())
@@ -55,6 +62,31 @@ fn runtime_servers(config: &Config) -> HashMap<String, McpServerConfig> {
     xdcode_mcp::configured_mcp_servers(
         &config.to_mcp_config_with_loaded_plugins(&PluginLoadOutcome::default(), []),
     )
+}
+
+#[tokio::test]
+async fn mcp_refresh_keeps_confirmed_provider_when_session_configuration_changes() {
+    let (_home, current) = base_config().await;
+    let incoming = layered_config(
+        &current,
+        "",
+        "",
+        "",
+        "model = 'other-model'\nmodel_provider = 'other-responses'\n[model_providers.other-responses]\nname = 'Other local Responses fixture'\nbase_url = 'http://127.0.0.1:10/v1'\nwire_api = 'responses'\n",
+    )
+    .await;
+    assert_ne!(incoming.model_provider_id, current.model_provider_id);
+    assert_ne!(incoming.model_provider, current.model_provider);
+    for scope in [
+        RuntimeConfigRefresh::User,
+        RuntimeConfigRefresh::Mcp,
+        RuntimeConfigRefresh::UserFiles,
+    ] {
+        let refreshed = current.resolve_runtime_refresh(&incoming, scope).unwrap();
+        assert_eq!(refreshed.model, current.model);
+        assert_eq!(refreshed.model_provider_id, current.model_provider_id);
+        assert_eq!(refreshed.model_provider, current.model_provider);
+    }
 }
 
 #[test_case::test_case(RuntimeConfigRefresh::User; "user refresh")]

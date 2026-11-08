@@ -684,7 +684,11 @@ enabled = false
     let snapshot = skills_service
         .snapshot_for_config(
             &skills_input,
-            Some(Arc::clone(&xdcode_exec_server::LOCAL_FS)),
+            Some(
+                &xdcode_exec_server::FileSystemEnvironmentAccessor::unrestricted(
+                    &xdcode_exec_server::LOCAL_FS,
+                ),
+            ),
         )
         .await;
     let outcome = snapshot.outcome();

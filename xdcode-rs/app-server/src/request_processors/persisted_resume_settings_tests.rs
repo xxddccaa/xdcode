@@ -10,7 +10,6 @@ use xdcode_protocol::models::ActivePermissionProfile;
 use xdcode_protocol::models::PermissionProfile;
 use xdcode_protocol::protocol::AskForApproval;
 use xdcode_protocol::protocol::EventMsg;
-use xdcode_protocol::protocol::SandboxPolicy;
 use xdcode_protocol::protocol::ThreadSettingsAppliedEvent;
 use xdcode_protocol::protocol::ThreadSettingsSnapshot;
 use xdcode_protocol::protocol::TurnContextItem;
@@ -75,10 +74,8 @@ fn turn_context_item(
         cwd: cwd(),
         approval_policy,
         approvals_reviewer,
-        sandbox_policy: SandboxPolicy::new_read_only_policy(),
-        permission_profile: Some(PermissionProfile::read_only()),
+        permission_profile: PermissionProfile::read_only(),
         active_permission_profile,
-        file_system_sandbox_policy: None,
         model: "gpt-5".to_string(),
         comp_hash: None,
         collaboration_mode: None,

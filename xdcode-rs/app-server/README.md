@@ -107,6 +107,14 @@ The field is null for older history and tools that declare widgets only in
 result metadata; clients retain catalog discovery for those calls. Existing
 resource URI fields remain available for older clients.
 
+Clients can pass an optional `_meta` object on `mcpServer/resource/read`.
+The app server forwards its entries to MCP `resources/read`, including reads
+bound to an originating tool call. The keys `x-xdcode-turn-metadata`, `threadId`,
+and `codex/connectionLease` are reserved for host context on every MCP server. Reads to `xdcode_apps`
+additionally reserve `connector_id`, `link_id`, and the nested
+`_xdcode_apps.resource_uri` field for hosted app routing. A request that includes
+a reserved field in `_meta` is rejected before the MCP read is sent.
+
 # Initial Daybreak choice (experimental)
 
 Persistent threads accept `daybreakEnabled` on `thread/start` with the
@@ -301,6 +309,37 @@ be loaded. This covers turn start/steer, review, compaction, manual queue start,
 updates. Realtime connections use separate routing configuration and are not checked here.
 Interrupt, realtime stop, and goal pause/clear remain available. User and project
 configuration changes alone do not invalidate existing threads.
+
+## Managed network requirements
+
+In `requirements.toml`, put shared network constraints directly in `[permissions.network]`,
+alongside `[permissions.filesystem]`:
+
+```toml
+[permissions.network]
+enabled = true
+```
+
+`[network_proxy]` and its compatibility alias `[experimental_network]` still work.
+Do not mix either with `[permissions.network]`, even across requirements layers. A single
+layer cannot use both top-level names; across layers the top-level names merge with normal
+precedence. `configRequirements/read` returns the result in `requirements.network`.
+
+In `config.toml`, `[features.network_proxy]` configures the proxy, while
+`[permissions.<profile>.network]` configures a profile's network settings. Managed requirements
+remain separate and override conflicting profile settings. They can start the proxy without
+enabling the feature; feature settings apply only when the feature is enabled.
+
+In `requirements.toml`, `network` is reserved, like `filesystem`. Rename any managed profile
+named `network` and update its references before upgrading. An empty `[permissions.network]`
+is rejected because it is indistinguishable from an old empty profile. Omit the table when
+there are no shared network settings. A profile named `network` is still allowed in `config.toml`.
+
+Policy publishers must continue using `[experimental_network]` until every client and policy
+validation layer supports the chosen new spelling. Older clients or intermediaries may ignore or
+strip constraints in `[network_proxy]` or `[permissions.network]`; intermediaries may also skip
+host-local validation. This reader change does not migrate or
+version-gate published policy bundles.
 
 # Amazon Bedrock authentication
 

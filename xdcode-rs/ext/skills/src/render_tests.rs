@@ -11,9 +11,11 @@ use std::sync::Arc;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 use tokio::sync::Semaphore;
+use xdcode_exec_server::FileSystemEnvironmentAccessor;
 use xdcode_exec_server::LOCAL_FS;
 use xdcode_extension_api::ContextualUserFragment;
 use xdcode_protocol::protocol::SkillScope;
+use xdcode_protocol_test_support::ContentItemTestExt;
 use xdcode_utils_absolute_path::AbsolutePathBuf;
 
 use crate::catalog_prompt::render_available_skills_body;
@@ -37,6 +39,30 @@ fn render_combined_available_skills(
         budget,
         include_skills_usage_instructions,
     )
+}
+
+#[test]
+fn edits_beyond_the_catalog_description_cap_keep_the_same_fingerprint() {
+    let prefix = "a".repeat(MAX_CATALOG_SKILL_DESCRIPTION_CHARS);
+    let fingerprint = |suffix| {
+        let catalog = SkillCatalog {
+            entries: vec![entry("release-notes", &format!("{prefix}{suffix}"), None)],
+            ..SkillCatalog::default()
+        };
+        let prepared =
+            PreparedSkillCatalog::new(&catalog, SkillCatalogRenderPolicy::CoreCompatible);
+        let rendered = prepared
+            .render(SkillMetadataBudget::Characters(8_000), false)
+            .unwrap();
+        prepared
+            .entries_for_render(&rendered, None, None)
+            .into_values()
+            .next()
+            .unwrap()
+            .snapshot
+            .fingerprint
+    };
+    assert_eq!(fingerprint("draft"), fingerprint("published"));
 }
 
 #[test]
@@ -517,6 +543,7 @@ fn executor_aliases_preserve_literal_backslashes_in_package_ids() {
 
 #[tokio::test]
 async fn host_alias_roots_follow_core_discovery_order() -> Result<(), Box<dyn std::error::Error>> {
+    let access = FileSystemEnvironmentAccessor::unrestricted(&LOCAL_FS);
     let unique = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
     let parent = std::env::temp_dir().join(format!(
         "xdcode-skills-extension-alias-order-{}-{unique}",
@@ -541,12 +568,8 @@ async fn host_alias_roots_follow_core_discovery_order() -> Result<(), Box<dyn st
     let system_root = AbsolutePathBuf::try_from(std::fs::canonicalize(&system_root_path)?)?;
     let outcome = load_and_merge_host_skill_roots(
         vec![
-            HostSkillRoot::host(user_root.clone(), SkillScope::User, Arc::clone(&LOCAL_FS)),
-            HostSkillRoot::host(
-                system_root.clone(),
-                SkillScope::System,
-                Arc::clone(&LOCAL_FS),
-            ),
+            HostSkillRoot::host(user_root.clone(), SkillScope::User, &access),
+            HostSkillRoot::host(system_root.clone(), SkillScope::System, &access),
         ],
         &Semaphore::new(/*permits*/ 2),
         /*restriction_product*/ None,
@@ -899,6 +922,7 @@ fn mixed_catalog_prefers_executor_inclusion_over_total_aliased_inclusion() {
 #[tokio::test]
 async fn singleton_plugin_versions_share_the_marketplace_alias_root()
 -> Result<(), Box<dyn std::error::Error>> {
+    let access = FileSystemEnvironmentAccessor::unrestricted(&LOCAL_FS);
     let unique = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
     let parent = std::env::temp_dir().join(format!(
         "xdcode-skills-extension-marketplace-alias-{}-{unique}",
@@ -917,7 +941,7 @@ async fn singleton_plugin_versions_share_the_marketplace_alias_root()
         roots.push(HostSkillRoot::host(
             AbsolutePathBuf::try_from(std::fs::canonicalize(root)?)?,
             SkillScope::User,
-            Arc::clone(&LOCAL_FS),
+            &access,
         ));
     }
     let marketplace_root = dunce::canonicalize(&marketplace_path)?
@@ -1124,13 +1148,6 @@ fn catalog_emits_omission_marker_when_every_minimum_skill_line_exceeds_budget() 
         truncated_description_chars: MAX_CATALOG_SKILL_DESCRIPTION_CHARS,
         truncated_description_count: 1,
     };
-    assert_eq!(
-        expected_report.warning_message(),
-        Some(
-            "Exceeded skills context budget. All skill descriptions were removed and 1 additional skill was not included in the model-visible skills list."
-                .to_string()
-        )
-    );
     let core_render = render_available_skills(
         &catalog,
         SkillCatalogRenderPolicy::CoreCompatible,
@@ -1140,6 +1157,18 @@ fn catalog_emits_omission_marker_when_every_minimum_skill_line_exceeds_budget() 
     )
     .expect("core-compatible report should render");
     assert_eq!(core_render.report, expected_report);
+    assert_eq!(
+        core_render.report.warning_message(false).as_deref(),
+        Some(
+            "Exceeded skills context budget. All skill descriptions were removed and 1 additional skill was not included in the model-visible skills list."
+        )
+    );
+    assert_eq!(
+        core_render.report.warning_message(true).as_deref(),
+        Some(
+            "Exceeded skills context budget. Some skills were not included in the model-visible skills list."
+        )
+    );
     let core_fragment = core_render
         .into_fragment(/*include_skills_usage_instructions*/ false)
         .expect("core-compatible rendering should preserve an empty skills fragment");

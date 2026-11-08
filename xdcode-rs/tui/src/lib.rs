@@ -209,6 +209,8 @@ mod session_resume;
 mod session_start;
 mod session_state;
 mod shortcut_help;
+mod sidebar_chooser;
+mod sidebar_tab_strip;
 mod skills_helpers;
 mod slash_command;
 mod startup_draft;
@@ -629,6 +631,7 @@ async fn start_app_server(
     .map(AppServerClient::InProcess)
 }
 
+#[cfg(test)]
 pub(crate) async fn start_app_server_for_picker(
     backend_id: crate::backend_id::BackendId,
     config: &Config,
@@ -1137,6 +1140,20 @@ fn restore_terminal_before_fatal_exit() {
     startup_recovery::print_unsent_draft();
 }
 
+/// Construct a large future outside its caller's poll frame before boxing it.
+/// `Box::pin(large_future())` can still reserve the future's full size on that stack.
+#[inline(never)]
+fn box_future<F: std::future::Future>(create: impl FnOnce() -> F) -> std::pin::Pin<Box<F>> {
+    Box::pin(create())
+}
+
+macro_rules! boxed_future {
+    ($future:expr) => {
+        $crate::box_future(|| $future)
+    };
+}
+pub(crate) use boxed_future;
+
 pub async fn run_main(
     cli: Cli,
     arg0_paths: Arg0DispatchPaths,
@@ -1147,7 +1164,7 @@ pub async fn run_main(
     startup_recovery::scope(async move {
         // Startup retains a large future for the whole session. Keep it off callers' stacks,
         // which also need room to construct a replacement chat widget on `/new`.
-        match Box::pin(startup_orchestration::run_main_inner(
+        match boxed_future!(startup_orchestration::run_main_inner(
             cli,
             arg0_paths,
             loader_overrides,
@@ -1898,12 +1915,10 @@ async fn run_ratatui_app(
     }
 
     // The shared overview does not open a workspace; session selection checks trust when needed.
-    // Embedded fallback cannot show the overview and still needs normal startup initialization.
-    if (!matches!(
+    if !matches!(
         session_selection,
         resume_picker::SessionSelection::AgentsOverview
-    ) || matches!(app_server_target, AppServerTarget::Embedded))
-        && (!uses_remote_workspace || remote_cwd_override.is_some())
+    ) && (!uses_remote_workspace || remote_cwd_override.is_some())
     {
         let resumed_thread = if matches!(app_server_target, AppServerTarget::LocalDaemon { .. })
             && let resume_picker::SessionSelection::Resume(target) = &session_selection
@@ -1982,17 +1997,6 @@ async fn run_ratatui_app(
                 trust_decision_was_made = true;
             }
         } else if consent.should_exit {
-            if matches!(app_server_target, AppServerTarget::Embedded) {
-                shutdown_startup_session(Some(app_server), &mut terminal_restore_guard).await;
-                return Ok(AppExitInfo {
-                    token_usage: crate::token_usage::TokenUsage::default(),
-                    thread_id: None,
-                    resume_hint: None,
-                    disconnect_info: None,
-                    update_action: None,
-                    exit_reason: ExitReason::UserRequested,
-                });
-            }
             if !uses_remote_workspace {
                 config = load_config_or_exit_with_fallback_cwd(
                     cli_kv_overrides.clone(),
@@ -2148,7 +2152,7 @@ async fn run_ratatui_app(
 
     // Keep the large event-loop future out of the enclosing startup futures so session
     // transitions have enough stack headroom to rebuild configuration and the chat widget.
-    let app_result = Box::pin(App::run(
+    let app_result = boxed_future!(App::run(
         &mut tui,
         crate::app::backend_sessions::InitialBackendSessions::singleton(app_server),
         config,

@@ -1,0 +1,76 @@
+# Message-board MCP adapter
+
+`MessageBoardMcpServer` implements `rmcp::ServerHandler` over the existing
+`xdcode-message-board` tool factory. It reuses the selected tools' descriptions,
+input schemas, validation, permission checks, output budgets and storage behavior.
+It has no dependency on `xdcode-core`.
+
+A host supplies an authorized board connection, caller ID and caller path, then
+serves one adapter instance per MCP session using its chosen `rmcp` transport:
+
+```rust,ignore
+use xdcode_message_board::MessageBoardTool;
+use xdcode_message_board_mcp::MessageBoardMcpServer;
+use rmcp::ServiceExt;
+
+let server = MessageBoardMcpServer::new(
+    &MessageBoardTool::DISCUSSION,
+    board,
+    caller,
+    caller_path,
+);
+let running = server.serve(transport).await?;
+running.waiting().await?;
+```
+
+The host owns transport setup and authentication. Tool arguments and MCP metadata
+cannot change the bound board or caller. Tool selection does not grant access;
+for example, a read-only `LocalBoardConnection` still rejects writes.
+
+Posts retain the board's request deduplication within a session. Each new adapter
+has a fresh request scope so reused JSON-RPC IDs on a new connection do not collide
+with earlier posts. This does not provide deduplication across reconnects.
+
+Results include JSON text and, for object results, matching structured content.
+Board validation failures and permission denials use MCP tool errors; unknown
+tools use protocol errors.
+
+Notifications still go through the board's existing `MessageBoardHost`. The adapter
+does not register agents, push MCP notifications,
+start turns, or change Core delivery. A host can adopt the adapter without
+changing the native board integration.
+
+## HTTP server
+
+Build with `cargo build -p xdcode-message-board-mcp` from `xdcode-rs`. Set
+`XDCODE_MESSAGE_BOARD_TOKEN`, then run:
+
+```sh
+target/debug/xdcode-message-board-mcp --sqlite-home /absolute/path/to/xdcode/sqlite-directory --listen 127.0.0.1:7777
+```
+
+Connect with ordinary MCP config; keep the native `agent_message_board` feature disabled:
+
+```toml
+[mcp_servers.xdcode_message_board]
+url = "http://127.0.0.1:7777/mcp"
+bearer_token_env_var = "XDCODE_MESSAGE_BOARD_TOKEN"
+required = true
+```
+
+The executable prints its URL and shuts down on Ctrl-C. It validates membership
+against the existing read-only Xdcode registry and uses the existing SQLite board,
+system time and no notification delivery. Core delivery is a separate change.
+
+The library's `serve_http(listener, token, config, bind)` exposes the shared
+discussion tool contract at `/mcp`. Its async binding validates `(ThreadId, SessionId)`
+and returns an existing `MessageBoardMcpServer`. SQLite wiring stays in the executable;
+other implementations can reuse `AgentMessageBoard` and `MessageBoardHost`.
+
+Calls use Xdcode's `threadId` and `sessionId` metadata. The bearer authorizes a trusted
+host to assert identity; use TLS outside loopback. Add `--allowed-host board.example.com`
+for a remote hostname (repeat for multiple names); loopback hosts remain allowed.
+Library callers configure this through `StreamableHttpServerConfig`. Normal MCP
+approval policy applies.
+Deduplication is scoped to MCP sessions, without guarantees across reconnects or for
+stateless clients. Plugin packaging, defaults and in-memory launching are separate.

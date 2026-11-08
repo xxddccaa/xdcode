@@ -65,6 +65,7 @@ pub(crate) struct SessionServices {
     /// Upload-only clients shared across turns without logging signed blob URLs.
     pub(crate) provider_file_upload_client_pool: RouteAwareClientPool,
     pub(crate) models_manager: SharedModelsManager,
+    pub(crate) model_catalog: crate::thread_manager::model_catalog::ThreadModelCatalog,
     pub(crate) git_root_discovery: Arc<GitRootDiscovery>,
     pub(crate) session_telemetry: SessionTelemetry,
     pub(crate) tool_approvals: Mutex<ApprovalStore>,

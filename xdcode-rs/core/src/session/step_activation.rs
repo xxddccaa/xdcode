@@ -410,11 +410,15 @@ impl Session {
                 environments,
             ),
         };
+        let models_manager = self.services.model_catalog.for_config(
+            &turn_context.config,
+            Arc::clone(&self.services.auth_manager),
+        );
         current
             .apply_update(
                 update,
                 &constraints,
-                self.services.models_manager.as_ref(),
+                models_manager.as_ref(),
                 &overrides,
                 &self.features,
             )

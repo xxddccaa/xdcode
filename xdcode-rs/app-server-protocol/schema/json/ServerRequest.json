@@ -342,7 +342,8 @@
       "description": "Distinguishes a command approval from input sent to an existing terminal.",
       "enum": [
         "command",
-        "writeStdin"
+        "writeStdin",
+        "humanCommand"
       ],
       "type": "string"
     },

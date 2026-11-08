@@ -1982,6 +1982,8 @@ impl TestAppServerBuilder {
             Some(xdcode_home) => (xdcode_home, None),
             None => {
                 let owned_xdcode_home = TempDir::new()?;
+                crate::MockResponsesConfig::new("http://127.0.0.1:9")
+                    .write(owned_xdcode_home.path())?;
                 (
                     owned_xdcode_home.path().to_path_buf(),
                     Some(owned_xdcode_home),

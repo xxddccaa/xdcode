@@ -152,6 +152,9 @@ mod mcp_resource_messages;
 #[path = "scenarios_mcp_ema.rs"]
 mod mcp_ema;
 
+#[path = "scenarios_mcp_sharing.rs"]
+mod mcp_sharing;
+
 #[path = "scenarios_guardian_agent_messages_tests.rs"]
 mod guardian_agent_messages;
 
@@ -192,11 +195,14 @@ mod frozen_cloud_skills;
 
 #[path = "scenarios_compaction_tests.rs"]
 mod compaction;
+#[path = "scenarios_injected_agent_mail.rs"]
+mod injected_agent_mail;
 
 fn skills_extensions() -> Arc<ExtensionRegistry<Config>> {
     let mut extensions = ExtensionRegistryBuilder::<Config>::new();
     install(&mut extensions, |config: &Config| SkillsExtensionConfig {
         include_instructions: config.include_skill_instructions,
+        catalog_deltas_enabled: config.features.enabled(Feature::SkillCatalogDeltas),
         max_context_tokens: config.skill_max_context_tokens,
         bundled_skills_enabled: config.bundled_skills_enabled(),
         cloud_skill_enabled: config.cloud_skill_enabled,
@@ -291,7 +297,7 @@ fn plugin(name: &str) -> UserInput {
     }
 }
 
-fn configure_scenario_catalog(config: &mut Config) {
+pub(super) fn configure_scenario_catalog(config: &mut Config) {
     // Keep the fixture independent of the checkout's project configuration.
     let stack = &config.config_layer_stack;
     config.config_layer_stack = ConfigLayerStack::new(
@@ -986,6 +992,7 @@ async fn astra_omits_disabled_executor_and_plugin_skills_from_model_context(
         SkillProviders::new().with_executor_provider(Arc::new(provider)),
         |config: &Config| SkillsExtensionConfig {
             include_instructions: config.include_skill_instructions,
+            catalog_deltas_enabled: config.features.enabled(Feature::SkillCatalogDeltas),
             max_context_tokens: config.skill_max_context_tokens,
             bundled_skills_enabled: false,
             cloud_skill_enabled: false,
@@ -1472,6 +1479,7 @@ async fn skill_read_recovers_omitted_installation_and_reads_selected_environment
             )),
         |config: &Config| SkillsExtensionConfig {
             include_instructions: config.include_skill_instructions,
+            catalog_deltas_enabled: config.features.enabled(Feature::SkillCatalogDeltas),
             max_context_tokens: config.skill_max_context_tokens,
             bundled_skills_enabled: false,
             cloud_skill_enabled: true,
@@ -2600,6 +2608,105 @@ async fn prediction_fork_preserves_context_above_compaction_threshold() -> Resul
         "The parent finishes above the compaction threshold. Its prediction fork retains the parent's context and reminder, but neither compacts nor adds another reminder after a tool call.",
         &requests,
         &ContextSnapshotOptions::default().include_request_settings(),
+    ));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn attached_side_chat_preserves_model_context_on_cold_resume() -> Result<()> {
+    use xdcode_context_fragments::SideConversationPolicy;
+    use xdcode_history::InitialHistory;
+    use xdcode_history::ResumedHistory;
+    use xdcode_protocol::protocol::ThreadHistoryMode;
+    use xdcode_thread_store::ForkBoundary;
+    use xdcode_thread_store::LoadThreadHistoryParams;
+    use xdcode_thread_store::PrepareForkParams;
+
+    skip_if_no_network!(Ok(()));
+    let server = start_mock_server().await;
+    let mock = mount_sse_sequence(
+        &server,
+        [
+            ("parent", "The migration is scheduled for Thursday."),
+            ("side", "Stage a rollback before migration."),
+            ("resumed", "Keep the rollback script close."),
+        ]
+        .into_iter()
+        .map(|(id, reply)| sse(vec![ev_assistant_message(id, reply), ev_completed(id)]))
+        .collect(),
+    )
+    .await;
+    let mut test = test_xdcode()
+        .with_model("gpt-6-astra")
+        .with_history_mode(ThreadHistoryMode::Paginated)
+        .with_config(|config| {
+            configure_scenario_catalog(config);
+            config.workspace_roots = vec![config.cwd.clone()];
+            config.developer_instructions = Some("Use plain language.".to_string());
+        })
+        .build_with_auto_env(&server)
+        .await?;
+    test.submit_text_turn("Plan a database migration.").await?;
+    test.xdcode.flush_rollout().await?;
+
+    let prepared = test
+        .thread_store
+        .prepare_fork(PrepareForkParams {
+            thread_id: test.session_configured.thread_id,
+            boundary: ForkBoundary::Latest,
+        })
+        .await?;
+    let mut options = test.start_thread_options().await;
+    options.attached_thread = true;
+    options.config.developer_instructions = Some(
+        SideConversationPolicy::Attached
+            .instructions(options.config.developer_instructions.as_deref()),
+    );
+    let mut resume_options = StartThreadOptions::new(options.config.clone());
+    resume_options.environments = options.environments.clone();
+    let child = test
+        .thread_manager
+        .fork_prepared_thread(options, prepared)
+        .await?;
+    child
+        .thread
+        .inject_response_items(SideConversationPolicy::Attached.fork_items())
+        .await?;
+    test.xdcode.shutdown_and_wait().await?;
+    test.xdcode = child.thread;
+    test.submit_text_turn("What is the safest rollback plan?")
+        .await?;
+
+    test.xdcode.shutdown_and_wait().await?;
+    test.thread_manager.remove_thread(&child.thread_id).await;
+    let saved = test
+        .thread_store
+        .load_latest_model_context(LoadThreadHistoryParams {
+            thread_id: child.thread_id,
+            include_archived: false,
+        })
+        .await?;
+    resume_options.initial_history = InitialHistory::Resumed(ResumedHistory {
+        history_revision: saved.revision,
+        conversation_id: saved.thread_id,
+        history: Arc::new(saved.items),
+        rollout_path: test.xdcode.rollout_path(),
+    });
+    resume_options.client_mcp_extensions = test.xdcode.client_mcp_extensions();
+    test.xdcode = test
+        .thread_manager
+        .start_thread(resume_options)
+        .await?
+        .thread;
+    test.submit_text_turn("What did you recommend before I closed the chat?")
+        .await?;
+
+    let requests = mock.requests();
+    assert_eq!(requests.len(), 3);
+    insta::assert_snapshot!(context_snapshot::format_request_history_snapshot(
+        "A side chat receives the parent turn as reference, adds its own turn, and resumes from disk with the policy and prior answer intact.",
+        &requests,
+        &ContextSnapshotOptions::default(),
     ));
     Ok(())
 }

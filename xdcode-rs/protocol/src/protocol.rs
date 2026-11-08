@@ -788,6 +788,10 @@ pub enum Op {
         decision: ReviewDecision,
     },
 
+    /// Cancel the file change approval issued by the named turn.
+    #[debug("CancelPatchApproval {{ id: {id:?}, turn_id: {turn_id:?} }}")]
+    CancelPatchApproval { id: String, turn_id: String },
+
     /// Resolve an MCP elicitation request.
     #[debug("ResolveElicitation {{ request_id: {request_id:?}, decision: {decision:?} }}")]
     ResolveElicitation {
@@ -1072,7 +1076,7 @@ impl Op {
             Self::TurnSettings { .. } => "turn_settings",
             Self::InterAgentCommunication { .. } => "inter_agent_communication",
             Self::ExecApproval { .. } => "exec_approval",
-            Self::PatchApproval { .. } => "patch_approval",
+            Self::PatchApproval { .. } | Self::CancelPatchApproval { .. } => "patch_approval",
             Self::ResolveElicitation { .. } => "resolve_elicitation",
             Self::UserInputAnswer { .. } => "user_input_answer",
             Self::RequestPermissionsResponse { .. } => "request_permissions_response",
@@ -1608,6 +1612,14 @@ pub enum EventMsg {
     ViewImageToolCall(ViewImageToolCallEvent),
 
     ExecApprovalRequest(ExecApprovalRequestEvent),
+
+    /// Ends an in-process network prompt, including when its proxy request is dropped.
+    #[serde(skip)]
+    #[schemars(skip)]
+    #[ts(skip)]
+    NetworkApprovalResolved {
+        approval_id: String,
+    },
 
     RequestPermissions(RequestPermissionsEvent),
 
@@ -3469,7 +3481,7 @@ impl WorldStateItem {
 /// context updates, and again after mid-turn compaction when replacement
 /// history re-establishes full context, so resume/fork replay can recover the
 /// latest durable baseline.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema, TS)]
+#[derive(Serialize, Clone, Debug, PartialEq, JsonSchema, TS)]
 pub struct TurnContextItem {
     /// Provider route pinned for this turn, independent of later thread defaults.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3491,15 +3503,11 @@ pub struct TurnContextItem {
     pub approval_policy: AskForApproval,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approvals_reviewer: Option<ApprovalsReviewer>,
-    pub sandbox_policy: SandboxPolicy,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub permission_profile: Option<PermissionProfile>,
+    pub permission_profile: PermissionProfile,
     /// Built-in or named profile that produced `permission_profile`, when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub active_permission_profile: Option<ActivePermissionProfile>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub file_system_sandbox_policy: Option<RawFileSystemSandboxPolicy>,
     pub model: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub comp_hash: Option<String>,
@@ -3519,27 +3527,86 @@ pub struct TurnContextItem {
     pub summary: Option<ReasoningSummaryConfig>,
 }
 
+impl<'de> Deserialize<'de> for TurnContextItem {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Wire {
+            model_provider_id: Option<String>,
+            provider_fingerprint: Option<String>,
+            turn_id: Option<String>,
+            root_turn_id: Option<String>,
+            disabled_plugin_ids: Option<Vec<String>>,
+            cwd: AbsolutePathBuf,
+            approval_policy: AskForApproval,
+            approvals_reviewer: Option<ApprovalsReviewer>,
+            sandbox_policy: Option<SandboxPolicy>,
+            permission_profile: Option<PermissionProfile>,
+            active_permission_profile: Option<ActivePermissionProfile>,
+            file_system_sandbox_policy: Option<RawFileSystemSandboxPolicy>,
+            model: String,
+            comp_hash: Option<String>,
+            collaboration_mode: Option<CollaborationMode>,
+            multi_agent_version: Option<MultiAgentVersion>,
+            realtime_active: Option<bool>,
+            cyber_access_program: Option<CyberAccessProgram>,
+            effort: Option<ReasoningEffortConfig>,
+            summary: Option<ReasoningSummaryConfig>,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        let permission_profile = match wire.permission_profile {
+            Some(permission_profile) => permission_profile,
+            None => {
+                let sandbox_policy = wire
+                    .sandbox_policy
+                    .ok_or_else(|| serde::de::Error::missing_field("permission_profile"))?;
+                let file_system_sandbox_policy = wire
+                    .file_system_sandbox_policy
+                    .map(TryInto::try_into)
+                    .transpose()
+                    .unwrap_or_else(|_| Some(FileSystemSandboxPolicy::restricted(Vec::new())))
+                    .unwrap_or_else(|| {
+                        FileSystemSandboxPolicy::from_legacy_sandbox_policy_for_cwd(
+                            &sandbox_policy,
+                            wire.cwd.as_path(),
+                        )
+                    });
+                PermissionProfile::from_runtime_permissions_with_enforcement(
+                    SandboxEnforcement::from_legacy_sandbox_policy(&sandbox_policy),
+                    &file_system_sandbox_policy,
+                    NetworkSandboxPolicy::from(&sandbox_policy),
+                )
+            }
+        };
+        Ok(Self {
+            model_provider_id: wire.model_provider_id,
+            provider_fingerprint: wire.provider_fingerprint,
+            turn_id: wire.turn_id,
+            root_turn_id: wire.root_turn_id,
+            disabled_plugin_ids: wire.disabled_plugin_ids,
+            cwd: wire.cwd,
+            approval_policy: wire.approval_policy,
+            approvals_reviewer: wire.approvals_reviewer,
+            permission_profile,
+            active_permission_profile: wire.active_permission_profile,
+            model: wire.model,
+            comp_hash: wire.comp_hash,
+            collaboration_mode: wire.collaboration_mode,
+            multi_agent_version: wire.multi_agent_version,
+            realtime_active: wire.realtime_active,
+            cyber_access_program: wire.cyber_access_program,
+            effort: wire.effort,
+            summary: wire.summary,
+        })
+    }
+}
+
 impl TurnContextItem {
     pub fn permission_profile(&self) -> PermissionProfile {
-        self.permission_profile.clone().unwrap_or_else(|| {
-            let file_system_sandbox_policy = self
-                .file_system_sandbox_policy
-                .clone()
-                .map(TryInto::try_into)
-                .transpose()
-                .unwrap_or_else(|_| Some(FileSystemSandboxPolicy::restricted(Vec::new())))
-                .unwrap_or_else(|| {
-                    FileSystemSandboxPolicy::from_legacy_sandbox_policy_for_cwd(
-                        &self.sandbox_policy,
-                        self.cwd.as_path(),
-                    )
-                });
-            PermissionProfile::from_runtime_permissions_with_enforcement(
-                SandboxEnforcement::from_legacy_sandbox_policy(&self.sandbox_policy),
-                &file_system_sandbox_policy,
-                NetworkSandboxPolicy::from(&self.sandbox_policy),
-            )
-        })
+        self.permission_profile.clone()
     }
 }
 
@@ -6368,7 +6435,7 @@ mod tests {
         }))?;
 
         assert_eq!(item.summary, None);
-        assert_eq!(item.file_system_sandbox_policy, None);
+        assert_eq!(item.permission_profile, PermissionProfile::Disabled);
         assert_eq!(item.comp_hash, None);
         assert_eq!(serde_json::to_value(item)?.get("summary"), None);
         Ok(())
@@ -6389,7 +6456,7 @@ mod tests {
     }
 
     #[test]
-    fn turn_context_item_serializes_split_policy_and_summary() -> Result<()> {
+    fn turn_context_item_serializes_normalized_profile_and_summary() -> Result<()> {
         let item = TurnContextItem {
             model_provider_id: None,
             provider_fingerprint: None,
@@ -6399,20 +6466,18 @@ mod tests {
             cwd: test_path_buf("/tmp").abs(),
             approval_policy: AskForApproval::Never,
             approvals_reviewer: None,
-            sandbox_policy: SandboxPolicy::DangerFullAccess,
-            permission_profile: None,
-            active_permission_profile: None,
-            file_system_sandbox_policy: Some(
-                FileSystemSandboxPolicy::restricted(vec![FileSystemSandboxEntry {
+            permission_profile: PermissionProfile::from_runtime_permissions_with_enforcement(
+                SandboxEnforcement::Managed,
+                &FileSystemSandboxPolicy::restricted(vec![FileSystemSandboxEntry {
                     path: FileSystemPath::GlobPattern {
                         pattern: "/tmp/private/**/*.txt".to_string(),
                     },
                     access: FileSystemAccessMode::Deny,
                     missing_path_behavior: None,
-                }])
-                .try_into()
-                .expect("serializable split policy"),
+                }]),
+                NetworkSandboxPolicy::Enabled,
             ),
+            active_permission_profile: None,
             model: "gpt-5".to_string(),
             comp_hash: None,
             collaboration_mode: None,
@@ -6425,21 +6490,50 @@ mod tests {
 
         let value = serde_json::to_value(item)?;
         assert_eq!(
-            value["file_system_sandbox_policy"],
-            json!({
-                "kind": "restricted",
-                "entries": [{
-                    "path": {
-                        "type": "glob_pattern",
-                        "pattern": "/tmp/private/**/*.txt"
-                    },
-                    "access": "deny"
-                }]
-            })
+            value["permission_profile"]["file_system"]["entries"],
+            json!([{
+                "path": {
+                    "type": "glob_pattern",
+                    "pattern": "/tmp/private/**/*.txt"
+                },
+                "access": "deny"
+            }])
         );
+        assert!(value.get("sandbox_policy").is_none());
+        assert!(value.get("file_system_sandbox_policy").is_none());
         let legacy_summary: ReasoningSummaryConfig =
             serde_json::from_value(value["summary"].clone())?;
         assert_eq!(legacy_summary, ReasoningSummaryConfig::None);
+        Ok(())
+    }
+
+    #[test]
+    fn turn_context_item_requires_permissions_and_preserves_route_metadata() -> Result<()> {
+        let mut value = json!({
+            "cwd": test_path_buf("/tmp"),
+            "approval_policy": "never",
+            "model": "custom-model",
+            "model_provider_id": "custom-provider",
+            "provider_fingerprint": "route-fingerprint"
+        });
+        assert!(serde_json::from_value::<TurnContextItem>(value.clone()).is_err());
+        value["sandbox_policy"] = json!({"type": "read-only"});
+        let item: TurnContextItem = serde_json::from_value(value)?;
+        assert_eq!(
+            item.permission_profile.network_sandbox_policy(),
+            NetworkSandboxPolicy::Restricted
+        );
+        assert_eq!(item.model_provider_id.as_deref(), Some("custom-provider"));
+        assert_eq!(
+            item.provider_fingerprint.as_deref(),
+            Some("route-fingerprint")
+        );
+        assert!(
+            !item
+                .permission_profile
+                .file_system_sandbox_policy()
+                .has_full_disk_write_access()
+        );
         Ok(())
     }
 

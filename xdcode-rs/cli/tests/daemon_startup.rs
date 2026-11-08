@@ -22,6 +22,12 @@ async fn agents_can_offer_restart_for_managed_daemon() -> Result<()> {
 
 #[tokio::test]
 #[cfg(unix)]
+async fn agents_no_daemon_uses_embedded_even_with_a_running_daemon() -> Result<()> {
+    daemon_startup("agents-no-daemon").await
+}
+
+#[tokio::test]
+#[cfg(unix)]
 async fn agents_defers_launch_directory_trust_until_starting_a_task() -> Result<()> {
     daemon_startup("agents-untrusted").await
 }
@@ -135,7 +141,8 @@ async fn restrictive_launcher_uses_embedded_if_daemon_cannot_start() -> Result<(
             .kill_on_drop(true);
         let mut child = command.spawn()?;
         ensure!(
-            job.assign_and_resume_process(child.id().context("missing CLI pid")?)?,
+            job.assign_and_resume_process(child.id().context("missing CLI pid")?)?
+                .is_some(),
             "CLI job assignment failed"
         );
         let status = child.wait().await?;
@@ -179,12 +186,18 @@ async fn daemon_startup(command: &str) -> Result<()> {
         home.path().join("config.toml"),
         format!(
             "model = \"gpt-5.6-terra\"\n\
+         model_provider = \"test-provider\"\n\
          cli_auth_credentials_store = \"file\"\n\
          suppress_unstable_features_warning = true\nanalytics.enabled = false\n\
          windows.sandbox = \"unelevated\"\n\
          tui.disable_paste_burst = true\n\
          {}\n\
          notice.model_migrations.\"gpt-5.6-terra\" = \"gpt-6-sol\"\n\
+         [model_providers.test-provider]\n\
+         name = \"Test Responses provider\"\n\
+         base_url = \"http://127.0.0.1:9/v1\"\n\
+         wire_api = \"responses\"\n\
+         experimental_bearer_token = \"xdcode-local-mock-only\"\n\
          [projects.{}]\ntrust_level = \"{}\"\n",
             if command == "discovered" {
                 "tui.status_line=[\"model\",\"thread-id\",\"thread-name\"]\nfeatures.daemon_auto_start=false"
@@ -235,6 +248,7 @@ async fn daemon_startup(command: &str) -> Result<()> {
         command,
         "start"
             | "agents"
+            | "agents-no-daemon"
             | "agents-untrusted"
             | "agents-untrusted-new"
             | "discovered"
@@ -243,15 +257,20 @@ async fn daemon_startup(command: &str) -> Result<()> {
     ) || mismatch
     {
         // A selected package with a stopped daemon avoids installing a release.
-        let managed = home
-            .path()
-            .join("packages/app-server-daemon/current/bin")
-            .join(if cfg!(windows) {
-                "xdcode.exe"
-            } else {
-                "xdcode"
-            });
-        fs::create_dir_all(home.path().join("packages/app-server-daemon/current/bin"))?;
+        let managed_root = home.path().join("packages/app-server-daemon");
+        let managed_release = if cfg!(unix) {
+            managed_root.join("releases/startup-fixture")
+        } else {
+            managed_root.join("current")
+        };
+        let managed = managed_release.join("bin").join(if cfg!(windows) {
+            "xdcode.exe"
+        } else {
+            "xdcode"
+        });
+        fs::create_dir_all(managed_release.join("bin"))?;
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&managed_release, managed_root.join("current"))?;
         // Hard links change the executable's ctime and invalidate Rosetta's translation cache.
         #[cfg(unix)]
         std::os::unix::fs::symlink(&xdcode, &managed)?;
@@ -272,7 +291,7 @@ async fn daemon_startup(command: &str) -> Result<()> {
     }
     let pid_file = home.path().join("app-server-daemon/daemon.pid");
     let result = async {
-        let mut existing_daemon = if matches!(command, "bedrock-running" | "discovered")
+        let mut existing_daemon = if matches!(command, "bedrock-running" | "discovered" | "agents-no-daemon")
             || (mismatch && !disabling)
         {
             let started = Command::new(&xdcode)
@@ -294,6 +313,11 @@ async fn daemon_startup(command: &str) -> Result<()> {
             // The draft header is visible before the session's command composer is ready.
             steps.push_back(("GPT-5.6-Terra", b"/status\r"));
             "Server:Localbackgroundserver"
+        } else if command == "agents-no-daemon" {
+            args.extend(["agents".into(), "--no-daemon".into()]);
+            steps.push_back(("Notasksyet", b"n"));
+            steps.push_back(("GPT-5.6-Terra", b"/daemon\r"));
+            "Notconnectedtothelocalbackgroundserver"
         } else if command == "agents" {
             args.push("agents".into());
             steps.push_back(("Notasksyet", b"\x1b"));

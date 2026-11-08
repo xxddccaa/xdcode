@@ -287,7 +287,7 @@ checksum = "2a4385e2e34eb35d6b3efe798b9eb88096925d87726c0798709bf56d9ed84af3"
 
 [[package]]
 name = "app_test_support"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -2125,7 +2125,7 @@ dependencies = [
 
 [[package]]
 name = "core_test_support"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -2147,6 +2147,7 @@ dependencies = [
  "tracing-subscriber",
  "walkdir",
  "wiremock",
+ "xdcode-agent-message-board-host",
  "xdcode-analytics",
  "xdcode-arg0",
  "xdcode-attachment-store",
@@ -14115,7 +14116,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-agent-extension"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "anyhow",
  "core_test_support",
@@ -14127,7 +14128,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-agent-graph-store"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "pretty_assertions",
  "serde",
@@ -14142,7 +14143,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-agent-identity"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -14162,7 +14163,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-agent-message-board-client"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -14185,21 +14186,43 @@ dependencies = [
 
 [[package]]
 name = "xdcode-agent-message-board-extension"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "futures",
  "serde_json",
  "tokio",
+ "xdcode-agent-message-board-client",
+ "xdcode-config",
  "xdcode-extension-api",
+ "xdcode-features",
+ "xdcode-http-client",
  "xdcode-message-board",
+ "xdcode-message-board-mcp",
  "xdcode-protocol",
  "xdcode-state",
  "xdcode-tools",
 ]
 
 [[package]]
+name = "xdcode-agent-message-board-host"
+version = "0.167.0"
+dependencies = [
+ "chrono",
+ "futures",
+ "xdcode-agent-message-board-client",
+ "xdcode-agent-message-board-extension",
+ "xdcode-core",
+ "xdcode-extension-api",
+ "xdcode-features",
+ "xdcode-message-board",
+ "xdcode-protocol",
+ "xdcode-state",
+ "xdcode-thread-store",
+]
+
+[[package]]
 name = "xdcode-agent-roles"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "serde",
  "toml 0.9.11+spec-1.1.0",
@@ -14212,7 +14235,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-analytics"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "os_info",
  "pretty_assertions",
@@ -14235,7 +14258,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-ansi-escape"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "ansi-to-tui",
  "pretty_assertions",
@@ -14246,7 +14269,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-api"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "anyhow",
  "assert_matches",
@@ -14284,7 +14307,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-app-server"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "anyhow",
  "app_test_support",
@@ -14330,6 +14353,7 @@ dependencies = [
  "uuid",
  "wiremock",
  "xdcode-agent-extension",
+ "xdcode-agent-message-board-host",
  "xdcode-analytics",
  "xdcode-app-server-daemon",
  "xdcode-app-server-protocol",
@@ -14366,6 +14390,7 @@ dependencies = [
  "xdcode-mcp-extension",
  "xdcode-memories-extension",
  "xdcode-memories-write",
+ "xdcode-message-board",
  "xdcode-model-provider",
  "xdcode-model-provider-info",
  "xdcode-models-manager",
@@ -14402,7 +14427,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-app-server-client"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "futures",
  "pretty_assertions",
@@ -14429,7 +14454,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-app-server-daemon"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -14459,7 +14484,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-app-server-protocol"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "anyhow",
  "inventory",
@@ -14493,11 +14518,11 @@ dependencies = [
 
 [[package]]
 name = "xdcode-app-server-protocol-noop-macros"
-version = "0.165.0"
+version = "0.167.0"
 
 [[package]]
 name = "xdcode-app-server-test-client"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -14519,7 +14544,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-app-server-transport"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -14562,7 +14587,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-apply-patch"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -14582,7 +14607,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-arg0"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "anyhow",
  "dotenvy",
@@ -14605,7 +14630,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-async-utils"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "pretty_assertions",
  "rand 0.9.3",
@@ -14615,7 +14640,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-attachment-store"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "pretty_assertions",
  "serde",
@@ -14625,7 +14650,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-aws-auth"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "aws-config",
  "aws-credential-types",
@@ -14651,7 +14676,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-backend-client"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "anyhow",
  "http 1.4.0",
@@ -14671,7 +14696,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-backend-openapi-models"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -14680,7 +14705,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-build-info"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "pretty_assertions",
  "semver",
@@ -14693,7 +14718,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-bwrap"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "cc",
  "libc",
@@ -14702,7 +14727,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-chatgpt"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -14724,7 +14749,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-cli"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "anyhow",
  "app_test_support",
@@ -14827,7 +14852,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-client"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "eventsource-stream",
  "futures",
@@ -14841,7 +14866,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-cloud-client"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -14865,7 +14890,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-cloud-config"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -14893,7 +14918,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-cloud-tasks"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -14926,7 +14951,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-cloud-tasks-client"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -14941,7 +14966,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-cloud-tasks-mock-client"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "chrono",
  "diffy",
@@ -14950,7 +14975,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-code-mode"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "futures",
  "http-body-util",
@@ -14974,7 +14999,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-code-mode-host"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -15003,7 +15028,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-code-mode-protocol"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "glob",
  "pretty_assertions",
@@ -15021,7 +15046,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-code-mode-runtime"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "base64 0.22.1",
  "deno_core_icudata",
@@ -15039,11 +15064,11 @@ dependencies = [
 
 [[package]]
 name = "xdcode-collaboration-mode-templates"
-version = "0.165.0"
+version = "0.167.0"
 
 [[package]]
 name = "xdcode-config"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -15097,7 +15122,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-config-schema"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -15106,7 +15131,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-connectors"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -15128,7 +15153,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-connectors-extension"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "serde_json",
  "thiserror 2.0.18",
@@ -15142,7 +15167,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-context-fragments"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "pretty_assertions",
  "serde_json",
@@ -15153,7 +15178,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-core"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -15215,8 +15240,7 @@ dependencies = [
  "windows-sys 0.61.2",
  "wiremock",
  "xdcode-agent-graph-store",
- "xdcode-agent-message-board-client",
- "xdcode-agent-message-board-extension",
+ "xdcode-agent-message-board-host",
  "xdcode-agent-roles",
  "xdcode-analytics",
  "xdcode-api",
@@ -15253,6 +15277,7 @@ dependencies = [
  "xdcode-mcp-extension",
  "xdcode-memories-read",
  "xdcode-message-board",
+ "xdcode-message-board-mcp",
  "xdcode-model-provider",
  "xdcode-model-provider-info",
  "xdcode-models-manager",
@@ -15299,7 +15324,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-core-api"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "xdcode-analytics",
  "xdcode-app-server-protocol",
@@ -15322,7 +15347,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-core-plugin-common"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "semver",
  "serde",
@@ -15333,7 +15358,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-core-plugins"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -15390,7 +15415,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-diagnostics"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "libc",
  "pretty_assertions",
@@ -15398,7 +15423,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-direct-tool-timing"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "pretty_assertions",
  "xdcode-utils-critical-path",
@@ -15406,7 +15431,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-exec"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -15459,7 +15484,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-exec-server"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -15531,7 +15556,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-exec-server-protocol"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "base64 0.22.1",
  "pretty_assertions",
@@ -15549,7 +15574,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-exec-server-test-support"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "anyhow",
  "futures",
@@ -15564,7 +15589,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-execpolicy"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -15582,7 +15607,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-experimental-api-macros"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -15591,7 +15616,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-extension-api"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "futures",
  "pretty_assertions",
@@ -15614,7 +15639,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-extension-items"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "pretty_assertions",
  "schemars 0.8.22",
@@ -15626,7 +15651,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-external-agent-migration"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "chrono",
  "linkify",
@@ -15657,7 +15682,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-features"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "pretty_assertions",
  "schemars 0.8.22",
@@ -15671,7 +15696,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-feedback"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -15699,7 +15724,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-file-search"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -15715,7 +15740,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-file-system"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "bytes",
  "futures",
@@ -15729,7 +15754,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-file-watcher"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "notify",
  "pretty_assertions",
@@ -15740,7 +15765,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-git-attribution"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "serde_json",
  "tokio",
@@ -15753,7 +15778,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-git-utils"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -15781,7 +15806,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-goal-extension"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -15806,7 +15831,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-guardian-context"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "pretty_assertions",
  "serde",
@@ -15819,7 +15844,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-guardian-reviewer"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "anyhow",
  "opentelemetry",
@@ -15844,7 +15869,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-guardian-v2"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "anyhow",
  "core_test_support",
@@ -15883,7 +15908,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-guardian-v3"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "xdcode-message-board",
  "xdcode-protocol",
@@ -15892,7 +15917,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-history"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "anyhow",
  "pretty_assertions",
@@ -15900,11 +15925,12 @@ dependencies = [
  "serde",
  "serde_json",
  "xdcode-protocol",
+ "xdcode-utils-absolute-path",
 ]
 
 [[package]]
 name = "xdcode-history-notes-extension"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "core_test_support",
  "http 1.4.0",
@@ -15930,7 +15956,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-home"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "pretty_assertions",
  "tempfile",
@@ -15942,7 +15968,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-hooks"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -15971,7 +15997,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-http-client"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "bytes",
  "curl",
@@ -16011,7 +16037,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-image-generation-extension"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "base64 0.22.1",
  "http 1.4.0",
@@ -16043,7 +16069,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-install-context"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "pretty_assertions",
  "semver",
@@ -16056,7 +16082,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-keyring-store"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "keyring",
  "pretty_assertions",
@@ -16067,10 +16093,10 @@ dependencies = [
 
 [[package]]
 name = "xdcode-linux-sandbox"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "clap",
- "globset",
+ "ignore",
  "landlock",
  "libc",
  "pretty_assertions",
@@ -16096,7 +16122,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-lmstudio"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "serde_json",
  "tokio",
@@ -16110,7 +16136,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-login"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -16156,7 +16182,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-mcp"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -16177,6 +16203,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "url",
+ "uuid",
  "xdcode-api",
  "xdcode-async-utils",
  "xdcode-config",
@@ -16200,7 +16227,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-mcp-extension"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -16233,7 +16260,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-memories-extension"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "pretty_assertions",
  "schemars 0.8.22",
@@ -16255,7 +16282,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-memories-read"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "pretty_assertions",
  "xdcode-protocol",
@@ -16265,7 +16292,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-memories-write"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -16302,7 +16329,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-mermaid"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "insta",
  "pretty_assertions",
@@ -16311,13 +16338,14 @@ dependencies = [
 
 [[package]]
 name = "xdcode-message-board"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "base64 0.22.1",
  "caseless",
  "chrono",
  "futures",
  "pretty_assertions",
+ "rmcp",
  "serde",
  "serde_json",
  "sqlx",
@@ -16326,6 +16354,7 @@ dependencies = [
  "tracing",
  "uuid",
  "xdcode-attachment-store",
+ "xdcode-message-board-mcp",
  "xdcode-protocol",
  "xdcode-state",
  "xdcode-tools",
@@ -16333,8 +16362,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "xdcode-message-board-mcp"
+version = "0.167.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "chrono",
+ "clap",
+ "futures",
+ "rmcp",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "uuid",
+ "xdcode-attachment-store",
+ "xdcode-message-board",
+ "xdcode-protocol",
+ "xdcode-state",
+ "xdcode-tools",
+ "xdcode-utils-absolute-path",
+ "xdcode-utils-cargo-bin",
+ "xdcode-utils-output-truncation",
+ "xdcode-utils-process",
+]
+
+[[package]]
 name = "xdcode-message-history"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "memchr",
  "pretty_assertions",
@@ -16348,7 +16405,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-model-provider"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -16382,7 +16439,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-model-provider-info"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "http 1.4.0",
  "maplit",
@@ -16401,7 +16458,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-models-manager"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "chrono",
  "pretty_assertions",
@@ -16420,7 +16477,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-multi-env-copy-file"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "anyhow",
  "core_test_support",
@@ -16446,7 +16503,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-mxc-sandbox"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "anyhow",
  "flatbuffers",
@@ -16467,7 +16524,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-network-proxy"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "anyhow",
  "aws-credential-types",
@@ -16518,7 +16575,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-ollama"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "assert_matches",
  "async-stream",
@@ -16538,7 +16595,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-otel"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "bytes",
  "chrono",
@@ -16575,7 +16632,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-otel-trace-websocket"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -16586,7 +16643,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-plugin"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "pretty_assertions",
  "serde_json",
@@ -16601,7 +16658,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-process-hardening"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "libc",
  "pretty_assertions",
@@ -16609,7 +16666,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-prompts"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "anyhow",
  "pretty_assertions",
@@ -16627,7 +16684,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-protocol"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "anyhow",
  "chardetng",
@@ -16673,14 +16730,14 @@ dependencies = [
 
 [[package]]
 name = "xdcode-protocol-test-support"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "xdcode-protocol",
 ]
 
 [[package]]
 name = "xdcode-queue-extension"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "anyhow",
  "core_test_support",
@@ -16701,7 +16758,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-realtime-webrtc"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "anyhow",
  "ctor 0.6.3",
@@ -16720,7 +16777,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-response-debug-context"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "base64 0.22.1",
  "http 1.4.0",
@@ -16731,7 +16788,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-responses-api-proxy"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -16755,7 +16812,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-rmcp-client"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -16785,6 +16842,7 @@ dependencies = [
  "tracing-test",
  "url",
  "urlencoding",
+ "uuid",
  "webbrowser",
  "which 8.0.0",
  "windows-sys 0.61.2",
@@ -16806,7 +16864,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-rollout"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -16839,7 +16897,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-rollout-trace"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "anyhow",
  "http 1.4.0",
@@ -16856,7 +16914,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-runtime-agent-instance"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "base64 0.22.1",
  "ed25519-dalek",
@@ -16882,7 +16940,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-sandboxing"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "anyhow",
  "dunce",
@@ -16910,7 +16968,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-secrets"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "age",
  "anyhow",
@@ -16931,7 +16989,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-shell-command"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -16954,7 +17012,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-skills"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "include_dir",
  "pretty_assertions",
@@ -16972,7 +17030,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-skills-extension"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "assert_matches",
  "blake3",
@@ -17012,7 +17070,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-state"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -17040,7 +17098,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-stdio-to-uds"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "anyhow",
  "pretty_assertions",
@@ -17052,7 +17110,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-tcp-tunnel"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -17073,7 +17131,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-terminal-detection"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "pretty_assertions",
  "tracing",
@@ -17081,7 +17139,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-test-binary-support"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "tempfile",
  "xdcode-arg0",
@@ -17089,7 +17147,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-thread-manager-sample"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -17100,7 +17158,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-thread-store"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "chrono",
  "futures",
@@ -17131,7 +17189,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-tools"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "bitflags 2.13.1",
  "jsonptr",
@@ -17157,7 +17215,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-tui"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "anyhow",
  "app_test_support",
@@ -17285,7 +17343,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-uds"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "async-io",
  "libc",
@@ -17299,7 +17357,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-user-verification"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "base64 0.22.1",
  "block2",
@@ -17320,7 +17378,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-utils-absolute-path"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "dirs",
  "dunce",
@@ -17334,14 +17392,14 @@ dependencies = [
 
 [[package]]
 name = "xdcode-utils-approval-presets"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "xdcode-protocol",
 ]
 
 [[package]]
 name = "xdcode-utils-audio"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "base64 0.22.1",
  "pretty_assertions",
@@ -17355,7 +17413,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-utils-cache"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "lru",
  "sha1 0.10.6",
@@ -17364,7 +17422,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-utils-cargo-bin"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "assert_cmd",
  "runfiles",
@@ -17373,7 +17431,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-utils-cli"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "clap",
  "pretty_assertions",
@@ -17385,22 +17443,22 @@ dependencies = [
 
 [[package]]
 name = "xdcode-utils-critical-path"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "pretty_assertions",
 ]
 
 [[package]]
 name = "xdcode-utils-elapsed"
-version = "0.165.0"
+version = "0.167.0"
 
 [[package]]
 name = "xdcode-utils-fuzzy-match"
-version = "0.165.0"
+version = "0.167.0"
 
 [[package]]
 name = "xdcode-utils-git-discovery"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "futures",
  "pretty_assertions",
@@ -17413,7 +17471,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-utils-home-dir"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "dirs",
  "pretty_assertions",
@@ -17423,7 +17481,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-utils-image"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "base64 0.22.1",
  "divan",
@@ -17437,7 +17495,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-utils-json-to-toml"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "pretty_assertions",
  "serde_json",
@@ -17446,7 +17504,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-utils-oss"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "xdcode-core",
  "xdcode-lmstudio",
@@ -17456,7 +17514,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-utils-output-truncation"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "pretty_assertions",
  "serde_json",
@@ -17466,7 +17524,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-utils-path"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "dunce",
  "pretty_assertions",
@@ -17477,7 +17535,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-utils-path-uri"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "base64 0.22.1",
  "pretty_assertions",
@@ -17493,7 +17551,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-utils-plugins"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -17507,7 +17565,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-utils-process"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "pretty_assertions",
  "tokio",
@@ -17515,7 +17573,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-utils-pty"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "anyhow",
  "ctor 0.6.3",
@@ -17534,7 +17592,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-utils-readiness"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "assert_matches",
  "thiserror 2.0.18",
@@ -17544,7 +17602,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-utils-redacted-string"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "schemars 0.8.22",
  "serde",
@@ -17552,14 +17610,14 @@ dependencies = [
 
 [[package]]
 name = "xdcode-utils-rustls-provider"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "rustls",
 ]
 
 [[package]]
 name = "xdcode-utils-sandbox-summary"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "pretty_assertions",
  "xdcode-protocol",
@@ -17569,7 +17627,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-utils-sleep-inhibitor"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "core-foundation 0.9.4",
  "libc",
@@ -17579,14 +17637,14 @@ dependencies = [
 
 [[package]]
 name = "xdcode-utils-stream-parser"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "pretty_assertions",
 ]
 
 [[package]]
 name = "xdcode-utils-string"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "pretty_assertions",
  "regex-lite",
@@ -17596,14 +17654,14 @@ dependencies = [
 
 [[package]]
 name = "xdcode-utils-template"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "pretty_assertions",
 ]
 
 [[package]]
 name = "xdcode-v8-poc"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "pretty_assertions",
  "v8",
@@ -17611,7 +17669,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-voice-host"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "anyhow",
  "cpal",
@@ -17638,7 +17696,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-web-search-extension"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "http 1.4.0",
  "pretty_assertions",
@@ -17660,7 +17718,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-websocket-auth"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -17679,7 +17737,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-websocket-client"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "futures",
  "pretty_assertions",
@@ -17695,7 +17753,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-windows-sandbox"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -17725,7 +17783,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-windows-sandbox-service"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "anyhow",
  "pretty_assertions",
@@ -17743,14 +17801,14 @@ dependencies = [
 
 [[package]]
 name = "xdcode-windows-sandbox-test-support"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "dirs",
 ]
 
 [[package]]
 name = "xdcode-workload-identity"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "pretty_assertions",
  "serde",
@@ -17765,7 +17823,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-worktree"
-version = "0.165.0"
+version = "0.167.0"
 dependencies = [
  "anyhow",
  "dunce",

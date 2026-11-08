@@ -55,7 +55,6 @@ pub use windows::WindowsSandboxFilesystemOverrides;
 pub use windows::permission_profile_supports_windows_restricted_token_sandbox;
 pub use windows::resolve_windows_elevated_filesystem_overrides;
 pub use windows::resolve_windows_restricted_token_filesystem_overrides;
-pub use windows::unsupported_windows_restricted_token_sandbox_reason;
 pub use windows::windows_sandbox_uses_elevated_backend;
 pub use xdcode_mxc_sandbox::XDCODE_WINDOWS_MXC_ARG1;
 pub use xdcode_mxc_sandbox::is_available as windows_mxc_available;
@@ -75,7 +74,8 @@ pub fn system_bwrap_warning(
 impl From<SandboxTransformError> for XdcodeErr {
     fn from(err: SandboxTransformError) -> Self {
         match err {
-            error @ SandboxTransformError::InvalidCommandCwd { .. }
+            error @ SandboxTransformError::InvalidPolicy(_)
+            | error @ SandboxTransformError::InvalidCommandCwd { .. }
             | error @ SandboxTransformError::InvalidSandboxPolicyCwd { .. } => {
                 XdcodeErr::InvalidRequest(error.to_string())
             }

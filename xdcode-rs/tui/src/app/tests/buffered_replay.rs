@@ -65,7 +65,7 @@ async fn refreshed_active_reasoning_accepts_later_deltas_and_complete_summary() 
                     thread_id: thread_id.to_string(),
                     turn_id: turn.id.clone(),
                     item_id: "reasoning".into(),
-                    delta: "**First heading**\nOriginal analysis paragraph".into(),
+                    delta: "\nOriginal analysis paragraph".into(),
                     summary_index: 0,
                 },
             ));
@@ -111,6 +111,9 @@ async fn refreshed_active_reasoning_accepts_later_deltas_and_complete_summary() 
         }
         assert!(snapshot.active_reasoning_item.is_some());
         app.replay_thread_snapshot(snapshot, /*resume_restored_queue*/ false);
+        if refresh && !refreshed_item_is_partial && !voice_handoff {
+            assert!(render_bottom_popup(&app.chat_widget, 80).contains("First heading"));
+        }
         app.chat_widget.handle_server_notification(
             ServerNotification::ReasoningSummaryTextDelta(ReasoningSummaryTextDeltaNotification {
                 thread_id: thread_id.to_string(),

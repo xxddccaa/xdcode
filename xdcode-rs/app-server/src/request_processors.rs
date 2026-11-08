@@ -204,7 +204,6 @@ use xdcode_app_server_protocol::SandboxMode;
 use xdcode_app_server_protocol::SendAddCreditsNudgeEmailParams;
 use xdcode_app_server_protocol::SendAddCreditsNudgeEmailResponse;
 use xdcode_app_server_protocol::ServerNotification;
-use xdcode_app_server_protocol::ServerRequestResolvedNotification;
 use xdcode_app_server_protocol::SkillSummary;
 use xdcode_app_server_protocol::SkillsConfigWriteParams;
 use xdcode_app_server_protocol::SkillsConfigWriteResponse;

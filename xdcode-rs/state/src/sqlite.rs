@@ -1,6 +1,7 @@
 //! Shared SQLite connection configuration.
 //! Writable pools preserve the journal and vacuum modes of initialized databases.
 //! Startup retries SQLITE_BUSY and reports other errors to callers.
+//! Schema version checks and migrations share one transaction and retry contention together.
 //! The configured logs directory is created and locked only when opening its database.
 
 #![expect(
@@ -381,7 +382,15 @@ impl SqliteConfig {
             if matches!(spec.kind, DbKind::State) {
                 repair_legacy_recency_migration_version(&pool, migrator).await?;
             }
-            migrator.run(&pool).await.map_err(anyhow::Error::from)
+            retry_on_busy(|| async {
+                let mut transaction = pool.begin().await?;
+                if let Err(error) = migrator.run_direct(None, &mut *transaction, false).await {
+                    transaction.rollback().await?;
+                    return Err(error.into());
+                }
+                transaction.commit().await.map_err(anyhow::Error::from)
+            })
+            .await
         }
         .await;
         telemetry::record_init_result(

@@ -493,6 +493,16 @@ impl ChatWidget {
     }
 
     fn apply_thread_settings(&mut self, mut settings: ThreadSettings) {
+        let mut confirmed_mode = settings.collaboration_mode.clone();
+        confirmed_mode.settings.model = settings.model.clone();
+        confirmed_mode.settings.reasoning_effort = settings.effort.clone();
+        confirmed_mode.settings.developer_instructions = None;
+        self.catalog_selection_state.confirmed =
+            Some(crate::session_state::NewSessionModelSelection {
+                provider: settings.model_provider.clone(),
+                catalog_id: settings.catalog_id.clone(),
+                collaboration_mode: confirmed_mode,
+            });
         self.invalidate_permission_discovery();
         let cwd_changed = self.config.cwd != settings.cwd;
         self.apply_thread_settings_cwd(settings.cwd.clone());

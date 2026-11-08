@@ -55,6 +55,7 @@ pub use exec_events::Usage;
 pub use exec_events::WebSearchItem;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::future::Future;
 use std::io::IsTerminal;
 use std::io::Read;
@@ -94,7 +95,11 @@ use xdcode_app_server_protocol::Thread as AppServerThread;
 use xdcode_app_server_protocol::ThreadForkParams;
 use xdcode_app_server_protocol::ThreadForkResponse;
 use xdcode_app_server_protocol::ThreadHistoryMode;
+use xdcode_app_server_protocol::ThreadItem;
 use xdcode_app_server_protocol::ThreadItem as AppServerThreadItem;
+use xdcode_app_server_protocol::ThreadItemsListCursor;
+use xdcode_app_server_protocol::ThreadItemsListParams;
+use xdcode_app_server_protocol::ThreadItemsListResponse;
 use xdcode_app_server_protocol::ThreadListParams;
 use xdcode_app_server_protocol::ThreadListResponse;
 use xdcode_app_server_protocol::ThreadReadParams;
@@ -127,6 +132,7 @@ use xdcode_core::config::ConfigBuilder;
 use xdcode_core::config::ConfigOverrides;
 use xdcode_core::config::ConfigTomlLoadResult;
 use xdcode_core::config::bootstrap_auth_config;
+use xdcode_core::config::edit::ConfigEditsBuilder;
 use xdcode_core::config::find_xdcode_home;
 use xdcode_core::config::load_config_toml_with_layer_stack;
 use xdcode_core::config::resolve_oss_provider;
@@ -152,6 +158,7 @@ use xdcode_protocol::SessionId;
 use xdcode_protocol::ThreadId;
 use xdcode_protocol::config_types::ApprovalsReviewer;
 use xdcode_protocol::config_types::SandboxMode;
+use xdcode_protocol::config_types::TrustLevel;
 use xdcode_protocol::mcp_approval_meta::APPROVAL_KIND_KEY;
 use xdcode_protocol::mcp_approval_meta::APPROVAL_KIND_MCP_TOOL_CALL;
 use xdcode_protocol::mcp_approval_meta::CANCELLATION_REASON_KEY;
@@ -265,6 +272,11 @@ fn exec_stderr_env_filter() -> EnvFilter {
 }
 
 pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result<()> {
+    if cli.trust && cli.ignore_user_config {
+        anyhow::bail!(
+            "--trust cannot be combined with --ignore-user-config: saved project trust decisions must be checked"
+        );
+    }
     if let Err(err) = set_default_originator("xdcode_exec".to_string()) {
         tracing::warn!(
             ?err,
@@ -279,6 +291,7 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         thread_source,
         cyber_access_program,
         skip_git_repo_check,
+        trust,
         ephemeral,
         ignore_user_config,
         ignore_rules,
@@ -355,7 +368,7 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
     };
 
     // Parse `-c` overrides from the CLI.
-    let cli_kv_overrides = match config_overrides.parse_overrides() {
+    let mut cli_kv_overrides = match config_overrides.parse_overrides() {
         Ok(v) => v,
         #[allow(clippy::print_stderr)]
         Err(e) => {
@@ -537,9 +550,35 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
             );
         }
     }
-    let run_cli_overrides = cli_kv_overrides.clone();
-    let run_loader_overrides = loader_overrides.clone();
-    let run_cloud_config_bundle = cloud_config_bundle.clone();
+    if trust {
+        let mut discovery_overrides = cli_kv_overrides.clone();
+        discovery_overrides.retain(|(key, _)| key != "projects" && !key.starts_with("projects."));
+        let saved_config = load_bootstrap_config_or_exit(
+            &xdcode_home,
+            Some(&config_cwd),
+            discovery_overrides,
+            loader_overrides.clone(),
+            strict_config,
+            cloud_config_bundle.clone(),
+        )
+        .await;
+        if let Some(project) = saved_config.config_layer_stack.project_trust {
+            match project.trust_level {
+                Some(TrustLevel::Untrusted) => anyhow::bail!(
+                    "{} is marked as untrusted. Update its trust setting first.",
+                    project.trust_key
+                ),
+                Some(TrustLevel::Trusted) => {}
+                None => {
+                    let user_config = loader_overrides.user_config_path(&xdcode_home)?;
+                    ConfigEditsBuilder::for_config_path(user_config.as_path())
+                        .set_project_trust_level(project.trust_key, TrustLevel::Trusted)
+                        .apply()
+                        .await?;
+                }
+            }
+        }
+    }
 
     let model_provider = if oss {
         let bootstrap_config_with_cloud_config;
@@ -633,6 +672,19 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
     )
     .await?;
     embedded_network_policy.activate(&mut config);
+    #[allow(clippy::print_stderr)]
+    if config
+        .config_layer_stack
+        .all_layers_low_to_high()
+        .any(|layer| {
+            matches!(layer.name, xdcode_config::ConfigLayerSource::Project { .. })
+                && layer.disabled_reason.is_some()
+        })
+    {
+        eprintln!(
+            "warning: Untrusted project-local configuration is disabled. Run `xdcode exec --trust` to allow project configuration and MCP servers for this and future chats in the project, including MCP commands outside the sandbox. Explicitly untrusted projects must have their trust setting updated first."
+        );
+    }
     let daybreak_override = cli_kv_overrides
         .iter()
         .any(|(key, _)| key == "daybreak")
@@ -720,7 +772,7 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         ),
     );
     let state_db = xdcode_core::init_state_db(&config).await;
-    let environment_manager = if run_loader_overrides.ignore_user_config {
+    let environment_manager = if loader_overrides.ignore_user_config {
         EnvironmentManager::from_env(
             Some(local_runtime_paths),
             embedded_network_policy.bind(config.http_client_factory()),
@@ -734,13 +786,20 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         )
         .await?
     };
+    if let Some(provider) = &model_provider {
+        cli_kv_overrides.push(("model_provider".to_string(), provider.clone().into()));
+    }
+
     let in_process_start_args = InProcessClientStartArgs {
         arg0_paths,
         config: std::sync::Arc::new(config.clone()),
-        cli_overrides: run_cli_overrides,
-        loader_overrides: run_loader_overrides,
+        cli_overrides: cli_kv_overrides,
+        loader_overrides: LoaderOverrides {
+            default_cwd: Some(config.cwd.clone()),
+            ..loader_overrides
+        },
         strict_config,
-        cloud_config_bundle: run_cloud_config_bundle,
+        cloud_config_bundle,
         embedded_network_policy,
         feedback: XdcodeFeedback::new(),
         log_db: None,
@@ -1033,7 +1092,7 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
 
     let mut daybreak_enabled = config.daybreak_enabled;
     // Resolve resume and fork through existing app-server thread lifecycle APIs.
-    let (primary_thread_id, fallback_session_configured) = if let Some(ExecCommand::Resume(args)) =
+    let (history_mode, fallback_session_configured) = if let Some(ExecCommand::Resume(args)) =
         command.as_ref()
     {
         if let Some(thread_id) =
@@ -1059,7 +1118,7 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
             daybreak_enabled = daybreak_override
                 .or(response.thread.daybreak_enabled)
                 .unwrap_or(false);
-            (session_configured.thread_id, session_configured)
+            (response.thread.history_mode, session_configured)
         } else {
             let response = start_thread(&client, &mut request_ids, &config, &thread_source)
                 .await
@@ -1067,7 +1126,7 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
             let session_configured =
                 session_configured_from_thread_start_response(&response, &config)
                     .map_err(anyhow::Error::msg)?;
-            (session_configured.thread_id, session_configured)
+            (response.thread.history_mode, session_configured)
         }
     } else if let Some(ExecCommand::Fork(args)) = command.as_ref() {
         let source_args = crate::cli::ResumeArgs {
@@ -1155,16 +1214,17 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
             .or(response.thread.daybreak_enabled)
             .or(source_daybreak)
             .unwrap_or(false);
-        (session_configured.thread_id, session_configured)
+        (response.thread.history_mode, session_configured)
     } else {
         let response = start_thread(&client, &mut request_ids, &config, &thread_source)
             .await
             .map_err(anyhow::Error::msg)?;
         let session_configured = session_configured_from_thread_start_response(&response, &config)
             .map_err(anyhow::Error::msg)?;
-        (session_configured.thread_id, session_configured)
+        (response.thread.history_mode, session_configured)
     };
 
+    let primary_thread_id = fallback_session_configured.thread_id;
     if let Some(worktree) = managed_worktree.as_ref() {
         worktree
             .manager
@@ -1372,6 +1432,7 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                 ) {
                     maybe_backfill_turn_completed_items(
                         config.ephemeral,
+                        history_mode,
                         &client,
                         &mut request_ids,
                         &mut notification,
@@ -1457,7 +1518,6 @@ fn thread_start_params_from_config(
     ThreadStartParams {
         model: config.model.clone(),
         model_provider: Some(config.model_provider_id.clone()),
-        cwd: Some(config.cwd.to_string_lossy().to_string()),
         runtime_workspace_roots: Some(config.workspace_roots.clone()),
         approval_policy: Some(config.permissions.approval_policy.value().into()),
         approvals_reviewer: Some(config.approvals_reviewer.into()),
@@ -1742,14 +1802,12 @@ fn should_process_notification(
 
 async fn maybe_backfill_turn_completed_items(
     thread_ephemeral: bool,
+    history_mode: ThreadHistoryMode,
     client: &InProcessAppServerClient,
     request_ids: &mut RequestIdSequencer,
     notification: &mut ServerNotification,
 ) {
     // In-process delivery may drop non-terminal item notifications under backpressure while still
-    // guaranteeing `turn/completed`. Because app-server currently emits that completion with an
-    // empty `turn.items`, exec does one last `thread/read` here so human/json output can recover
-    // the final message and reconcile any still-running items before shutdown.
     if !should_backfill_turn_completed_items(thread_ephemeral, notification) {
         return;
     }
@@ -1757,6 +1815,53 @@ async fn maybe_backfill_turn_completed_items(
     let ServerNotification::TurnCompleted(payload) = notification else {
         return;
     };
+
+    if history_mode == ThreadHistoryMode::Paginated {
+        let completion_items = payload.turn.items.clone();
+        let mut items = Vec::new();
+        let mut cursor = None;
+        let mut seen_cursors = HashSet::new();
+        loop {
+            let page: ThreadItemsListResponse = match client
+                .request_typed(ClientRequest::ThreadItemsList {
+                    request_id: request_ids.next(),
+                    params: ThreadItemsListParams {
+                        thread_id: payload.thread_id.clone(),
+                        turn_id: Some(payload.turn.id.clone()),
+                        cursor,
+                        limit: None,
+                        sort_direction: None,
+                    },
+                })
+                .await
+            {
+                Ok(page) => page,
+                Err(err) => {
+                    warn!("thread/items/list failed during turn completion: {err}");
+                    return;
+                }
+            };
+            items.extend(page.data.into_iter().map(|entry| entry.item));
+            let Some(next) = page.next_cursor else { break };
+            if !seen_cursors.insert(next.clone()) {
+                warn!("thread/items/list returned a repeated cursor during turn completion");
+                return;
+            }
+            cursor = Some(ThreadItemsListCursor::Opaque(next));
+        }
+        for completion_item in completion_items {
+            if let Some(item) = items
+                .iter_mut()
+                .find(|item| item.id() == completion_item.id())
+            {
+                *item = completion_item;
+            } else {
+                items.push(completion_item);
+            }
+        }
+        payload.turn.items = items;
+        return;
+    }
 
     let response = send_request_with_response::<ThreadReadResponse>(
         client,

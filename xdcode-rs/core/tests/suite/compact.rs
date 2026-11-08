@@ -24,7 +24,6 @@ use xdcode_features::Feature;
 use xdcode_history::RolloutItem;
 use xdcode_login::XdcodeAuth;
 use xdcode_model_provider_info::ModelProviderInfo;
-use xdcode_model_provider_info::built_in_model_providers;
 use xdcode_models_manager::bundled_models_response;
 use xdcode_protocol::config_types::AutoCompactTokenLimitScope;
 use xdcode_protocol::config_types::CollaborationMode;
@@ -284,9 +283,7 @@ with Path(r"{manual_post_log_path}").open("a", encoding="utf-8") as handle:
 }
 
 fn non_provider_model_provider(server: &MockServer) -> ModelProviderInfo {
-    let mut provider =
-        built_in_model_providers(/* provider_base_url */ /*provider_base_url*/ None)["provider"]
-            .clone();
+    let mut provider = xdcode_core::test_support::custom_provider(format!("{}/v1", server.uri()));
     provider.name = "Provider (test)".into();
     provider.base_url = Some(format!("{}/v1", server.uri()));
     provider.supports_websockets = false;
@@ -294,9 +291,7 @@ fn non_provider_model_provider(server: &MockServer) -> ModelProviderInfo {
 }
 
 fn provider_model_provider(server: &MockServer) -> ModelProviderInfo {
-    let mut provider =
-        built_in_model_providers(/* provider_base_url */ /*provider_base_url*/ None)["provider"]
-            .clone();
+    let mut provider = xdcode_core::test_support::custom_provider(format!("{}/v1", server.uri()));
     provider.base_url = Some(format!("{}/v1", server.uri()));
     provider.supports_websockets = false;
     provider
@@ -397,7 +392,7 @@ fn remote_v2_compaction_response() -> String {
 }
 
 fn local_compaction_provider(server: &wiremock::MockServer) -> ModelProviderInfo {
-    let mut provider = built_in_model_providers(/*provider_base_url*/ None)["provider"].clone();
+    let mut provider = xdcode_core::test_support::custom_provider(format!("{}/v1", server.uri()));
     provider.name = "Provider-compatible test provider".to_string();
     provider.base_url = Some(format!("{}/v1", server.uri()));
     provider.supports_websockets = false;
@@ -4596,7 +4591,8 @@ async fn manual_compact_twice_preserves_latest_user_messages() {
         config.model_provider = model_provider;
         set_test_compact_prompt(config);
     });
-    let xdcode = builder.build(&server).await.unwrap().xdcode;
+    let test = builder.build(&server).await.unwrap();
+    let xdcode = &test.xdcode;
 
     xdcode
         .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
@@ -4606,6 +4602,16 @@ async fn manual_compact_twice_preserves_latest_user_messages() {
         .await
         .unwrap();
     wait_for_event(&xdcode, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+
+    let mail = json!({
+        "type": "agent_message", "id": "agent_pending-result",
+        "author": "/root/worker", "recipient": "/root",
+        "content": [{"type": "input_text", "text": "Message Type: FINAL_ANSWER\nThe worker found a release blocker."}],
+    });
+    xdcode
+        .inject_response_items(vec![serde_json::from_value(mail.clone()).unwrap()])
+        .await
+        .unwrap();
 
     xdcode.submit(Op::Compact).await.unwrap();
     wait_for_event(&xdcode, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
@@ -4632,6 +4638,11 @@ async fn manual_compact_twice_preserves_latest_user_messages() {
     wait_for_event(&xdcode, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
 
     let requests = responses_mock.requests();
+    assert_eq!(
+        responses::strip_metadata_from_json(json!(requests[2].inputs_of_type("agent_message"))),
+        json!([mail]),
+    );
+    assert!(requests[4].inputs_of_type("agent_message").is_empty());
     assert_eq!(
         requests.len(),
         5,
@@ -4725,7 +4736,7 @@ async fn manual_compact_twice_preserves_latest_user_messages() {
         format_history_snapshot(
             "Manual /compact with prior user history compacts existing history and the follow-up turn includes the compact summary plus new user message.",
             &requests
-        )
+        ).replace(test.home.path().to_str().unwrap(), "<XDCODE_HOME>")
     );
 
     let first_compact_has_prompt = contains_user_text(&requests[1], SUMMARIZATION_PROMPT);
@@ -5686,6 +5697,80 @@ async fn auto_compact_accounts_for_encrypted_reasoning(continuation: ContinueThr
             &post_last_reasoning["item"]["encrypted_content"],
         ],
         "{continuation:?} should retain both encrypted reasoning payloads below the limit"
+    );
+}
+
+#[test_case::test_case("response.incomplete", true, true; "incomplete_with_usage")]
+#[test_case::test_case("response.incomplete", false, true; "incomplete_without_usage")]
+#[test_case::test_case("response.completed", false, true; "completed_without_usage")]
+#[test_case::test_case("response.incomplete", false, false; "non_lite_incomplete_without_usage")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn auto_compact_accounts_for_unreported_reasoning(
+    event_type: &str,
+    with_usage: bool,
+    use_responses_lite: bool,
+) {
+    skip_if_no_network!();
+
+    let server = start_mock_server().await;
+    let mut responses = vec![sse(vec![
+        ev_assistant_message("initial", "Initial reply."),
+        ev_completed_with_tokens("initial", 80),
+    ])];
+    for id in ["partial-1", "partial-2"] {
+        let usage =
+            with_usage.then(|| ev_completed_with_tokens(id, 15)["response"]["usage"].clone());
+        responses.push(sse(vec![
+            ev_reasoning_item(id, &["partial"], &[&"r".repeat(12_000)]),
+            json!({
+                "type": event_type,
+                "response": {
+                    "id": id,
+                    "incomplete_details": {"reason": "max_output_tokens"},
+                    "usage": usage
+                }
+            }),
+        ]));
+    }
+    responses.push(remote_v2_compaction_response());
+    responses.push(sse(vec![
+        ev_assistant_message("final", FINAL_REPLY),
+        ev_completed_with_tokens("final", 1),
+    ]));
+    let request_log = mount_sse_sequence(&server, responses).await;
+    let test = test_xdcode()
+        .with_auth(XdcodeAuth::from_api_key("xdcode-test-credential"))
+        .with_model_info_override("gpt-5.5", move |model| {
+            model.use_responses_lite = use_responses_lite;
+        })
+        .with_config(|config| {
+            config.model_provider.capabilities =
+                Some(xdcode_model_provider_info::ModelProviderCapabilities {
+                    remote_compaction: Some(
+                        xdcode_model_provider_info::RemoteCompactionSupport::V2,
+                    ),
+                    ..Default::default()
+                });
+            set_test_compact_prompt(config);
+            config.model_auto_compact_token_limit = Some(5_000);
+            config.model_provider.stream_max_retries = Some(0);
+        })
+        .build_with_auto_env(&server)
+        .await
+        .expect("build xdcode");
+
+    for user in ["INITIAL", "PARTIAL_ONE", "PARTIAL_TWO", "CONTINUE"] {
+        test.submit_text_turn(user).await.expect("submit user turn");
+    }
+
+    assert_eq!(
+        request_log
+            .requests()
+            .iter()
+            .map(|request| request.inputs_of_type("compaction_trigger").len())
+            .collect::<Vec<_>>(),
+        vec![0, 0, 0, 1, 0],
+        "retained reasoning must trigger compaction before the continuation request",
     );
 }
 

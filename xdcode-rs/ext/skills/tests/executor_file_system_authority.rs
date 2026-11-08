@@ -3,6 +3,7 @@ use std::io;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
+use xdcode_skills::ImplicitSkillLookup;
 
 use pretty_assertions::assert_eq;
 use xdcode_config::ConfigLayerEntry;
@@ -87,6 +88,9 @@ impl SyntheticFileSystem {
     async fn canonicalize(&self, path: &PathUri) -> io::Result<PathUri> {
         if path == &self.alias_root {
             return Ok(self.canonical_root.clone());
+        }
+        if path == &self.path("skill/scripts")? {
+            return self.path("scripts-target");
         }
         self.metadata(path)?;
         Ok(path.clone())
@@ -303,6 +307,14 @@ async fn skill_loading_and_reads_use_the_supplied_executor_file_system() {
 
     let skill = outcome.skills[0].clone();
     assert_eq!(skill.name, "synthetic");
+    assert_eq!(
+        outcome.implicit_skill_for_scripts_dir(&canonical_root.join("scripts-target")),
+        Some(&skill),
+    );
+    assert_eq!(
+        outcome.implicit_skill_for_doc_path(&canonical_root.join("skill/SKILL.md")),
+        Some(&skill),
+    );
     assert_eq!(
         skill.path_to_skills_md,
         PathUri::from_abs_path(&canonical_root.join("skill/SKILL.md"))

@@ -358,8 +358,18 @@ fn render_debug_config_lines(
     }
 
     if let Some(network) = requirements.network.as_ref() {
+        let key = if requirements_toml
+            .permissions
+            .as_ref()
+            .and_then(|permissions| permissions.network.as_ref())
+            .is_some()
+        {
+            "permissions.network"
+        } else {
+            "network_proxy"
+        };
         requirement_lines.push(requirement_line(
-            "experimental_network",
+            key,
             format_network_constraints(&network.value),
             Some(&network.source),
         ));
@@ -673,6 +683,7 @@ mod tests {
     use xdcode_config::ConfigLayerStack;
     use xdcode_config::ConfigRequirements;
     use xdcode_config::ConfigRequirementsToml;
+    use xdcode_config::ConfigRequirementsWithSources;
     use xdcode_config::Constrained;
     use xdcode_config::ConstrainedWithSource;
     use xdcode_config::ConstraintError;
@@ -1070,7 +1081,7 @@ interrupt_message = false
             "enforce_residency: us (source: {requirements_source})"
         )));
         assert!(rendered.contains(&format!(
-            "experimental_network: enabled=true, domains={{example.com=allow}}, review_domains={{api.example.com}}, header_injections=1 hosts={{api.example.com}} (source: {requirements_source})"
+            "network_proxy: enabled=true, domains={{example.com=allow}}, review_domains={{api.example.com}}, header_injections=1 hosts={{api.example.com}} (source: {requirements_source})"
         )));
         assert!(!rendered.contains("secret-looking-value"));
         assert!(
@@ -1226,8 +1237,29 @@ interrupt_message = false
         let rendered = render_stack_to_text(&stack);
         let requirements_source = (RequirementSource::LegacyManagedConfigTomlFromMdm).to_string();
         assert!(rendered.contains(&format!(
-            "experimental_network: unix_sockets={{/tmp/blocked.sock=deny, /tmp/xdcode.sock=allow}} (source: {requirements_source})"
+            "network_proxy: unix_sockets={{/tmp/blocked.sock=deny, /tmp/xdcode.sock=allow}} (source: {requirements_source})"
         )));
+    }
+
+    #[test]
+    fn debug_config_network_requirement_surfaces() {
+        let mut outputs = Vec::new();
+        for table in [
+            "network_proxy",
+            "experimental_network",
+            "permissions.network",
+        ] {
+            let toml: ConfigRequirementsToml =
+                toml::from_str(&format!("[{table}]\nenabled = true")).expect("requirements");
+            let mut sourced = ConfigRequirementsWithSources::default();
+            sourced.merge_unset_fields(RequirementSource::Unknown, toml.clone());
+            let requirements = ConfigRequirements::try_from(sourced).expect("valid requirements");
+            let stack =
+                ConfigLayerStack::new(Vec::new(), requirements, toml).expect("config layer stack");
+            outputs.push(format!("{table}:\n{}", render_stack_to_text(&stack)));
+        }
+
+        insta::assert_snapshot!(outputs.join("\n\n"));
     }
 
     #[test]

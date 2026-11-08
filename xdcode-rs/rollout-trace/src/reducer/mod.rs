@@ -549,7 +549,7 @@ impl TraceReducer {
             }
         }
 
-        Ok(())
+        self.flush_pending_code_cell_starts()
     }
 
     fn insert_raw_payload(&mut self, payload: &RawPayloadRef) {

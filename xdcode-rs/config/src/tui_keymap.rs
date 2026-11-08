@@ -135,6 +135,22 @@ impl KeybindingsSpec {
 pub struct TuiGlobalKeymap {
     /// Prefix for persistent, context-aware shortcut menus.
     pub leader: Option<KeybindingsSpec>,
+    pub focus_main_composer: Option<KeybindingsSpec>,
+    pub focus_sidebar_content: Option<KeybindingsSpec>,
+    pub focus_sidebar_tabs: Option<KeybindingsSpec>,
+    pub hide_pane: Option<KeybindingsSpec>,
+    pub close_sidebar_tab: Option<KeybindingsSpec>,
+    pub sidebar_up: Option<KeybindingsSpec>,
+    pub sidebar_down: Option<KeybindingsSpec>,
+    pub focus_pane_left: Option<KeybindingsSpec>,
+    pub focus_pane_right: Option<KeybindingsSpec>,
+    pub minimize_pane_width: Option<KeybindingsSpec>,
+    pub maximize_pane_width: Option<KeybindingsSpec>,
+    pub equalize_pane_widths: Option<KeybindingsSpec>,
+    pub resize_panes: Option<KeybindingsSpec>,
+    pub move_divider_left: Option<KeybindingsSpec>,
+    pub move_divider_right: Option<KeybindingsSpec>,
+    pub toggle_pane_zoom: Option<KeybindingsSpec>,
     /// Open the shared agent-session overview.
     pub open_agents: Option<KeybindingsSpec>,
     /// Open the transcript overlay.

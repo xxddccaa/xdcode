@@ -950,6 +950,7 @@ fn creation_listing_and_thread_binding_preserve_native_repository_paths() {
     for name in [
         OsString::from("project with trailing space "),
         OsString::from("project-東京"),
+        OsString::from("project\nwith \"quotes\" \\"),
         // APFS only supports creating filenames with valid UTF-8.
         #[cfg(not(target_os = "macos"))]
         OsString::from_vec(b"project-\xff".to_vec()),
@@ -975,6 +976,16 @@ fn creation_listing_and_thread_binding_preserve_native_repository_paths() {
                 .owner(&worktree.root)
                 .expect("read owner with a native repository path"),
             Some("native-path-thread".to_owned()),
+        );
+        manager
+            .remove(&repository, &worktree.root)
+            .expect("remove managed worktree with a native repository path");
+        assert!(!worktree.root.exists());
+        assert!(
+            manager
+                .list(&repository)
+                .expect("list after removing a native-path worktree")
+                .is_empty()
         );
     }
 }

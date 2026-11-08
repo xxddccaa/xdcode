@@ -239,7 +239,11 @@ impl ResponsesStreamEvent {
 
         self.metadata
             .as_ref()
-            .and_then(|metadata| metadata.get("provider_chatgpt_moderation_metadata"))
+            .and_then(|metadata| {
+                metadata
+                    .get("openai_chatgpt_moderation_metadata")
+                    .or_else(|| metadata.get("provider_chatgpt_moderation_metadata"))
+            })
             .cloned()
             .map(|metadata| TurnModerationMetadataEvent { metadata })
     }
@@ -671,7 +675,9 @@ async fn process_sse_with_treatment(
                 }
                 if matches!(
                     error,
-                    ApiError::FlexUnavailable | ApiError::ResponseIncomplete(_)
+                    ApiError::FlexUnavailable
+                        | ApiError::SessionBudgetExceeded
+                        | ApiError::ResponseIncomplete(_)
                 ) {
                     let _ = tx_event.send(Err(error)).await;
                     return;
@@ -1729,7 +1735,7 @@ mod tests {
             json!({
                 "type": "response.metadata",
                 "metadata": {
-                    "provider_chatgpt_moderation_metadata": {
+                    "openai_chatgpt_moderation_metadata": {
                         "presentation": "inline"
                     }
                 }
@@ -1756,6 +1762,44 @@ mod tests {
                 usage_metadata: None,
                 end_turn: None,
             } if response_id == "resp-1"
+        );
+    }
+
+    #[tokio::test]
+    async fn moderation_metadata_retains_legacy_alias_without_overriding_canonical_data() {
+        for metadata in [
+            json!({"provider_chatgpt_moderation_metadata": {"presentation": "inline"}}),
+            json!({
+                "openai_chatgpt_moderation_metadata": {"presentation": "inline"},
+                "provider_chatgpt_moderation_metadata": {"presentation": "legacy"}
+            }),
+        ] {
+            let events = run_sse(vec![
+                json!({"type": "response.metadata", "metadata": metadata}),
+                json!({"type": "response.completed", "response": {"id": "done"}}),
+            ])
+            .await;
+            assert_matches!(
+                &events[0],
+                ResponseEvent::TurnModerationMetadata(result)
+                    if result.metadata == json!({"presentation": "inline"})
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn malformed_canonical_moderation_metadata_cannot_fall_back_to_an_alias() {
+        let events = run_sse(vec![
+            json!({"type": "response.metadata", "metadata": {
+                "openai_chatgpt_moderation_metadata": null,
+                "provider_chatgpt_moderation_metadata": {"presentation": "legacy"}
+            }}),
+            json!({"type": "response.completed", "response": {"id": "done"}}),
+        ])
+        .await;
+        assert_matches!(
+            &events[0],
+            ResponseEvent::TurnModerationMetadata(result) if result.metadata.is_null()
         );
     }
 

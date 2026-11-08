@@ -127,6 +127,16 @@ type SharedModelsEndpointClient = Arc<dyn ModelsEndpointClient>;
 
 /// Coordinates model discovery plus cached metadata on disk.
 pub trait ModelsManager: fmt::Debug + Send + Sync {
+    fn ensure_initialized(
+        &self,
+        http_client_factory: HttpClientFactory,
+    ) -> ModelsManagerFuture<'_, ()> {
+        Box::pin(async move {
+            self.raw_model_catalog(RefreshStrategy::OnlineIfUncached, http_client_factory)
+                .await;
+        })
+    }
+
     /// Select an isolated catalog for a supported thread originator. `None` retains this manager.
     fn for_originator(&self, _originator: &str) -> Option<SharedModelsManager> {
         None
@@ -305,6 +315,7 @@ impl CatalogSource {
 pub struct ProviderModelsManager {
     originator_managers: std::sync::Mutex<HashMap<ModelCatalogOriginator, SharedModelsManager>>,
     remote_models: RwLock<ModelsCacheEntry>,
+    catalog_initialized: AtomicBool,
     cache: Option<Arc<dyn ModelsCache>>,
     endpoint_client: SharedModelsEndpointClient,
     catalog_source: CatalogSource,
@@ -364,6 +375,7 @@ impl ProviderModelsManager {
     ) -> Self {
         Self {
             originator_managers: std::sync::Mutex::new(HashMap::new()),
+            catalog_initialized: AtomicBool::new(false),
             remote_models: RwLock::new(ModelsCacheEntry {
                 fetched_at: Utc::now(),
                 etag: None,
@@ -399,6 +411,24 @@ impl StaticModelsManager {
 }
 
 impl ModelsManager for ProviderModelsManager {
+    fn ensure_initialized(
+        &self,
+        http_client_factory: HttpClientFactory,
+    ) -> ModelsManagerFuture<'_, ()> {
+        Box::pin(async move {
+            if let Err(error) = self
+                .load_catalog(
+                    RefreshStrategy::OnlineIfUncached,
+                    true,
+                    &http_client_factory,
+                )
+                .await
+            {
+                error!("failed to initialize model catalog: {error}");
+            }
+        })
+    }
+
     fn for_originator(&self, originator: &str) -> Option<SharedModelsManager> {
         let originator = ModelCatalogOriginator::from_originator(originator)?;
         let mut managers = self
@@ -589,6 +619,16 @@ impl ProviderModelsManager {
         refresh_strategy: RefreshStrategy,
         http_client_factory: &HttpClientFactory,
     ) -> CoreResult<()> {
+        self.load_catalog(refresh_strategy, false, http_client_factory)
+            .await
+    }
+
+    async fn load_catalog(
+        &self,
+        refresh_strategy: RefreshStrategy,
+        initialize: bool,
+        http_client_factory: &HttpClientFactory,
+    ) -> CoreResult<()> {
         // Only an explicitly configured provider catalog may perform discovery.
         // Never load old hosted catalog caches into the bundled default catalog.
         if matches!(self.catalog_source, CatalogSource::Default) {
@@ -601,33 +641,50 @@ impl ProviderModelsManager {
         if self.api_key_discovery_disabled() {
             return Ok(());
         }
-        if !self.should_refresh_models().await {
+        let should_refresh = self.should_refresh_models().await;
+        if initialize && self.catalog_is_initialized(&*self.remote_models.read().await) {
+            return Ok(());
+        }
+        if !should_refresh {
             if matches!(
                 refresh_strategy,
                 RefreshStrategy::Offline | RefreshStrategy::OnlineIfUncached
             ) {
-                self.try_load_cache().await;
+                self.try_load_cache_with_mode(initialize).await;
             }
             return Ok(());
         }
         match refresh_strategy {
             RefreshStrategy::Offline => {
-                self.try_load_cache().await;
+                self.try_load_cache_with_mode(initialize).await;
                 Ok(())
             }
             RefreshStrategy::OnlineIfUncached => {
-                if self.try_load_cache().await {
+                if self.try_load_cache_with_mode(initialize).await {
                     return Ok(());
                 }
-                self.fetch_and_update_models(http_client_factory).await
+                self.fetch_and_update_models_with_mode(http_client_factory, initialize)
+                    .await
             }
-            RefreshStrategy::Online => self.fetch_and_update_models(http_client_factory).await,
+            RefreshStrategy::Online => {
+                self.fetch_and_update_models_with_mode(http_client_factory, initialize)
+                    .await
+            }
         }
     }
 
     async fn fetch_and_update_models(
         &self,
         http_client_factory: &HttpClientFactory,
+    ) -> CoreResult<()> {
+        self.fetch_and_update_models_with_mode(http_client_factory, false)
+            .await
+    }
+
+    async fn fetch_and_update_models_with_mode(
+        &self,
+        http_client_factory: &HttpClientFactory,
+        initialize: bool,
     ) -> CoreResult<()> {
         let client_version = crate::client_version_to_whole();
         let request_identity = self.endpoint_client.identity();
@@ -665,6 +722,7 @@ impl ProviderModelsManager {
                         current.models.clear();
                         current.etag = None;
                         current.identity.clone_from(&request_identity);
+                        self.catalog_initialized.store(false, Ordering::Release);
                     }
                     if let Some(identity) = request_identity
                         && let Some(cache) = self.cache.as_ref()
@@ -705,7 +763,7 @@ impl ProviderModelsManager {
         {
             error!("failed to write models cache: {err}");
         }
-        self.apply_remote_models(entry).await;
+        self.apply_remote_models_with_mode(entry, initialize).await;
         Ok(())
     }
 
@@ -739,9 +797,25 @@ impl ProviderModelsManager {
     }
 
     /// Publish only while the request identity still matches, including after async storage.
-    async fn apply_remote_models(&self, mut entry: ModelsCacheEntry) -> bool {
+    fn catalog_is_initialized(&self, entry: &ModelsCacheEntry) -> bool {
+        self.catalog_initialized.load(Ordering::Acquire)
+            && entry.identity.is_some()
+            && entry.identity == self.endpoint_client.identity()
+    }
+
+    async fn apply_remote_models(&self, entry: ModelsCacheEntry) -> bool {
+        self.apply_remote_models_with_mode(entry, false).await
+    }
+
+    async fn apply_remote_models_with_mode(
+        &self,
+        mut entry: ModelsCacheEntry,
+        initialize: bool,
+    ) -> bool {
         let mut current = self.remote_models.write().await;
-        if entry.identity != self.endpoint_client.identity() {
+        if entry.identity != self.endpoint_client.identity()
+            || (initialize && self.catalog_is_initialized(&current))
+        {
             return false;
         }
         let remote_only = entry
@@ -768,11 +842,16 @@ impl ProviderModelsManager {
             entry.models = models;
         }
         *current = entry;
+        self.catalog_initialized.store(true, Ordering::Release);
         true
     }
 
     /// Attempt to satisfy the refresh from the cache when it matches the provider and TTL.
     async fn try_load_cache(&self) -> bool {
+        self.try_load_cache_with_mode(false).await
+    }
+
+    async fn try_load_cache_with_mode(&self, initialize: bool) -> bool {
         let Some(cache) = self.cache.as_ref() else {
             return false;
         };
@@ -820,11 +899,19 @@ impl ProviderModelsManager {
             info!("models cache: provider or auth identity mismatch");
             return false;
         }
-        self.apply_remote_models(cache_entry).await
+        self.apply_remote_models_with_mode(cache_entry, initialize)
+            .await
     }
 }
 
 impl ModelsManager for StaticModelsManager {
+    fn ensure_initialized(
+        &self,
+        _http_client_factory: HttpClientFactory,
+    ) -> ModelsManagerFuture<'_, ()> {
+        Box::pin(std::future::ready(()))
+    }
+
     #[tracing::instrument(skip_all, fields(model = model))]
     fn get_model_info<'a>(
         &'a self,

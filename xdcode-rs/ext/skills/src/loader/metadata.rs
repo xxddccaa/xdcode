@@ -1,6 +1,7 @@
 use std::io;
 
-use xdcode_exec_server::ExecutorFileSystem;
+use xdcode_exec_server::EnvironmentAccess;
+use xdcode_exec_server::EnvironmentAccessExt;
 use xdcode_exec_server::GetMetadataOptions;
 use xdcode_exec_server::ReadFileOptions;
 use xdcode_skills::ParsedSkillMetadata;
@@ -35,7 +36,7 @@ pub(super) fn metadata_probe_paths(path: &PathUri) -> impl Iterator<Item = PathU
 }
 
 pub(super) async fn load_host_skill_metadata(
-    file_system: &dyn ExecutorFileSystem,
+    file_system: &dyn EnvironmentAccess,
     skill_path: &AbsolutePathBuf,
     metadata: &SkillMetadataDiscovery,
     plugin_root: Option<&AbsolutePathBuf>,
@@ -51,11 +52,7 @@ pub(super) async fn load_host_skill_metadata(
             let mut selected = None;
             for candidate in metadata_probe_paths(path) {
                 match file_system
-                    .get_metadata(
-                        &candidate,
-                        GetMetadataOptions::default(),
-                        /*sandbox*/ None,
-                    )
+                    .get_metadata(&candidate, GetMetadataOptions::default())
                     .await
                 {
                     Ok(metadata) if metadata.is_file => {
@@ -78,11 +75,7 @@ pub(super) async fn load_host_skill_metadata(
     };
 
     let contents = match file_system
-        .read_file_text(
-            &metadata_path,
-            ReadFileOptions::default(),
-            /*sandbox*/ None,
-        )
+        .read_file_text(&metadata_path, ReadFileOptions::default())
         .await
     {
         Ok(contents) => contents,

@@ -2,6 +2,77 @@ use super::*;
 use tempfile::tempdir;
 
 #[test]
+fn configuration_transactions_share_the_model_cli_lock_and_release_after_errors() {
+    let temporary = tempdir().expect("temporary config");
+    let path = temporary.path().join("config.toml");
+    fs::write(&path, "# retained\nmodel = 'before'\n").expect("config");
+    let mut transaction = ConfigurationFile::open(&path).expect("first writer");
+    assert!(ConfigurationFile::open(&path).is_err());
+    transaction.document()["model"] = toml_edit::value("after");
+    transaction.finish(false).expect("atomic update");
+    let transaction = ConfigurationFile::open(&path).expect("lock released");
+    assert!(transaction.check_version(Some("stale"), true).is_err());
+    drop(transaction);
+    assert!(ConfigurationFile::open(&path).is_ok());
+    assert!(
+        fs::read_to_string(&path)
+            .expect("config")
+            .contains("# retained")
+    );
+}
+
+#[test]
+fn configuration_transactions_preserve_unrelated_legacy_and_unknown_fields() {
+    let temporary = tempdir().expect("temporary config");
+    let path = temporary.path().join("config.toml");
+    let original =
+        "# retained\nprofiles = { fast = { sandbox_mode = 'strict' } }\nunknown_setting = 'keep'\n";
+    fs::write(&path, original).expect("config");
+    let mut transaction = ConfigurationFile::open(&path).expect("transaction");
+    transaction.document()["model"] = toml_edit::value("changed");
+    transaction.finish(false).expect("atomic update");
+    let updated = fs::read_to_string(path).expect("updated config");
+    assert!(updated.starts_with(original));
+    assert!(updated.contains("model = \"changed\""));
+}
+
+#[test]
+fn configuration_transactions_reject_invalid_catalog_fields_without_writing() {
+    let temporary = tempdir().expect("temporary config");
+    let path = temporary.path().join("config.toml");
+    let original = "model = 'before'\n";
+    fs::write(&path, original).expect("config");
+    let mut transaction = ConfigurationFile::open(&path).expect("transaction");
+    transaction.document()["models"] = toml_edit::value("invalid");
+    assert!(transaction.finish(false).is_err());
+    assert_eq!(
+        fs::read_to_string(&path).expect("unchanged config"),
+        original
+    );
+    assert!(ConfigurationFile::open(&path).is_ok());
+}
+
+#[cfg(unix)]
+#[test]
+fn configuration_transaction_rejects_a_retargeted_symlink_without_writing_either_file() {
+    let temporary = tempdir().expect("temporary config");
+    let first = temporary.path().join("first.toml");
+    let second = temporary.path().join("second.toml");
+    let path = temporary.path().join("config.toml");
+    let original = "model = 'before'\n";
+    fs::write(&first, original).expect("first config");
+    fs::write(&second, original).expect("second config");
+    std::os::unix::fs::symlink(&first, &path).expect("config symlink");
+    let mut transaction = ConfigurationFile::open(&path).expect("transaction");
+    transaction.document()["model"] = toml_edit::value("ours");
+    fs::remove_file(&path).expect("unlink config");
+    std::os::unix::fs::symlink(&second, &path).expect("new config target");
+    assert!(transaction.finish(false).is_err());
+    assert_eq!(fs::read_to_string(first).expect("first config"), original);
+    assert_eq!(fs::read_to_string(second).expect("second config"), original);
+}
+
+#[test]
 fn empty_and_commented_configurations_load_as_documents() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("config.toml");

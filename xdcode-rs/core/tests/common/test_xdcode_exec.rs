@@ -23,8 +23,23 @@ impl TestXdcodeExecBuilder {
     pub fn cmd_with_server(&self, server: &MockServer) -> assert_cmd::Command {
         let mut cmd = self.cmd();
         let base = format!("{}/v1", server.uri());
-        cmd.arg("-c")
-            .arg(format!("provider_base_url={}", toml_string_literal(&base)));
+        for (key, value) in [
+            ("model", "gpt-5.1"),
+            ("model_provider", "test-responses"),
+            (
+                "model_providers.test-responses.name",
+                "Test Responses provider",
+            ),
+            ("model_providers.test-responses.base_url", base.as_str()),
+            ("model_providers.test-responses.wire_api", "responses"),
+            (
+                "model_providers.test-responses.env_key",
+                XDCODE_API_KEY_ENV_VAR,
+            ),
+        ] {
+            cmd.arg("-c")
+                .arg(format!("{key}={}", toml_string_literal(value)));
+        }
         cmd
     }
 

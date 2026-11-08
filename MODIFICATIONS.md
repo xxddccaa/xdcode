@@ -16,7 +16,17 @@ telemetry, curated-plugin automatic downloads, and all application updaters.
 Model calls use explicitly configured Responses-compatible providers. Runtime
 state, environment variables, helpers and local app-server namespaces are
 independent of other CLI applications. Linux packages carry a build receipt and
-an offline installer; product versions follow the recorded upstream release.
+an offline installer. Product versions and the actual upstream baseline are
+recorded separately when a release selectively backports fixes.
+
+The GNU/Linux offline installer accepts an explicit `--force` to install while
+existing xdcode processes continue running. Only the active-process gate is
+skipped; integrity checks, safe paths, install locking and old builds remain.
+The manual GitHub delivery workflow can publish both Linux x86_64 and Apple
+Silicon artifacts after their native build and runtime checks pass. It verifies
+matching clean source receipts and uploads all assets to a draft before making
+the release public. Neither operation adds an application updater or stops
+existing sessions.
 
 Third-party protocol/model identifiers, pinned external build sources and
 license notices intentionally retain their original spellings. Those names
@@ -62,6 +72,24 @@ WebSocket rate limits preserve the current turn and retry until success or user
 cancellation, including foreground compaction. Server retry deadlines are retained;
 authentication, exhausted quota and invalid-model errors remain terminal. See
 UPSTREAM_0.165.0.md and the build receipt for verification and delivery details.
+
+## 2026-11-08: xdcode 0.167.0 selective maintenance
+
+The product version advances to 0.167.0 while the actual upstream baseline stays
+at Codex 0.165.0. Nine upstream fixes cover context usage, pending agent messages,
+paginated history, concurrent SQLite migrations, metadata persistence, filename
+ranking, instruction-budget warnings, literal shell prefixes and fork drafts.
+Exact commits and adaptation details are recorded in `upstream.json` and
+[UPSTREAM_0.167.0.md](UPSTREAM_0.167.0.md); this is not a full Codex 0.167.0 sync.
+
+xdcode-specific changes make ordinary, named and new-worktree `/new` inherit the
+confirmed provider, exact catalog ID, model, reasoning effort and collaboration
+mode. The server must acknowledge settings before navigation or first input;
+failure preserves the old session and draft and attempts empty-candidate cleanup.
+`/model` opens at the first selectable row in both catalog and provider views,
+while retaining exact current-ID markers. User configuration, other entry-point
+priorities, independent project/mode preferences and provider history isolation
+remain unchanged. This work does not install, publish or replace a running build.
 
 ## 2026-10-31 selective backports
 
@@ -146,3 +174,34 @@ Larger optional changes remain outside this selection: unread-result interfaces,
 visual interaction changes, switching app-server backends, shared MCP connections,
 Code Mode server truncation and the Guardian rewrite. Hosted login, cloud tasks,
 telemetry uploads, automatic updates and implicit provider changes remain disabled.
+
+## Fixed-main selective migration — November 8, 2026
+
+The following development pass targets Codex
+`c9b4267c370a755da12ec1c8648c2451163212b7` without rolling main tracking.
+xdcode remains 0.167.0 on the recorded 0.165.0 upstream baseline. It preserves the
+prior 31 backports, confirmed-selection `/new` inheritance, exact catalog IDs,
+custom and service-default effort, Default/Plan preferences and provider-bound
+encrypted history. Sources, selected portions and exclusions are recorded in
+[UPSTREAM_MAIN_C9B4267C.md](UPSTREAM_MAIN_C9B4267C.md) and appended to
+`upstream.json`; older attribution records remain intact.
+
+This pass adds applicable storage, lifecycle, approval, sandbox and trust repairs;
+per-thread model catalogs and user-layer Provider editing; negotiated MCP leases
+and optional stdio startup; permission-aware skill catalogs; and the local agent
+message board. It also connects the embedded command center, observed unread
+receipts, optional conversation sidebar, independent input state, Markdown,
+uncertain-send recovery and returned safety-recourse metadata. The optional
+unread/shared-MCP/visual exclusions in the previous section describe that earlier
+pass, not this fixed-target selection.
+
+New experiments remain disabled by default. Provider saves do not switch the
+current session or project mode defaults. Message-board activation never creates
+agents. Sidebar visibility, closing and archiving have distinct history semantics;
+uncertain sends are not replayed automatically. Owning-server request views do not
+close another live connection. No general multi-backend registration UI is added.
+
+Hosted services, Guardian/reviewer integration, new managed authentication,
+automatic plugin downloads or upgrades, host cycling and new-provider `/new`
+defaults remain excluded. The development build uses a new source digest and
+build ID, records dirty state and is not installed or published by this pass.

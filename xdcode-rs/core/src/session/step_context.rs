@@ -20,7 +20,10 @@ use xdcode_protocol::items::ModelInvocationContext;
 use xdcode_protocol::protocol::TurnContextItem;
 
 /// Request-scoped state that may change between model sampling requests.
+#[derive(Clone)]
 pub(crate) struct StepContext {
+    /// Input prefix captured before a normal inference request starts.
+    pub(crate) sampled_through_sequence: Option<u64>,
     pub(crate) turn: Arc<TurnContext>,
     /// Preempts this request and yields its code-mode observations when user input arrives.
     pub(crate) preempt: Option<CancellationToken>,
@@ -38,7 +41,7 @@ pub(crate) struct StepContext {
     /// Admitted executor hooks bound to this step's discovery, plugin policy, and MCP routing.
     pub(crate) executor_hook_sources: Vec<ExecutorPluginHookSource>,
     /// Keeps the extension inputs used to build this step's tools for its World State as well.
-    pub(crate) extension_data: ExtensionData,
+    pub(crate) extension_data: Arc<ExtensionData>,
     /// The exact MCP connections, configuration, and catalog captured for this step.
     pub(crate) mcp: Arc<McpBinding>,
     /// The finalized tool plan advertised and executed for this exact sampling request.

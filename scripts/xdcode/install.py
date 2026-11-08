@@ -71,8 +71,11 @@ def validate_upstream(info: dict) -> None:
     version = info.get("version", "")
     if not isinstance(version, str) or not STABLE_VERSION.fullmatch(version) or version == "0.0.0":
         raise DeliveryError("upstream.json must supply a stable product version")
-    if info.get("upstream_tag") != f"rust-v{version}":
-        raise DeliveryError("product version must equal the upstream stable tag")
+    upstream_version = info.get("upstream_version", version)
+    if not isinstance(upstream_version, str) or not STABLE_VERSION.fullmatch(upstream_version) or upstream_version == "0.0.0":
+        raise DeliveryError("upstream_version must identify a stable upstream baseline")
+    if info.get("upstream_tag") != f"rust-v{upstream_version}":
+        raise DeliveryError("upstream version must equal the upstream stable tag")
     if not isinstance(info.get("upstream_commit"), str) or not COMMIT.fullmatch(info["upstream_commit"]):
         raise DeliveryError("upstream_commit must be a full lowercase Git commit")
 
@@ -445,10 +448,17 @@ def install_lock(root: Path):
 
 
 def install(archive_path: Path, install_root: Path, bin_dir: Path, xdcode_home: Path,
-            *, sha256: str | None = None) -> Path:
+            *, sha256: str | None = None, force: bool = False) -> Path:
     glibc = host_glibc()
     install_root, bin_dir, xdcode_home = validate_targets(install_root, bin_dir, xdcode_home)
-    require_idle(xdcode_home)
+    if force:
+        print(
+            "xdcode install: warning: --force skips active daemon/task checks; "
+            "running processes keep using their current builds. Restart them safely to use the new build.",
+            file=sys.stderr,
+        )
+    else:
+        require_idle(xdcode_home)
     entry = bin_dir / "xdcode"
     check_entrypoint(entry, install_root)
     expected = expected_archive_digest(archive_path, sha256)
@@ -477,7 +487,8 @@ def install(archive_path: Path, install_root: Path, bin_dir: Path, xdcode_home: 
             if os.path.lexists(dest):
                 raise DeliveryError("build is already installed; existing builds are never overwritten")
             validate_runtime(stage, info["version"])
-            require_idle(xdcode_home)
+            if not force:
+                require_idle(xdcode_home)
             check_entrypoint(entry, install_root)
             stage.rename(dest)
             # Keep a verified version directory on late failure. Never remove an old build.
@@ -485,7 +496,8 @@ def install(archive_path: Path, install_root: Path, bin_dir: Path, xdcode_home: 
             with tempfile.TemporaryDirectory(prefix=".xdcode-entry-", dir=bin_dir) as entry_temp:
                 temporary_entry = Path(entry_temp) / "xdcode"
                 temporary_entry.symlink_to(dest / "bin/xdcode")
-                require_idle(xdcode_home)
+                if not force:
+                    require_idle(xdcode_home)
                 check_entrypoint(entry, install_root)
                 os.replace(temporary_entry, entry)
     return dest
@@ -495,13 +507,16 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("archive", type=Path, help="local .tar.gz (and adjacent .sha256)")
     parser.add_argument("--sha256", help="trusted archive digest instead of the sidecar")
+    parser.add_argument("--force", action="store_true",
+                        help="allow active xdcode processes; keep all integrity and path checks")
     parser.add_argument("--install-root", type=Path, default=Path.home() / ".local/lib/xdcode")
     parser.add_argument("--bin-dir", type=Path, default=Path.home() / ".local/bin")
     parser.add_argument("--xdcode-home", type=Path,
                         default=Path(os.environ.get("XDCODE_HOME", Path.home() / ".xdcode")))
     args = parser.parse_args(argv)
     try:
-        dest = install(args.archive, args.install_root, args.bin_dir, args.xdcode_home, sha256=args.sha256)
+        dest = install(args.archive, args.install_root, args.bin_dir, args.xdcode_home,
+                       sha256=args.sha256, force=args.force)
     except (DeliveryError, OSError, ValueError, tarfile.TarError) as error:
         print(f"xdcode install: {error}", file=sys.stderr)
         return 1

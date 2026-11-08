@@ -70,6 +70,7 @@ use xdcode_protocol::models::ToolResultSources;
 use xdcode_protocol::protocol::EventMsg;
 use xdcode_protocol::protocol::SessionSource;
 use xdcode_protocol::protocol::W3cTraceContext;
+use xdcode_protocol::protocol::XdcodeErrorInfo;
 use xdcode_protocol::user_input::UserInput;
 use xdcode_rollout_trace::ConversationPart;
 use xdcode_rollout_trace::InferenceTraceContext;
@@ -2468,8 +2469,13 @@ async fn responses_websocket_v2_creates_without_previous_response_id_when_non_in
     server.shutdown().await;
 }
 
+#[test_case::test_case("invalid_prompt", XdcodeErrorInfo::InvalidPrompt; "invalid prompt")]
+#[test_case::test_case("budget_reached", XdcodeErrorInfo::SessionBudgetExceeded; "budget reached")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn responses_websocket_v2_after_error_uses_full_create_without_previous_response_id() {
+async fn responses_websocket_v2_after_error_uses_full_create_without_previous_response_id(
+    code: &str,
+    expected_error: XdcodeErrorInfo,
+) {
     skip_if_no_network!();
 
     let server = start_websocket_server(vec![
@@ -2479,7 +2485,7 @@ async fn responses_websocket_v2_after_error_uses_full_create_without_previous_re
                 "type": "response.failed",
                 "response": {
                     "error": {
-                        "code": "invalid_prompt",
+                        "code": code,
                         "message": "synthetic websocket failure"
                     }
                 }
@@ -2517,14 +2523,23 @@ async fn responses_websocket_v2_after_error_uses_full_create_without_previous_re
         .expect("websocket stream failed");
     let mut saw_error = false;
     while let Some(event) = second_stream.next().await {
-        if event.is_err() {
+        if let Err(error) = event {
+            assert_eq!(error.to_xdcode_protocol_error(), expected_error);
+            assert_eq!(error.retry_delay(/*retry_count*/ 1), None);
             saw_error = true;
             break;
         }
     }
     assert!(saw_error, "expected second websocket stream to error");
 
-    stream_until_complete(&mut session, &harness, &prompt_three).await;
+    stream_until_complete_with_model_info(
+        &mut session,
+        &harness,
+        &prompt_three,
+        &harness.model_info,
+        "resp-3",
+    )
+    .await;
 
     assert_eq!(server.handshakes().len(), 2);
 
@@ -2569,22 +2584,25 @@ async fn responses_websocket_v2_after_error_uses_full_create_without_previous_re
     server.shutdown().await;
 }
 
+#[test_case::test_case(
+    json!({"type": "response.failed", "response": {"error": {"code": "invalid_prompt"}}}),
+    XdcodeErrorInfo::InvalidPrompt; "invalid prompt"
+)]
+#[test_case::test_case(
+    json!({"type": "error", "status": 400, "error": {"code": "budget_reached"}}),
+    XdcodeErrorInfo::SessionBudgetExceeded; "budget HTTP envelope"
+)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn responses_websocket_v2_surfaces_terminal_error_without_close_handshake() {
+async fn responses_websocket_v2_surfaces_terminal_error_without_close_handshake(
+    failure: serde_json::Value,
+    expected_error: XdcodeErrorInfo,
+) {
     skip_if_no_network!();
 
     let server = start_websocket_server_with_headers(vec![WebSocketConnectionConfig {
         requests: vec![
             vec![ev_response_created("resp-1"), ev_completed("resp-1")],
-            vec![json!({
-                "type": "response.failed",
-                "response": {
-                    "error": {
-                        "code": "invalid_prompt",
-                        "message": "synthetic websocket failure"
-                    }
-                }
-            })],
+            vec![failure],
         ],
         response_headers: Vec::new(),
         accept_delay: None,
@@ -2614,18 +2632,24 @@ async fn responses_websocket_v2_surfaces_terminal_error_without_close_handshake(
         .await
         .expect("websocket stream failed");
 
-    let saw_error = tokio::time::timeout(Duration::from_secs(2), async {
+    let error = tokio::time::timeout(Duration::from_secs(2), async {
         while let Some(event) = second_stream.next().await {
-            if event.is_err() {
-                return true;
+            if let Err(error) = event {
+                return error;
             }
         }
-        false
+        panic!("expected second websocket stream to error");
     })
     .await
     .expect("timed out waiting for terminal websocket error");
 
-    assert!(saw_error, "expected second websocket stream to error");
+    assert_eq!(
+        (
+            error.to_xdcode_protocol_error(),
+            error.retry_delay(/*retry_count*/ 1),
+        ),
+        (expected_error, None),
+    );
 
     server.shutdown().await;
 }

@@ -4,6 +4,7 @@
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync, realpathSync } from "fs";
 import { createRequire } from "node:module";
+import { constants } from "node:os";
 import path from "path";
 import { fileURLToPath } from "url";
 
@@ -238,6 +239,11 @@ delete env.XDCODE_MANAGED_BY_PNPM;
 delete env.XDCODE_MANAGED_BY_VITE_PLUS;
 env[packageManagerEnvVar] = "1";
 
+if (process.platform !== "win32" && typeof process.execve === "function") {
+  process.on("SIGXFSZ", () => {});
+  process.execve(binaryPath, [binaryPath, ...process.argv.slice(2)], env);
+}
+
 const child = spawn(binaryPath, process.argv.slice(2), {
   stdio: "inherit",
   env,
@@ -287,8 +293,8 @@ const childResult = await new Promise((resolve) => {
 });
 
 if (childResult.type === "signal") {
-  // Re-emit the same signal so that the parent terminates with the expected
-  // semantics (this also sets the correct exit code of 128 + n).
+  process.exitCode = 128 + constants.signals[childResult.signal];
+  process.removeAllListeners(childResult.signal);
   process.kill(process.pid, childResult.signal);
 } else {
   process.exit(childResult.exitCode);

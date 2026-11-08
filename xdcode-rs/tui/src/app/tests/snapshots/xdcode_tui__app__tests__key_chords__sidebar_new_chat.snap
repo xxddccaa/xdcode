@@ -1,0 +1,16 @@
+---
+source: tui/src/app/tests/key_chords.rs
+expression: frame
+---
+                                                                               │                                     +
+  /init - create an AGENTS.md file with instructions for Xdcode                │
+  /status - show current session configuration                                 │ Open in sidebar
+  /permissions - choose what Xdcode is allowed to do                           │
+  /model - choose what model and reasoning effort to use                       │ › + New side chat
+  /review - review any changes and find issues                                 │     Start from the main chat
+                                                                               │
+                                                                               │
+› parent draft                                                                 │
+                                                                               │
+  gpt-test default                                                             │
+                                                                               │ f5 g open · esc back · ↑/↓ move …

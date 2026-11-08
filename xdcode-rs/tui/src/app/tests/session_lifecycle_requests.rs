@@ -31,6 +31,7 @@ use xdcode_app_server_protocol::ThreadItemsListCursor;
 use xdcode_app_server_protocol::ThreadItemsListParams;
 use xdcode_app_server_protocol::ThreadItemsListResponse;
 use xdcode_app_server_protocol::ThreadStatus;
+use xdcode_context_fragments::side_conversation_boundary;
 use xdcode_protocol::AgentPath;
 use xdcode_protocol::items::AgentMessageContent;
 use xdcode_protocol::items::AgentMessageItem;
@@ -366,6 +367,9 @@ async fn same_thread_retry_keeps_subscription_and_restores_draft() -> Result<()>
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum HistoryCapabilities {
     Current,
+    ModelSelection,
+    NewThreadSettingsRejected,
+    NewThreadSettingsUnsupported,
     LegacyOnly,
     LegacyOnlyUnsupportedVariant,
     LegacyDynamicToolsAndHistory,
@@ -519,7 +523,11 @@ pub(super) async fn start_recording_app_server_with_realtime_speech(
                 event = embedded.next_event() => {
                     let Some(event) = event else { break };
                     if let xdcode_app_server_client::InProcessServerEvent::ServerNotification(notification) = event
-                        && matches!(*notification, ServerNotification::ThreadSettingsUpdated(_))
+                        && (matches!(*notification, ServerNotification::ThreadSettingsUpdated(_))
+                            || matches!(history_capabilities,
+                                HistoryCapabilities::ModelSelection
+                                    | HistoryCapabilities::NewThreadSettingsRejected
+                                    | HistoryCapabilities::NewThreadSettingsUnsupported))
                     {
                         let result = websocket.send(Message::Text(serde_json::to_string(&notification)?.into())).await;
                         if result.as_ref().is_err_and(is_recording_client_disconnect) {
@@ -610,6 +618,34 @@ pub(super) async fn start_recording_app_server_with_realtime_speech(
                         JSONRPCMessage::Response(JSONRPCResponse {
                             id: request_id,
                             result: serde_json::json!({}),
+                        })
+                    } else if matches!(
+                        history_capabilities,
+                        HistoryCapabilities::NewThreadSettingsRejected
+                            | HistoryCapabilities::NewThreadSettingsUnsupported
+                    ) && request.method == "thread/settings/update"
+                        && request_sink
+                            .lock()
+                            .expect("request recorder lock")
+                            .iter()
+                            .filter(|recorded| recorded.method == "thread/start")
+                            .count()
+                            > 1
+                    {
+                        let unsupported = history_capabilities
+                            == HistoryCapabilities::NewThreadSettingsUnsupported;
+                        JSONRPCMessage::Error(JSONRPCError {
+                            id: request_id,
+                            error: JSONRPCErrorError {
+                                code: if unsupported { -32601 } else { -32602 },
+                                data: None,
+                                message: if unsupported {
+                                    "method not found"
+                                } else {
+                                    "inherited settings rejected"
+                                }
+                                .to_string(),
+                            },
                         })
                     } else if (matches!(
                         history_capabilities,
@@ -999,7 +1035,10 @@ async fn in_app_remote_resume_picker_preserves_remote_cwd_filter() -> Result<()>
     let mut tui = crate::tui::test_support::make_test_tui()?;
     tui.set_alt_screen_enabled(/*enabled*/ false);
     tui.pause_events();
-    let mut picker = Box::pin(app.open_resume_picker(&mut tui, &mut app_server));
+    let owner = app_server.backend_id();
+    let mut backends = crate::app::backend_sessions::BackendSessions::new(app_server);
+    let slot = backends.slot(owner).unwrap();
+    let mut picker = Box::pin(app.open_resume_picker_for_backends(&mut tui, &mut backends, slot));
     let params = tokio::time::timeout(std::time::Duration::from_secs(/*secs*/ 5), async {
         tokio::select! {
             biased;
@@ -1018,7 +1057,7 @@ async fn in_app_remote_resume_picker_preserves_remote_cwd_filter() -> Result<()>
     drop(picker);
     let _ = release_tx.send(());
     recorder.await??;
-    app_server.shutdown().await?;
+    backends.shutdown().await?;
     active_proxy.await??;
 
     assert_eq!(
@@ -1084,11 +1123,15 @@ async fn delete_current_thread_navigates_only_after_success() -> Result<()> {
                 side_config.clone(),
                 thread_id,
                 /*selected_profile*/ None,
+                crate::app_server_session::SideChatStorage::Temporary,
             )
             .await?;
         let side_id = side.session.thread_id;
         app.side_threads
             .insert(side_id, SideThreadState::new(thread_id));
+        let unrelated_side = ThreadId::new();
+        app.side_threads
+            .insert(unrelated_side, SideThreadState::new(ThreadId::new()));
         if !matches!(app.app_server_target, AppServerTarget::Embedded) {
             // The recording proxy rejects the next unsubscribe after a failed fork.
             side_config.cwd = side_config.cwd.join("failure");
@@ -1098,7 +1141,8 @@ async fn delete_current_thread_navigates_only_after_success() -> Result<()> {
                         &app.local_settings,
                         side_config,
                         thread_id,
-                        /*selected_profile*/ None
+                        None,
+                        crate::app_server_session::SideChatStorage::Temporary,
                     )
                     .await
                     .is_err()
@@ -1124,11 +1168,14 @@ async fn delete_current_thread_navigates_only_after_success() -> Result<()> {
                 .is_err()
         );
         if matches!(app.app_server_target, AppServerTarget::Embedded) {
-            assert_matches!(control, AppRunControl::Exit(ExitReason::ThreadRemoved));
+            assert_matches!(control, AppRunControl::Continue);
             assert!(recorded_params(&requests, "thread/unsubscribe").is_empty());
         } else {
             assert_matches!(control, AppRunControl::Continue);
-            assert!(app.side_threads.is_empty());
+            assert_eq!(
+                app.side_threads.keys().copied().collect::<Vec<_>>(),
+                vec![unrelated_side]
+            );
             assert_eq!(
                 recorded_params(&requests, "thread/unsubscribe"),
                 vec![serde_json::json!({"threadId": side_id.to_string()}); 2]
@@ -1249,7 +1296,7 @@ async fn external_transport_registers_dynamic_tools_and_finds_task_mentions() ->
     }
     let target_id = started.session.thread_id;
     app_server
-        .thread_inject_items(target_id, vec![App::side_boundary_prompt_item()])
+        .thread_inject_items(target_id, vec![side_conversation_boundary()])
         .await?;
     crate::init_state_db_for_app_server_target(&app.config, &crate::AppServerTarget::Embedded)
         .await?
@@ -1341,16 +1388,18 @@ async fn archive_current_thread_reports_success_only_after_archiving() -> Result
 
     app.active_thread_id = Some(thread_id);
     assert_matches!(
-        app.archive_current_thread(&mut tui, &mut app_server).await?,
-        AppRunControl::Exit(ExitReason::Archived(archived_id)) if archived_id == thread_id
+        app.archive_current_thread(&mut tui, &mut app_server)
+            .await?,
+        AppRunControl::Continue
     );
 
+    assert!(app.chat_widget.active_view_is(AGENTS_OVERVIEW_VIEW_ID));
     app_server.shutdown().await?;
     Ok(())
 }
 
 #[tokio::test]
-async fn archive_current_thread_returns_shared_servers_to_agents() -> Result<()> {
+async fn archive_current_thread_returns_to_agents() -> Result<()> {
     let endpoint = crate::resolve_remote_addr("ws://127.0.0.1:4500")?;
     for (target, attachment, side_exists) in [
         AppServerTarget::LocalDaemon {
@@ -1394,6 +1443,7 @@ async fn archive_current_thread_returns_shared_servers_to_agents() -> Result<()>
                     side_config,
                     thread_id,
                     /*selected_profile*/ None,
+                    crate::app_server_session::SideChatStorage::Temporary,
                 )
                 .await?
                 .session
@@ -1924,36 +1974,40 @@ async fn older_external_server_starts_without_unsupported_dynamic_tools_or_histo
 }
 
 #[tokio::test]
-async fn embedded_server_rejects_unowned_dynamic_tool_calls() -> Result<()> {
+async fn embedded_server_dispatches_only_its_own_dynamic_tools() -> Result<()> {
     let (mut app, mut events, _ops) = make_test_app_with_channels().await;
     let xdcode_home = tempdir()?;
     app.config.xdcode_home = xdcode_home.path().to_path_buf().abs();
     app.config.sqlite = SqliteConfig::new_for_testing(xdcode_home.path().abs());
     let app_server = crate::start_embedded_app_server_for_picker(&app.config).await?;
-    app.handle_app_server_event(
-        &app_server,
-        xdcode_app_server_client::AppServerEvent::ServerRequest(Box::new(
-            ServerRequest::DynamicToolCall {
-                request_id: AppServerRequestId::Integer(100),
-                params: xdcode_app_server_protocol::DynamicToolCallParams {
-                    thread_id: "thread-1".to_string(),
-                    turn_id: "turn-1".to_string(),
-                    call_id: "call-1".to_string(),
-                    namespace: Some("xdcode_app".to_string()),
-                    tool: "list_threads".to_string(),
-                    arguments: serde_json::json!({}),
+    for (id, namespace, expected_success) in [(100, "xdcode_app", false), (101, "xdcode_tui", true)]
+    {
+        app.handle_app_server_event(
+            &app_server,
+            xdcode_app_server_client::AppServerEvent::ServerRequest(Box::new(
+                ServerRequest::DynamicToolCall {
+                    request_id: AppServerRequestId::Integer(id),
+                    params: xdcode_app_server_protocol::DynamicToolCallParams {
+                        thread_id: "thread-1".to_string(),
+                        turn_id: "turn-1".to_string(),
+                        call_id: "call-1".to_string(),
+                        namespace: Some(namespace.to_string()),
+                        tool: "list_threads".to_string(),
+                        arguments: serde_json::json!({}),
+                    },
                 },
-            },
-        )),
-    )
-    .await;
-    let AppEvent::DynamicToolCallCompleted { response, .. } = events
-        .try_recv()
-        .expect("embedded dynamic calls must receive a response")
-    else {
-        panic!("expected a dynamic tool failure response")
-    };
-    assert!(!response.success);
+            )),
+        )
+        .await;
+        let AppEvent::DynamicToolCallCompleted { response, .. } =
+            tokio::time::timeout(Duration::from_secs(5), events.recv())
+                .await?
+                .expect("embedded dynamic calls must receive a response")
+        else {
+            panic!("expected a dynamic tool response")
+        };
+        assert_eq!(response.success, expected_success);
+    }
     app_server.shutdown().await?;
     Ok(())
 }
@@ -3317,7 +3371,7 @@ async fn paginated_workflows_never_request_full_thread_history() -> Result<()> {
     ))
     .await?;
     assert_eq!(resumed.session.thread_id, paginated_thread_id);
-    assert!(recorded_params(&requests, "thread/read").is_empty());
+    assert_eq!(recorded_params(&requests, "thread/read").len(), 1);
     let resume_requests = recorded_params(&requests, "thread/resume");
     assert_eq!(resume_requests.len(), 1);
     assert_eq!(resume_requests[0]["excludeTurns"], true);
@@ -3338,6 +3392,7 @@ async fn paginated_workflows_never_request_full_thread_history() -> Result<()> {
         side_config,
         paginated_thread_id,
         /*selected_profile*/ None,
+        crate::app_server_session::SideChatStorage::Temporary,
     ))
     .await?;
 
@@ -4947,7 +5002,7 @@ fn session_lifecycle_avoids_redundant_subagent_metadata_reads() -> Result<()> {
 
                 assert!(matches!(control, AppRunControl::Continue));
                 assert_eq!(app.chat_widget.thread_id(), Some(root_thread_id));
-                assert_eq!(take_backfill_counts(&requests), (1, expected_reads));
+                assert_eq!(take_backfill_counts(&requests), (1, expected_reads + 1));
                 assert_eq!(
                     app.agent_navigation.get(&child_thread_id),
                     Some(&AgentPickerThreadEntry {
@@ -5072,6 +5127,9 @@ fn session_lifecycle_avoids_redundant_subagent_metadata_reads() -> Result<()> {
 
 #[path = "new_session_tests.rs"]
 mod new_session_tests;
+
+#[path = "new_session_model_tests.rs"]
+mod new_session_model_tests;
 #[path = "startup_defaults_tests.rs"]
 mod startup_defaults_tests;
 
@@ -5171,6 +5229,10 @@ async fn command_center_read_only_open_requests_and_failure_preservation() -> Re
         std::fs::write(
             app.config.xdcode_home.join("config.toml"),
             "[tui]\nresume_cwd = \"current\"\n",
+        )?;
+        crate::app::test_support::configure_provider_fixture(
+            &app,
+            &app.config.xdcode_home.join("config.toml"),
         )?;
         for cwd in [test_path_buf("/"), app.config.cwd.to_path_buf()] {
             crate::legacy_core::config::set_project_trust_level(

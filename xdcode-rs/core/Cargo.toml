@@ -68,9 +68,6 @@ xdcode-sandboxing = { workspace = true }
 xdcode-skills = { workspace = true }
 xdcode-skills-extension = { workspace = true }
 xdcode-state = { workspace = true }
-xdcode-agent-message-board-extension = { workspace = true }
-xdcode-message-board = { workspace = true }
-xdcode-agent-message-board-client = { workspace = true }
 xdcode-terminal-detection = { workspace = true }
 xdcode-thread-store = { workspace = true }
 xdcode-tools = { workspace = true }
@@ -142,12 +139,15 @@ openssl-sys = { workspace = true, features = ["vendored"] }
 openssl-sys = { workspace = true, features = ["vendored"] }
 
 [dev-dependencies]
+xdcode-message-board = { workspace = true }
+xdcode-agent-message-board-host = { workspace = true }
 assert_cmd = { workspace = true }
 assert_matches = { workspace = true }
 xdcode-exec-server-test-support = { workspace = true }
 xdcode-image-generation-extension = { workspace = true }
 xdcode-home = { workspace = true }
 xdcode-mcp-extension = { workspace = true }
+xdcode-message-board-mcp = { workspace = true }
 xdcode-otel = { workspace = true }
 xdcode-protocol-test-support = { workspace = true }
 xdcode-test-binary-support = { workspace = true }

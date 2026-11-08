@@ -1731,7 +1731,8 @@ impl AnalyticsReducer {
             ServerRequest::CommandExecutionRequestApproval { request_id, params } => {
                 let is_stdin_review = match params.kind {
                     CommandExecutionApprovalKind::WriteStdin => true,
-                    CommandExecutionApprovalKind::Command => false,
+                    CommandExecutionApprovalKind::Command
+                    | CommandExecutionApprovalKind::HumanCommand => false,
                 };
                 let is_network_access_review = params.network_approval_context.is_some();
                 let requested_network_access = is_network_access_review

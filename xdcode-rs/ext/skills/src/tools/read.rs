@@ -130,7 +130,7 @@ impl<'call> ToolExecutor<ToolCall<'call>> for ReadTool {
                 validate_handle("resource", resource, MAX_HANDLE_BYTES)?;
             }
 
-            let matches = self.context.matching_packages(&args.package);
+            let matches = self.context.matching_packages(&args.package)?;
             let (skill_entry, selected_source, output_authority) = matches
                 .iter()
                 .find_map(|(entry, matched_source)| {

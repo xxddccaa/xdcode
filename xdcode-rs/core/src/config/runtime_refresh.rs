@@ -67,6 +67,8 @@ impl Config {
         // These operational controls accept host defaults beneath explicit layer values.
         // Enterprise opt-in always comes from trusted layers instead.
         for feature in [
+            Feature::McpConnectionSharing,
+            Feature::McpLazyStdioStartup,
             Feature::SecretAuthStorage,
             Feature::McpOAuthRefreshCoordination,
         ] {

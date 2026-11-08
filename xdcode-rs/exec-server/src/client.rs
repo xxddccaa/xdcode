@@ -2813,7 +2813,7 @@ mod tests {
             sandbox: None,
         };
         let sandbox = FileSystemSandboxContext::from_permission_profile(
-            PermissionProfile::workspace_write(),
+            xdcode_protocol::models::PermissionProfile::workspace_write(),
             PathUri::parse("file:///tmp")?,
         );
         let expected_write = WireFsWriteFileParams::from(FsWriteFileParams {

@@ -1505,7 +1505,7 @@ async fn list_threads_db_enabled_preserves_metadata_for_missing_rollout_paths()
         .expect("state db lookup should succeed");
     assert_eq!(stored_metadata, Some(metadata));
     let cursor = page.next_cursor.expect("another thread remains");
-    assert_eq!(cursor.thread_id(), None);
+    assert_eq!(cursor.thread_id(), Some(valid_thread_id));
     runtime.close().await;
     let fallback = RolloutRecorder::list_threads(
         Some(runtime),
@@ -2019,10 +2019,8 @@ async fn resume_candidate_matches_cwd_reads_latest_turn_context() -> std::io::Re
                 .expect("absolute latest cwd"),
             approval_policy: AskForApproval::Never,
             approvals_reviewer: None,
-            sandbox_policy: SandboxPolicy::new_read_only_policy(),
-            permission_profile: None,
+            permission_profile: xdcode_protocol::models::PermissionProfile::read_only(),
             active_permission_profile: None,
-            file_system_sandbox_policy: None,
             model: "test-model".to_string(),
             comp_hash: None,
             collaboration_mode: None,

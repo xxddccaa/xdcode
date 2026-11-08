@@ -25,6 +25,8 @@ pub enum ApiError {
     QuotaExceeded,
     #[error("usage not included")]
     UsageNotIncluded,
+    #[error("session budget exceeded")]
+    SessionBudgetExceeded,
     #[error("retryable error: {message}")]
     Retryable {
         message: String,
@@ -74,6 +76,9 @@ pub(crate) fn parse_terminal_provider_error(
     let error = error?;
     let code = error.get("code")?.as_str()?;
     match (code, status) {
+        ("budget_reached", None | Some(StatusCode::BAD_REQUEST)) => {
+            Some(ApiError::SessionBudgetExceeded)
+        }
         ("flex_unavailable", None | Some(StatusCode::TOO_MANY_REQUESTS)) => {
             Some(ApiError::FlexUnavailable)
         }

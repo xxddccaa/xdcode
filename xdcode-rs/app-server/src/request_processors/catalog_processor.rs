@@ -178,11 +178,39 @@ impl CatalogRequestProcessor {
         &self,
         params: ModelListParams,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
-        let (config, models_manager) = self
+        let (active_config, active_models_manager) = self
             .model_catalog
             .current()
             .await
             .map_err(|err| config_load_error(&err))?;
+        let (config, models_manager) = match params.model_provider.as_deref() {
+            None => (active_config, active_models_manager),
+            Some(provider_id) => {
+                let config = self
+                    .config_manager
+                    .load_with_overrides(
+                        None,
+                        ConfigOverrides {
+                            model_provider: Some(provider_id.to_string()),
+                            ..ConfigOverrides::default()
+                        },
+                    )
+                    .await
+                    .map_err(|error| config_load_error(&error))?;
+                if config.model_provider_id == active_config.model_provider_id
+                    && config.model_provider == active_config.model_provider
+                    && config.model_catalog == active_config.model_catalog
+                {
+                    (active_config, active_models_manager)
+                } else {
+                    let manager = xdcode_core::build_models_manager(
+                        &config,
+                        self.thread_manager.auth_manager(),
+                    );
+                    (Arc::new(config), manager)
+                }
+            }
+        };
         // Gate the same provider used by the catalog, including when its model cache is warm.
         // Resolving credentials may refresh them, but explicit host policy prevents browser login.
         if let Some(gateway) = xdcode_model_provider::create_model_provider(
@@ -292,6 +320,7 @@ impl CatalogRequestProcessor {
             limit,
             cursor,
             include_hidden,
+            model_provider: _,
         } = params;
         let presets = self
             .model_catalog
@@ -579,6 +608,14 @@ impl CatalogRequestProcessor {
                         config.config_layer_stack,
                     )
                     .with_plugin_skill_snapshots(plugin_skill_snapshots);
+                    let skills_input = match self
+                        .thread_manager
+                        .environment_manager()
+                        .default_environment_id()
+                    {
+                        Some(environment_id) => skills_input.with_environment_id(environment_id),
+                        None => skills_input,
+                    };
                     let snapshot = skills_request
                         .snapshot_for_cwd(&skills_input, force_reload, fs)
                         .await;

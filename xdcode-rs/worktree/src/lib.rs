@@ -8,6 +8,8 @@ use crate::git::git_output;
 use crate::git::git_path;
 use crate::git::git_path_from_bytes;
 use crate::git::git_stdout;
+use crate::git::git_worktree_porcelain_z;
+use crate::git::registered_worktree_roots;
 use crate::paths::allocate_worktree_root;
 use crate::paths::remove_empty_bucket;
 use anyhow::Context;
@@ -175,15 +177,21 @@ impl WorktreeManager {
         let managed_root =
             dunce::canonicalize(&self.settings.root).unwrap_or_else(|_| self.settings.root.clone());
         let source_common_dir = resolve_git_path(&source_root, "--git-common-dir")?;
-        let output = git_output(
-            &source_cwd,
-            GitOperation::Metadata,
-            ["worktree", "list", "--porcelain", "-z"],
-        )?;
-        let fields = output
-            .stdout
-            .split(|byte| *byte == b'\0')
-            .collect::<Vec<_>>();
+        let listing = git_worktree_porcelain_z(&source_cwd)?;
+        let legacy_listing = listing.is_none();
+        let listing = match listing {
+            Some(listing) => listing,
+            None => {
+                let mut listing = Vec::new();
+                for root in registered_worktree_roots(&source_common_dir)? {
+                    listing.extend_from_slice(b"worktree ");
+                    listing.extend_from_slice(root.as_os_str().as_encoded_bytes());
+                    listing.extend_from_slice(b"\0\0");
+                }
+                listing
+            }
+        };
+        let fields = listing.split(|byte| *byte == b'\0').collect::<Vec<_>>();
         let mut worktrees = Vec::new();
 
         for entry in fields.split(|field| field.is_empty()) {
@@ -201,7 +209,9 @@ impl WorktreeManager {
                             .to_owned(),
                     );
                 } else if let Some(name) = field.strip_prefix(b"branch ") {
-                    branch = Some(name.strip_prefix(b"refs/heads/").unwrap_or(name));
+                    branch = std::str::from_utf8(name.strip_prefix(b"refs/heads/").unwrap_or(name))
+                        .ok()
+                        .map(str::to_owned);
                 }
             }
 
@@ -255,6 +265,21 @@ impl WorktreeManager {
                 continue;
             }
 
+            if legacy_listing {
+                let output = git_output(
+                    &canonical_root,
+                    GitOperation::Metadata,
+                    ["rev-parse", "--verify", "HEAD"],
+                )?;
+                let head = fs::read(git_dir.join("HEAD"))?;
+                let head = head.strip_suffix(b"\n").unwrap_or(&head);
+                #[cfg(windows)]
+                let head = head.strip_suffix(b"\r").unwrap_or(head);
+                branch = head
+                    .strip_prefix(b"ref: refs/heads/")
+                    .and_then(|name| std::str::from_utf8(name).ok().map(str::to_owned));
+                head_sha = Some(String::from_utf8(output.stdout)?.trim().to_owned());
+            }
             let head_sha = head_sha
                 .with_context(|| format!("managed worktree {} has no HEAD", root.display()))?;
             worktrees.push(ManagedWorktree {
@@ -263,7 +288,7 @@ impl WorktreeManager {
                 source_root: source_root.clone(),
                 source_cwd: source_cwd.clone(),
                 head_sha,
-                branch: branch.and_then(|name| std::str::from_utf8(name).ok().map(str::to_owned)),
+                branch,
             });
         }
 

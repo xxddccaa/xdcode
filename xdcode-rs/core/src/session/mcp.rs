@@ -173,7 +173,7 @@ impl Session {
         self.mcp_runtime_context(&environments, &host_fallback_cwd)
     }
 
-    fn mcp_runtime_context(
+    pub(super) fn mcp_runtime_context(
         &self,
         environments: &TurnEnvironmentSnapshot,
         host_fallback_cwd: &std::path::Path,
@@ -186,6 +186,7 @@ impl Session {
             self.services.turn_environments.environment_manager(),
             local_process_cwd,
         )
+        .with_connection_pool(self.services.mcp_manager.connection_pool())
         .with_selected_environments(
             environments.all_selections().into(),
             environments.ready_environment_handles(),

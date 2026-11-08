@@ -29,6 +29,10 @@ on:
         description: Build and verify the Apple Silicon macOS package
         type: boolean
         default: false
+      publish_release:
+        description: Publish a GitHub Release after both platform builds pass
+        type: boolean
+        default: false
       build_id:
         description: Optional personal revision ID (default derives from source commit)
         type: string
@@ -82,6 +86,12 @@ jobs:
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
           python-version: '3.11'
+      - name: Validate release build selection
+        if: github.event_name == 'workflow_dispatch' && inputs.publish_release
+        env:
+          BUILD_LINUX: ${{ inputs.build_package }}
+          BUILD_MACOS: ${{ inputs.build_macos }}
+        run: test "$BUILD_LINUX" = true && test "$BUILD_MACOS" = true
       - name: Test package and offline installer
         # Hosted runner helpers can deny /proc/<pid>/exe to the runner uid.
         # Keep the installer's fail-closed process gate and give its real-process
@@ -132,6 +142,7 @@ jobs:
           python3.11 scripts/xdcode/build.py --output-dir "$GITHUB_WORKSPACE/target/xdcode-ci-build" "${build_args[@]}"
           python3.11 scripts/xdcode/package.py --build-dir "$GITHUB_WORKSPACE/target/xdcode-ci-build"
       - name: Install and load the real package in an isolated directory
+        id: install_smoke
         run: |
           set -euo pipefail
           archives=("$GITHUB_WORKSPACE"/target/xdcode-dist/xdcode-*.tar.gz)
@@ -144,8 +155,47 @@ jobs:
           expected_version="$(python3.11 -c 'import json; print(json.load(open("upstream.json"))["version"])')"
           actual_version="$(sudo env -i PATH=/usr/bin:/bin XDCODE_HOME="$xdcode_smoke_root/runtime" "$xdcode_smoke_root/bin/xdcode" --version)"
           [[ "$actual_version" == "xdcode $expected_version" ]]
+          echo "binary=$xdcode_smoke_root/bin/xdcode" >> "$GITHUB_OUTPUT"
+      - name: Verify agent tools, MCP, identity, state isolation, and resume
+        env:
+          XDCODE_CI_BINARY: ${{ steps.install_smoke.outputs.binary }}
+        run: python3.11 scripts/verify_xdcode_runtime.py "$XDCODE_CI_BINARY"
+      - name: Verify Plan exit, rate-limit recovery, and cancellation
+        env:
+          XDCODE_CI_BINARY: ${{ steps.install_smoke.outputs.binary }}
+        run: python3.11 scripts/verify_xdcode_reliability.py "$XDCODE_CI_BINARY"
       - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: xdcode-linux-x86_64-gnu
           path: target/xdcode-dist/xdcode-*
           if-no-files-found: error
+
+  publish-release:
+    if: github.event_name == 'workflow_dispatch' && inputs.publish_release
+    needs: [linux-gnu-package, macos-arm64-package]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        with:
+          python-version: '3.11'
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: xdcode-linux-x86_64-gnu
+          path: target/xdcode-release/linux
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: xdcode-macos-arm64
+          path: target/xdcode-release/macos
+      - name: Verify both artifacts, upload a draft, then publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_REPOSITORY: ${{ github.repository }}
+          RELEASE_COMMIT: ${{ github.sha }}
+        run: |
+          python3.11 scripts/xdcode/release.py \
+            --assets-dir target/xdcode-release \
+            --source-commit "$RELEASE_COMMIT" \
+            --repo "$RELEASE_REPOSITORY"

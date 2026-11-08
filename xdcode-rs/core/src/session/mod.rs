@@ -317,13 +317,13 @@ use crate::guardian::GuardianReviewSessionManager;
 use crate::mcp::McpEnvironmentScope;
 use crate::mcp::McpManager;
 use crate::mcp::McpThreadIdentity;
-use crate::network_policy_decision::execpolicy_network_rule_amendment;
 use crate::rollout::map_session_init_error;
 use crate::session::startup_prewarm::SessionStartupPrewarmHandle;
 use crate::shell;
 use crate::state::AcceptedUserInputResponse;
 use crate::state::AutoCompactWindowIds;
 use crate::state::AutoCompactWindowSnapshot;
+use crate::state::PendingApproval;
 use crate::state::PendingRequestPermissions;
 use crate::state::ReasoningEffortPin;
 use crate::state::SessionServices;
@@ -418,8 +418,19 @@ use xdcode_utils_stream_parser::ProposedPlanSegment;
 /// Whether reported usage updates the installed context baseline or only spending.
 #[derive(Clone, Copy)]
 pub(crate) enum TokenUsageContext {
-    Sampling { includes_reasoning: bool },
+    Sampling {
+        includes_reasoning: bool,
+        /// Input history length before the response, including requests with no output items.
+        input_item_count: usize,
+    },
     SpendingOnly,
+}
+
+/// Which active turn can service a network approval.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NetworkApprovalTurn {
+    Originating,
+    AnyActive,
 }
 
 /// Queue and lifecycle endpoints for a running [`Session`].
@@ -563,7 +574,7 @@ pub(crate) const INITIAL_SUBMIT_ID: &str = "";
 pub(crate) const SUBMISSION_CHANNEL_CAPACITY: usize = 512;
 
 /// Restore the owned stable directory identity before selecting runtime metadata.
-fn restore_catalog_model_from_history(config: &mut Config, history: &InitialHistory) {
+pub(crate) fn restore_catalog_model_from_history(config: &mut Config, history: &InitialHistory) {
     // Automatic metadata is tied to the current model and provider interface;
     // a hand-edited list remains authoritative through reconcile_discovery.
     for entry in &mut config.models {
@@ -604,6 +615,41 @@ fn restore_catalog_model_from_history(config: &mut Config, history: &InitialHist
         config.model_context_window = entry.context_window;
         config.model_auto_compact_token_limit = entry.auto_compact_token_limit;
     }
+}
+
+pub(crate) fn configured_catalog_model_info(
+    config: &Config,
+    model: &str,
+    overrides: &xdcode_models_manager::ModelsManagerConfig,
+) -> Option<ModelInfo> {
+    let id = config.model_catalog_id.as_ref()?;
+    let mut generic = xdcode_models_manager::model_info::model_info_from_slug(model);
+    generic.max_context_window = None;
+    let mut info = xdcode_models_manager::model_info::with_config_overrides(generic, overrides);
+    info.default_reasoning_level = None;
+    info.supports_reasoning_summary_parameter = false;
+    info.default_reasoning_summary = xdcode_protocol::config_types::ReasoningSummary::None;
+    if let Some(entry) = config.models.iter().find(|entry| {
+        &entry.id == id && entry.provider == config.model_provider_id && entry.model == model
+    }) {
+        info.display_name = entry.name.clone();
+        info.supported_reasoning_levels = entry
+            .reasoning_efforts
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .cloned()
+            .map(
+                |effort| xdcode_protocol::model_types::ReasoningEffortPreset {
+                    description: effort.to_string(),
+                    effort,
+                },
+            )
+            .collect();
+    } else {
+        info.supported_reasoning_levels.clear();
+    }
+    Some(info)
 }
 
 impl Session {
@@ -871,16 +917,9 @@ impl Session {
         // 1. config.base_instructions override
         // 2. conversation history => session_meta.base_instructions
         // 3. rendered instructions_template for current model
-        let model_info = if config.model_catalog_id.is_some() {
-            let mut generic = xdcode_models_manager::model_info::model_info_from_slug(&model);
-            // The generic upstream ceiling is not a capability of this provider.
-            generic.max_context_window = None;
-            let mut info = xdcode_models_manager::model_info::with_config_overrides(
-                generic,
-                &config.to_models_manager_config(),
-            );
-            info.default_reasoning_level = None;
-            info.supports_reasoning_summary_parameter = false;
+        let model_info = if let Some(info) =
+            configured_catalog_model_info(&config, &model, &config.to_models_manager_config())
+        {
             info
         } else {
             models_manager
@@ -1646,11 +1685,9 @@ impl Session {
         state.auto_compact_window_snapshot()
     }
 
-    pub(crate) async fn estimated_tokens_after_last_model_generated_item(&self) -> i64 {
+    pub(crate) async fn estimated_tokens_since_last_usage(&self) -> i64 {
         let state = self.state.lock().await;
-        state
-            .history
-            .estimated_tokens_after_last_model_generated_item()
+        state.history.estimated_tokens_since_last_usage()
     }
 
     pub(crate) async fn total_token_usage(&self) -> Option<TokenUsage> {
@@ -2264,6 +2301,33 @@ impl Session {
         self.resume_config_snapshot().await.0
     }
 
+    pub(crate) async fn selected_model_info(&self) -> Arc<ModelInfo> {
+        let configuration = self.state.lock().await.session_configuration.clone();
+        Arc::new(self.configuration_model_info(&configuration).await)
+    }
+
+    pub(super) async fn configuration_model_info(
+        &self,
+        configuration: &SessionConfiguration,
+    ) -> ModelInfo {
+        let config = self.build_effective_session_config(&configuration);
+        let model = configuration.step_settings.collaboration_mode.model();
+        let overrides = configuration
+            .model_info_overrides
+            .models_manager_config(config.personality);
+        if let Some(model_info) = configured_catalog_model_info(&config, model, &overrides) {
+            return model_info;
+        }
+        let manager = self
+            .services
+            .model_catalog
+            .for_config(&config, Arc::clone(&self.services.auth_manager));
+        configuration
+            .step_settings
+            .resolve_model_info(manager.as_ref(), &configuration.model_info_overrides)
+            .await
+    }
+
     pub(crate) async fn resume_config_snapshot(&self) -> (ThreadConfigSnapshot, Option<String>) {
         let configuration = self.state.lock().await.session_configuration.clone();
         let selected_service_tier = configuration.step_settings.service_tier.clone();
@@ -2364,13 +2428,7 @@ impl Session {
         };
         let config = self.build_effective_session_config(&configuration);
         if !config.features.enabled(Feature::ReasoningEffortOverride) {
-            let model = configuration
-                .step_settings
-                .resolve_model_info(
-                    self.services.models_manager.as_ref(),
-                    &configuration.model_info_overrides,
-                )
-                .await;
+            let model = self.configuration_model_info(&configuration).await;
             if let Some(effort) = config
                 .model_reasoning_effort
                 .clone()
@@ -3030,49 +3088,19 @@ impl Session {
             .session_configuration
             .xdcode_home()
             .clone();
-        let execpolicy_amendment =
-            execpolicy_network_rule_amendment(amendment, network_approval_context, &host);
-        let mut on_policy_applied = Some(on_policy_applied);
-
-        if let Some(started_network_proxy) = self.services.network_proxy.load_full() {
-            let proxy = started_network_proxy.proxy();
-            match amendment.action {
-                NetworkPolicyRuleAction::Allow => proxy
-                    .add_allowed_domain(&host)
-                    .await
-                    .map_err(|err| anyhow::anyhow!("failed to update runtime allowlist: {err}"))?,
-                NetworkPolicyRuleAction::Deny => proxy
-                    .add_denied_domain(&host)
-                    .await
-                    .map_err(|err| anyhow::anyhow!("failed to update runtime denylist: {err}"))?,
-            }
-            // Active enforcement changed successfully. Notify the owner before
-            // the next fallible await so cancellation cannot contradict it.
-            if let Some(on_policy_applied) = on_policy_applied.take() {
-                on_policy_applied();
-            }
-        }
-
+        let started_proxy = self.services.network_proxy.load_full();
+        let proxy = started_proxy.as_deref().map(StartedNetworkProxy::proxy);
         self.services
             .exec_policy
-            .append_network_rule_and_update(
+            .apply_network_rule_and_persist(
                 &xdcode_home,
                 &host,
-                execpolicy_amendment.protocol,
-                execpolicy_amendment.decision,
-                Some(execpolicy_amendment.justification),
+                amendment,
+                network_approval_context,
+                proxy.as_ref(),
+                on_policy_applied,
             )
             .await
-            .map_err(|err| {
-                anyhow::anyhow!("failed to persist network policy amendment to execpolicy: {err}")
-            })?;
-
-        // Without a running proxy, persistence is the first effective policy change.
-        if let Some(on_policy_applied) = on_policy_applied {
-            on_policy_applied();
-        }
-
-        Ok(())
     }
 
     fn validated_network_policy_amendment_host(
@@ -3128,26 +3156,51 @@ impl Session {
         command: Vec<String>,
         cwd: PathUri,
         reason: Option<String>,
-        network_approval_context: Option<NetworkApprovalContext>,
+        network_approval: Option<(NetworkApprovalContext, NetworkApprovalTurn)>,
         proposed_execpolicy_amendment: Option<ExecPolicyAmendment>,
         additional_permissions: Option<AdditionalPermissionProfile>,
         available_decisions: Option<Vec<ReviewDecision>>,
         plugin_attribution_override: Option<PluginCommandAttribution>,
     ) -> ReviewDecision {
+        let (network_approval_context, turn_binding) = network_approval.unzip();
         let _elicitation = self.services.elicitations.register();
         //  command-level approvals use `call_id`.
         // `approval_id` identifies subcommand callbacks and stdin writes.
         let effective_approval_id = approval_id.clone().unwrap_or_else(|| call_id.clone());
         // Add the tx_approve callback to the map before sending the request.
         let (tx_approve, rx_approve) = oneshot::channel();
-        let prev_entry = {
+        let (prev_entry, _network_prompt) = {
             let mut active = self.active_turn.lock().await;
+            if let Some(binding) = turn_binding
+                && active
+                    .as_ref()
+                    .and_then(|turn| turn.task.as_ref())
+                    .is_none_or(|task| {
+                        binding == NetworkApprovalTurn::Originating
+                            && task.turn_context.sub_id != turn_context.sub_id
+                    })
+            {
+                return ReviewDecision::Abort;
+            }
             match active.as_mut() {
                 Some(at) => {
                     let mut ts = at.turn_state.lock().await;
-                    ts.insert_pending_approval(effective_approval_id.clone(), tx_approve)
+                    let prev = ts.insert_pending_approval(
+                        effective_approval_id.clone(),
+                        tx_approve,
+                        kind,
+                        turn_context.sub_id.clone(),
+                    );
+                    let prompt = network_approval_context.as_ref().map(|_| {
+                        ts.track_network_prompt(
+                            &self.tx_event,
+                            &turn_context.sub_id,
+                            &effective_approval_id,
+                        )
+                    });
+                    (prev, prompt)
                 }
-                None => None,
+                None => (None, None),
             }
         };
         if prev_entry.is_some() {
@@ -3229,7 +3282,12 @@ impl Session {
             match active.as_mut() {
                 Some(at) => {
                     let mut ts = at.turn_state.lock().await;
-                    ts.insert_pending_approval(approval_id.clone(), tx_approve)
+                    ts.insert_pending_approval(
+                        approval_id.clone(),
+                        tx_approve,
+                        ExecApprovalKind::Command,
+                        turn_context.sub_id.clone(),
+                    )
                 }
                 None => None,
             }
@@ -3650,24 +3708,32 @@ impl Session {
         clippy::await_holding_invalid_type,
         reason = "active turn checks and turn state updates must remain atomic"
     )]
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "active turn checks and turn state updates must remain atomic"
+    )]
+    async fn take_pending_approval(
+        &self,
+        approval_id: &str,
+        expected_turn_id: Option<&str>,
+    ) -> Option<(PendingApproval, Option<String>)> {
+        let active = self.active_turn.lock().await;
+        let turn = active.as_ref()?;
+        let turn_id = turn.task.as_ref().map(|task| &task.turn_context.sub_id);
+        let pending = turn
+            .turn_state
+            .lock()
+            .await
+            .remove_pending_approval(approval_id, expected_turn_id)?;
+        (!pending.sender.is_closed()).then(|| (pending, turn_id.cloned()))
+    }
+
     pub async fn notify_approval(&self, approval_id: &str, decision: ReviewDecision) {
-        let entry = {
-            let mut active = self.active_turn.lock().await;
-            match active.as_mut() {
-                Some(at) => {
-                    let mut ts = at.turn_state.lock().await;
-                    ts.remove_pending_approval(approval_id)
-                }
-                None => None,
-            }
-        };
-        match entry {
-            Some(tx_approve) => {
-                tx_approve.send(decision).ok();
-            }
-            None => {
-                warn!("No pending approval found for call_id: {approval_id}");
-            }
+        if let Some((pending, _)) = self.take_pending_approval(approval_id, None).await {
+            let decision = pending.validate(decision);
+            let _ = pending.sender.send(decision);
+        } else {
+            warn!("No pending approval found for call_id: {approval_id}");
         }
     }
 
@@ -4171,6 +4237,19 @@ impl Session {
             }
             let extension_data =
                 xdcode_extension_api::ExtensionData::new(turn_context.sub_id.clone());
+            extension_data.insert_arc(Arc::new(settings.model_info.clone()));
+            extension_data.insert_arc(
+                self.host_skills_for_step(&turn_context, &environments)
+                    .await,
+            );
+            if turn_context
+                .config
+                .features
+                .enabled(Feature::SkillCatalogDeltas)
+                && let Some(grants) = turn_context.turn_skill_filesystem_grants(&environments)
+            {
+                extension_data.insert(grants);
+            }
             if let Some(messages) = settings
                 .model_info
                 .model_messages
@@ -4265,6 +4344,7 @@ impl Session {
         }
         let (executor_hook_sources, mcp, tool_router, extension_data) = prepared_tools??;
         Ok(Arc::new(StepContext {
+            sampled_through_sequence: None,
             preempt: turn_context
                 .config
                 .features
@@ -4275,7 +4355,7 @@ impl Session {
             token_budget,
             session_telemetry,
             turn: turn_context,
-            extension_data,
+            extension_data: Arc::new(extension_data),
             environments,
             inherited_environments,
             executor_hook_sources,
@@ -4565,6 +4645,7 @@ impl Session {
                         .cloned(),
                 );
             }
+            state.history.checkpoint_sampling(&mut items);
             let replacement_history = items.clone();
             state.replace_annotated_history(
                 items,
@@ -5293,7 +5374,10 @@ impl Session {
                 turn_context,
                 &turn_context.initial_settings,
                 token_usage,
-                TokenUsageContext::Sampling { includes_reasoning },
+                TokenUsageContext::Sampling {
+                    includes_reasoning,
+                    input_item_count: 0,
+                },
             )
             .await;
         self.send_token_count_event(turn_context).await;
@@ -5355,11 +5439,15 @@ impl Session {
             let token_info = {
                 let mut state = self.state.lock().await;
                 match context {
-                    TokenUsageContext::Sampling { includes_reasoning } => {
+                    TokenUsageContext::Sampling {
+                        includes_reasoning,
+                        input_item_count,
+                    } => {
                         state.update_token_info_from_usage(
                             token_usage,
                             turn_context.model_context_window(),
                             includes_reasoning,
+                            input_item_count,
                         );
                         if matches!(
                             turn_context.config.model_auto_compact_token_limit_scope,
@@ -5451,7 +5539,9 @@ impl Session {
 
             // The local estimate already includes every retained reasoning item.
             info.last_usage_includes_reasoning = Some(true);
-            state.set_token_info(Some(info));
+            state
+                .history
+                .set_token_info_with_boundary(Some(info), history.raw_items().len());
         }
         self.set_auto_compact_window_estimated_prefill_for_scope(
             turn_context,

@@ -134,6 +134,7 @@ use xdcode_skills::build_skill_name_counts;
 use xdcode_skills::collect_explicit_skill_mentions;
 use xdcode_skills::tool_kind_for_path;
 use xdcode_skills_extension::HostSkillPrompts;
+use xdcode_skills_extension::HostSkillsSnapshot;
 use xdcode_skills_extension::InjectedHostSkillPrompts;
 use xdcode_skills_extension::validate_required_skills;
 use xdcode_thread_store::PersistContext;
@@ -573,13 +574,10 @@ pub(crate) async fn run_turn(
                 .await;
 
             // Construct the input that we will send to the model.
-            let sampling_request_input: Vec<ResponseItem> = async {
-                sess.clone_history()
-                    .await
-                    .for_prompt(&step_context.settings.model_info.input_modalities)
-            }
-            .instrument(trace_span!("run_turn.prepare_sampling_request_input"))
-            .await;
+            let sampling_request_input = sess
+                .clone_history()
+                .instrument(trace_span!("run_turn.prepare_sampling_request_input"))
+                .await;
 
             run_sampling_request(
                 Arc::clone(&sess),
@@ -598,6 +596,7 @@ pub(crate) async fn run_turn(
                 guardian_budget_compacted = false;
                 let SamplingRequestResult {
                     needs_follow_up: model_needs_follow_up,
+                    mailbox_preempted,
                     last_agent_message: sampling_request_last_agent_message,
                 } = sampling_request_output;
                 if model_needs_follow_up {
@@ -712,9 +711,9 @@ pub(crate) async fn run_turn(
                             if run_pending_session_start_hooks(&sess, &turn_context).await {
                                 return Ok(None);
                             }
-                            // After a signaled step, drain the steer even if compaction
                             // leaves the estimated context above the token limit.
                             can_drain_pending_input = !model_needs_follow_up
+                                || mailbox_preempted
                                 || step_context
                                     .preempt
                                     .as_ref()
@@ -1097,7 +1096,8 @@ async fn required_mcp_servers_for_input(
     } else {
         HashMap::new()
     };
-    let skills_snapshot = turn_context.skills_snapshot();
+    let environments = sess.services.turn_environments.snapshot().await;
+    let skills_snapshot = sess.host_skills_for_step(turn_context, &environments).await;
     let skills_outcome = skills_snapshot.outcome();
     let mentioned_skills =
         collect_explicit_skill_mentions(user_input, skills_outcome, &connector_slug_counts);
@@ -1168,7 +1168,8 @@ async fn build_skills_and_plugins(
     } else {
         Vec::new()
     };
-    let skills_snapshot = turn_context.skills_snapshot();
+    let skills_snapshot =
+        HostSkillsSnapshot::for_step(&step_context.extension_data, &turn_context.extension_data)?;
     let skills_outcome = skills_snapshot.outcome();
     let connector_slug_counts = build_connector_slug_counts(&available_connectors);
     let extension_injection_items =
@@ -1190,11 +1191,18 @@ async fn build_skills_and_plugins(
     let injected_host_skill_prompts = turn_context
         .extension_data
         .get::<InjectedHostSkillPrompts>();
+    let environments = step_context.environments();
+    let accessors = environments
+        .iter()
+        .map(|(_, access)| access as &dyn xdcode_exec_server::EnvironmentAccess)
+        .collect::<Vec<_>>();
     let HostSkillPrompts {
         fragments,
         injected: injected_host_skills,
         warnings: host_skill_warnings,
-    } = skills_snapshot.load_skill_prompts(&mentioned_skills).await;
+    } = skills_snapshot
+        .load_skill_prompts(&mentioned_skills, &accessors)
+        .await;
     emit_explicit_skill_invocations(
         sess,
         turn_context,
@@ -1461,8 +1469,12 @@ async fn maybe_run_previous_model_inline_compact(
     if !should_compact_for_comp_hash_change && previous_model == turn_context.model_info().slug {
         return Ok(());
     }
+    let models_manager = sess.services.model_catalog.for_config(
+        &turn_context.config,
+        Arc::clone(&sess.services.auth_manager),
+    );
     let mut previous_model_turn_context = turn_context
-        .with_model(previous_model.clone(), &sess.services.models_manager)
+        .with_model(previous_model.clone(), &models_manager)
         .await;
     // `with_model` preserves the current turn's access program. Restore the previous
     // turn's program so compaction uses the same model/cyber_access_program pair as that turn.
@@ -1745,7 +1757,7 @@ async fn run_sampling_request(
     turn_store: Arc<xdcode_extension_api::ExtensionData>,
     turn_diff_tracker: SharedTurnDiffTracker,
     client_session: &mut ModelClientSession,
-    input: Vec<ResponseItem>,
+    input: crate::context_manager::ContextManager,
     cancellation_token: CancellationToken,
 ) -> XdcodeResult<(SamplingRequestResult, Vec<ResponseItem>)> {
     let turn_context = Arc::clone(&step_context.turn);
@@ -1785,14 +1797,18 @@ async fn run_sampling_request(
     loop {
         // Running code-mode cells can request review while this response is in flight.
         // Keep the latest received ID until response.created replaces it.
-        let prompt_input = if let Some(input) = initial_input.take() {
+        let history = if let Some(input) = initial_input.take() {
             input
         } else {
-            sess.clone_history()
-                .await
-                .for_prompt(&step_context.settings.model_info.input_modalities)
+            sess.clone_history().await
         };
-        let mut prompt_input = prompt_input;
+        let input_item_count = history.raw_items().len();
+        let sampling_step_context = Arc::new(StepContext {
+            sampled_through_sequence: Some(history.input_sequence()),
+            ..step_context.as_ref().clone()
+        });
+        let mut prompt_input =
+            history.for_prompt(&step_context.settings.model_info.input_modalities);
         sess.services
             .executed_tool_calls
             .attach_to_prompt(&mut prompt_input, &mut executed_tool_calls_by_output);
@@ -1818,12 +1834,13 @@ async fn run_sampling_request(
         let err = match try_run_sampling_request(
             tool_runtime.clone(),
             Arc::clone(&sess),
-            Arc::clone(&step_context),
+            sampling_step_context,
             Arc::clone(&turn_store),
             client_session,
             &responses_metadata,
             Arc::clone(&turn_diff_tracker),
             &prompt,
+            input_item_count,
             cancellation_token.child_token(),
             &mut draining_for_mailbox,
         )
@@ -1872,6 +1889,7 @@ async fn run_sampling_request(
             return Ok((
                 SamplingRequestResult {
                     needs_follow_up: true,
+                    mailbox_preempted: draining_for_mailbox,
                     last_agent_message: None,
                 },
                 std::mem::take(original_input),
@@ -2019,6 +2037,8 @@ pub(crate) async fn built_tools(
 #[derive(Debug)]
 struct SamplingRequestResult {
     needs_follow_up: bool,
+    /// Queued mail interrupted sampling and must be drained before the next request.
+    mailbox_preempted: bool,
     last_agent_message: Option<String>,
 }
 
@@ -2283,6 +2303,7 @@ pub(super) fn realtime_text_for_event(msg: &EventMsg) -> Option<RealtimeEventTex
         | EventMsg::McpToolCallBegin(_)
         | EventMsg::McpToolCallEnd(_)
         | EventMsg::ElicitationAbandoned(_)
+        | EventMsg::NetworkApprovalResolved { .. }
         | EventMsg::WebSearchBegin(_)
         | EventMsg::WebSearchEnd(_)
         | EventMsg::ExecCommandBegin(_)
@@ -2674,6 +2695,7 @@ async fn try_run_sampling_request(
     responses_metadata: &XdcodeResponsesMetadata,
     turn_diff_tracker: SharedTurnDiffTracker,
     prompt: &Prompt,
+    input_item_count: usize,
     cancellation_token: CancellationToken,
     draining_for_mailbox: &mut bool,
 ) -> XdcodeResult<SamplingRequestResult> {
@@ -2858,6 +2880,7 @@ async fn try_run_sampling_request(
                 drop(stream);
                 break Ok(SamplingRequestResult {
                     needs_follow_up: true,
+                    mailbox_preempted: false,
                     last_agent_message,
                 });
             }
@@ -2893,6 +2916,7 @@ async fn try_run_sampling_request(
                     // receiving the interrupt. Do not retry without that pending input.
                     break Ok(SamplingRequestResult {
                         needs_follow_up: true,
+                        mailbox_preempted: true,
                         last_agent_message,
                     });
                 }
@@ -3061,6 +3085,7 @@ async fn try_run_sampling_request(
                     }
                     break Ok(SamplingRequestResult {
                         needs_follow_up: true,
+                        mailbox_preempted: true,
                         last_agent_message,
                     });
                 }
@@ -3241,7 +3266,10 @@ async fn try_run_sampling_request(
                         &turn_context,
                         &step_context.settings,
                         token_usage.as_ref(),
-                        super::TokenUsageContext::Sampling { includes_reasoning },
+                        super::TokenUsageContext::Sampling {
+                            includes_reasoning,
+                            input_item_count,
+                        },
                     )
                     .await;
                 should_emit_token_count = true;
@@ -3254,6 +3282,7 @@ async fn try_run_sampling_request(
                 }
                 break Ok(SamplingRequestResult {
                     needs_follow_up,
+                    mailbox_preempted: *draining_for_mailbox,
                     last_agent_message,
                 });
             }

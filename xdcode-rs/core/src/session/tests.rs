@@ -1,6 +1,11 @@
 use crate::agent::LocalAgentControl;
+#[path = "network_policy_tests.rs"]
+mod network_policy_tests;
 #[path = "notification_tests.rs"]
 mod notification_tests;
+
+#[path = "patch_approval_tests.rs"]
+mod patch_approval_tests;
 
 use super::mcp_refresh::McpRefresh;
 #[path = "turn_start_mcp_tests.rs"]
@@ -280,6 +285,7 @@ impl StepContext {
         });
         settings.service_tier = turn.config.service_tier.clone();
         Arc::new(Self {
+            sampled_through_sequence: None,
             preempt: turn
                 .config
                 .features
@@ -300,7 +306,9 @@ impl StepContext {
             inherited_environments: environments.clone(),
             environments,
             executor_hook_sources: Vec::new(),
-            extension_data: xdcode_extension_api::ExtensionData::new(turn.sub_id.clone()),
+            extension_data: Arc::new(xdcode_extension_api::ExtensionData::new(
+                turn.sub_id.clone(),
+            )),
             mcp: Arc::new(xdcode_mcp::McpBinding::empty(mcp_config_for_test(
                 &turn.config,
             ))),
@@ -2464,7 +2472,7 @@ async fn reconstruct_history_uses_replacement_history_verbatim() {
             ..Default::default()
         }),
     };
-    let replacement_history = vec![
+    let mut replacement_history = vec![
         ResponseItemEnvelope {
             item: summary_item.clone(),
             metadata: Some(XdcodeHarnessMetadata::default()),
@@ -2503,6 +2511,11 @@ async fn reconstruct_history_uses_replacement_history_verbatim() {
         .reconstruct_history_from_rollout(&turn_context, &rollout_items)
         .await;
 
+    for (index, envelope) in replacement_history.iter_mut().enumerate() {
+        let metadata = envelope.metadata.get_or_insert_default();
+        metadata.history_sequence = Some(index as u64 + 1);
+        metadata.sampled_through_sequence = Some(0);
+    }
     assert_eq!(reconstructed.history, replacement_history);
     assert_eq!(42, reconstructed.window_number);
     assert_eq!(Some(first_window_id), reconstructed.first_window_id);
@@ -2851,6 +2864,8 @@ async fn record_inter_agent_communication_sets_turn_id_in_rollout_and_resume() {
             item: expected_item.clone(),
             metadata: Some(XdcodeHarnessMetadata {
                 user_input_order: Some(0),
+                history_sequence: Some(1),
+                sampled_through_sequence: Some(0),
                 ..Default::default()
             }),
         }),
@@ -3023,11 +3038,11 @@ async fn annotated_history_uses_explicit_model_without_a_step(
             .executed_tool_calls
             .mcp_attribution_snapshot(),
     );
-    for envelope in &mut expected {
-        envelope
-            .metadata
-            .get_or_insert_default()
-            .history_truncation_token_limit = Some(expected_budget);
+    for (index, envelope) in expected.iter_mut().enumerate() {
+        let metadata = envelope.metadata.get_or_insert_default();
+        metadata.history_sequence = Some(index as u64 + 1);
+        metadata.sampled_through_sequence = Some(0);
+        metadata.history_truncation_token_limit = Some(expected_budget);
         let (ResponseItem::FunctionCallOutput { output, .. }
         | ResponseItem::CustomToolCallOutput { output, .. }) = &mut envelope.item
         else {
@@ -3206,7 +3221,11 @@ async fn prepares_resumed_history_before_installing_it() {
     );
     assert_eq!(
         history.annotated_items()[0].metadata,
-        Some(XdcodeHarnessMetadata::default())
+        Some(XdcodeHarnessMetadata {
+            history_sequence: Some(1),
+            sampled_through_sequence: Some(0),
+            ..Default::default()
+        })
     );
 }
 
@@ -3554,7 +3573,7 @@ async fn recompute_token_usage_updates_model_context_window() {
     assert_eq!(actual.model_context_window, Some(128_000));
 }
 
-#[test_case(crate::session::TokenUsageContext::Sampling { includes_reasoning: false }; "sampling")]
+#[test_case(crate::session::TokenUsageContext::Sampling { includes_reasoning: false, input_item_count: 0 }; "sampling")]
 #[test_case(crate::session::TokenUsageContext::SpendingOnly; "spending_only")]
 #[tokio::test]
 async fn record_token_usage_info_notifies_extension_contributors(
@@ -3644,6 +3663,7 @@ async fn record_token_usage_info_notifies_extension_contributors(
             Some(&first_usage),
             crate::session::TokenUsageContext::Sampling {
                 includes_reasoning: true,
+                input_item_count: 0,
             },
         )
         .await
@@ -3693,9 +3713,9 @@ async fn record_token_usage_info_notifies_extension_contributors(
             token_usage: TokenUsageInfo {
                 total_token_usage: expected_total_usage,
                 last_usage_includes_reasoning: match context {
-                    crate::session::TokenUsageContext::Sampling { includes_reasoning } => {
-                        Some(includes_reasoning)
-                    }
+                    crate::session::TokenUsageContext::Sampling {
+                        includes_reasoning, ..
+                    } => Some(includes_reasoning),
                     crate::session::TokenUsageContext::SpendingOnly => None,
                 },
                 last_token_usage: second_usage,
@@ -4238,7 +4258,11 @@ async fn record_initial_history_assigns_and_persists_id_for_forked_response_item
     assert_eq!(raw_history_items(&live_history), vec![expected_item]);
     assert_eq!(
         live_history.annotated_items()[0].metadata,
-        Some(XdcodeHarnessMetadata::default())
+        Some(XdcodeHarnessMetadata {
+            history_sequence: Some(1),
+            sampled_through_sequence: Some(0),
+            ..Default::default()
+        })
     );
 
     session.flush_rollout().await.expect("rollout should flush");
@@ -4421,10 +4445,8 @@ async fn record_initial_history_forked_hydrates_previous_turn_settings() {
         cwd: turn_context.cwd.clone(),
         approval_policy: turn_context.approval_policy(),
         approvals_reviewer: None,
-        sandbox_policy: turn_context.sandbox_policy(),
-        permission_profile: None,
+        permission_profile: turn_context.permission_profile(),
         active_permission_profile: None,
-        file_system_sandbox_policy: None,
         model: previous_model.to_string(),
         comp_hash: None,
         collaboration_mode: Some(turn_context.collaboration_mode()),
@@ -6972,6 +6994,11 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         .with_legacy_custom_ca_fallback(),
         session_telemetry: session_telemetry.clone(),
         models_manager: Arc::clone(&models_manager),
+        model_catalog: crate::thread_manager::model_catalog::ThreadModelCatalog::new(
+            &config,
+            Arc::clone(&auth_manager),
+            Arc::clone(&models_manager),
+        ),
         git_root_discovery: Arc::default(),
         tool_approvals: Mutex::new(ApprovalStore::default()),
         granted_permissions_by_environment_id: Arc::default(),
@@ -7095,7 +7122,10 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
     let skills_snapshot = session
         .services
         .skills_service
-        .snapshot_for_config(&skills_input, Some(Arc::clone(&skill_fs)))
+        .snapshot_for_config(
+            &skills_input,
+            Some(&xdcode_exec_server::FileSystemEnvironmentAccessor::unrestricted(&skill_fs)),
+        )
         .await;
     let turn_context = Session::make_turn_context(
         thread_id,
@@ -9269,6 +9299,11 @@ where
         .with_legacy_custom_ca_fallback(),
         session_telemetry: session_telemetry.clone(),
         models_manager: Arc::clone(&models_manager),
+        model_catalog: crate::thread_manager::model_catalog::ThreadModelCatalog::new(
+            &config,
+            Arc::clone(&auth_manager),
+            Arc::clone(&models_manager),
+        ),
         git_root_discovery: Arc::default(),
         tool_approvals: Mutex::new(ApprovalStore::default()),
         granted_permissions_by_environment_id: Arc::default(),
@@ -9392,7 +9427,10 @@ where
     let skills_snapshot = session
         .services
         .skills_service
-        .snapshot_for_config(&skills_input, Some(Arc::clone(&skill_fs)))
+        .snapshot_for_config(
+            &skills_input,
+            Some(&xdcode_exec_server::FileSystemEnvironmentAccessor::unrestricted(&skill_fs)),
+        )
         .await;
     let turn_context = Arc::new(Session::make_turn_context(
         thread_id,
@@ -11137,11 +11175,9 @@ async fn build_initial_context_restates_realtime_start_when_reference_context_is
 }
 
 fn file_system_policy_with_unreadable_glob(turn_context: &TurnContext) -> FileSystemSandboxPolicy {
-    #[allow(deprecated)]
-    let mut policy = FileSystemSandboxPolicy::from_legacy_sandbox_policy_for_cwd(
-        &turn_context.sandbox_policy(),
-        &turn_context.cwd,
-    );
+    let mut policy = turn_context
+        .permission_profile()
+        .file_system_sandbox_policy();
     #[allow(deprecated)]
     let cwd_display = turn_context.cwd.as_path().display().to_string();
     policy.entries.push(FileSystemSandboxEntry {
@@ -11184,16 +11220,12 @@ async fn turn_context_item_stores_local_cwd() {
 }
 
 #[tokio::test]
-async fn turn_context_item_omits_legacy_equivalent_file_system_sandbox_policy() {
+async fn turn_context_item_stores_permission_profile() {
     let (_session, turn_context) = make_session_and_context().await;
 
     let item = turn_context.to_turn_context_item();
 
-    assert_eq!(item.file_system_sandbox_policy, None);
-    assert_eq!(
-        item.permission_profile,
-        Some(turn_context.permission_profile())
-    );
+    assert_eq!(item.permission_profile, turn_context.permission_profile());
 }
 
 #[tokio::test]
@@ -11220,7 +11252,7 @@ async fn turn_context_item_stores_active_permission_profile() {
 }
 
 #[tokio::test]
-async fn turn_context_item_stores_split_file_system_sandbox_policy_when_different() {
+async fn turn_context_item_preserves_file_system_restrictions() {
     let (_session, mut turn_context) = make_session_and_context().await;
     let file_system_sandbox_policy = file_system_policy_with_unreadable_glob(&turn_context);
     let permission_profile = PermissionProfile::from_runtime_permissions_with_enforcement(
@@ -11239,17 +11271,10 @@ async fn turn_context_item_stores_split_file_system_sandbox_policy_when_differen
     let item = turn_context.to_turn_context_item();
 
     assert_eq!(
-        item.file_system_sandbox_policy,
-        Some(
-            file_system_sandbox_policy
-                .try_into()
-                .expect("serializable split policy"),
-        )
+        item.permission_profile.file_system_sandbox_policy(),
+        file_system_sandbox_policy
     );
-    assert_eq!(
-        item.permission_profile,
-        Some(turn_context.permission_profile())
-    );
+    assert_eq!(item.permission_profile, turn_context.permission_profile());
 }
 
 #[tokio::test]
@@ -11402,7 +11427,7 @@ async fn record_context_updates_and_set_reference_context_item_persists_baseline
 }
 
 #[tokio::test]
-async fn record_context_updates_and_set_reference_context_item_persists_split_file_system_policy_to_rollout()
+async fn record_context_updates_and_set_reference_context_item_persists_permission_profile_to_rollout()
  {
     let (mut session, mut turn_context) = make_session_and_context().await;
     let file_system_sandbox_policy = file_system_policy_with_unreadable_glob(&turn_context);
@@ -11437,17 +11462,13 @@ async fn record_context_updates_and_set_reference_context_item_persists_split_fi
     else {
         panic!("expected resumed rollout history");
     };
-    let persisted_file_system_sandbox_policy = resumed.history.iter().find_map(|item| match item {
-        RolloutItem::TurnContext(ctx) => ctx.file_system_sandbox_policy.clone(),
+    let persisted_permission_profile = resumed.history.iter().find_map(|item| match item {
+        RolloutItem::TurnContext(ctx) => Some(ctx.permission_profile.clone()),
         _ => None,
     });
     assert_eq!(
-        persisted_file_system_sandbox_policy,
-        Some(
-            file_system_sandbox_policy
-                .try_into()
-                .expect("serializable split policy"),
-        )
+        persisted_permission_profile,
+        Some(turn_context.permission_profile())
     );
 }
 

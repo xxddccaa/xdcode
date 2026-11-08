@@ -1,6 +1,6 @@
 {
   "name": "@xxddccaa/xdcode",
-  "version": "0.165.0",
+  "version": "0.167.0",
   "description": "Xdcode CLI is an independently maintained coding agent that runs locally on your computer.",
   "license": "Apache-2.0",
   "bin": {

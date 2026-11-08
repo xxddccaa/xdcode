@@ -59,6 +59,7 @@ pub struct SkillReadRequest<'a> {
 pub enum SkillReadContext<'a> {
     Host {
         host_snapshot: Option<Arc<HostSkillsSnapshot>>,
+        accessors: Vec<&'a dyn EnvironmentAccess>,
     },
     Executor {
         fs: &'a dyn EnvironmentAccess,

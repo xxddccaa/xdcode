@@ -13,6 +13,14 @@ use crate::worktree_browser::Request;
 const BROWSER_VIEW_ID: &str = "managed-worktrees";
 
 impl ChatWidget {
+    pub(crate) fn consume_new_session_command_draft(&mut self) {
+        if self.bottom_pane.composer_text().split_whitespace().next() == Some("/new") {
+            self.bottom_pane
+                .set_composer_text(String::new(), Vec::new(), Vec::new());
+            self.bottom_pane.drain_pending_submission_state();
+        }
+    }
+
     pub(super) fn managed_worktree_available(&self) -> bool {
         self.local_worktree_operations && get_git_repo_root(self.config.cwd.as_path()).is_some()
     }

@@ -3,6 +3,7 @@
 // Prevent accidental direct writes to stdout/stderr in library code. All
 // user-visible output must go through the appropriate abstraction (e.g.,
 // the TUI or the tracing stack).
+#![recursion_limit = "256"]
 #![deny(clippy::print_stdout, clippy::print_stderr)]
 
 mod apply_patch;
@@ -35,6 +36,7 @@ mod xdcode_thread;
 pub use turn_extension_data::WithTurnExtensionData;
 mod code_mode_host;
 mod compact_model_fallback;
+mod compact_pending_input;
 mod compact_remote_history;
 mod compact_remote_v2;
 mod compact_retained_tool_outputs;
@@ -79,8 +81,6 @@ pub use agent::types::SpawnAgentOptions;
 pub use rollout_budget::RolloutBudgetReminder;
 mod agent_communication;
 pub use agent_communication::PendingAgentMessage;
-mod agent_message_board;
-pub use agent_message_board::install_agent_message_board;
 mod attestation;
 mod command_canonicalization;
 pub mod config;
@@ -165,11 +165,14 @@ pub use thread_manager::NewThread;
 pub use thread_manager::PromptCacheKey;
 pub use thread_manager::StartThreadOptions;
 pub use thread_manager::ThreadManager;
+pub use thread_manager::ThreadRegistration;
 pub use thread_manager::ThreadShutdownReport;
 pub use thread_manager::build_models_manager;
 pub use thread_manager::local_agent_graph_store_from_state_db;
 pub use thread_manager::passthrough_image_store;
 pub use thread_manager::thread_store_from_config;
+pub use thread_manager::thread_store_from_config_with_cleanup;
+pub use tools::MULTI_AGENT_V2_NAMESPACE_DESCRIPTION;
 pub use tools::handlers::WaitForEnvironmentToolConfig;
 pub use web_search::web_search_action_detail;
 pub use windows_sandbox_read_grants::grant_read_root_non_elevated;

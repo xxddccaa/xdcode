@@ -82,7 +82,6 @@ pub(crate) struct SessionStartConfig<'a> {
 pub(crate) async fn complete_session_start(
     app_server: &mut AppServerSession,
     config: SessionStartConfig<'_>,
-    app_server_target: &crate::AppServerTarget,
     target: &SessionTarget,
     action: SessionStartAction,
     initial_result: Result<AppServerStartedThread>,
@@ -105,11 +104,7 @@ pub(crate) async fn complete_session_start(
 
     match confirm().await? {
         UnarchiveChoice::Cancel => {
-            return Ok(match app_server_target {
-                crate::AppServerTarget::LocalDaemon { .. }
-                | crate::AppServerTarget::Remote { .. } => SessionStartOutcome::CommandCenter,
-                crate::AppServerTarget::Embedded => SessionStartOutcome::Exit,
-            });
+            return Ok(SessionStartOutcome::CommandCenter);
         }
         UnarchiveChoice::Quit => return Ok(SessionStartOutcome::Exit),
         UnarchiveChoice::Unarchive => {}

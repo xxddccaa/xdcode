@@ -49,11 +49,30 @@ impl App {
             .await;
     }
 
-    pub(super) async fn shutdown_side_threads(&mut self, app_server: &mut AppServerSession) {
-        let side_thread_ids: Vec<ThreadId> = self.side_threads.keys().copied().collect();
-        for side_thread_id in side_thread_ids {
-            self.discard_side_thread(app_server, side_thread_id).await;
+    pub(super) async fn shutdown_side_threads(
+        &mut self,
+        app_server: &mut AppServerSession,
+        root: Option<ThreadId>,
+    ) -> bool {
+        if self.side_threads.is_empty() {
+            return true;
         }
+        let subtree = root.map(|id| self.known_thread_subtree(id));
+        let ids: Vec<_> = self
+            .side_threads
+            .iter()
+            .filter(|(_, side)| {
+                subtree
+                    .as_ref()
+                    .is_none_or(|ids| ids.contains(&side.parent_thread_id))
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        let mut closed = true;
+        for id in ids {
+            closed &= self.discard_side_thread(app_server, id).await;
+        }
+        closed
     }
 
     pub(super) fn abort_thread_event_listener(&mut self, thread_id: ThreadId) {
@@ -95,6 +114,17 @@ impl App {
         } else {
             None
         };
+        if let Some(startup_pane) = self.sidebars.remove(&None)
+            && let std::collections::hash_map::Entry::Vacant(entry) =
+                self.sidebars.entry(Some(thread_id))
+        {
+            entry.insert(startup_pane);
+            if let Some(mode) = &mut self.pane_resize
+                && mode.parent.is_none()
+            {
+                mode.parent = Some(thread_id);
+            }
+        }
         self.active_thread_id = Some(thread_id);
         self.active_thread_rx = receiver;
         self.refresh_pending_thread_approvals().await;
@@ -109,12 +139,30 @@ impl App {
         if let Some(channel) = self.thread_event_channels.get_mut(&active_id) {
             let receiver = self.active_thread_rx.take();
             let mut store = channel.store.lock().await;
+            if store.active {
+                store.replay_may_have_output = false;
+            }
             store.active = false;
             store.input_state = input_state;
             store.merge_recap_progress(recap_progress);
             if let Some(receiver) = receiver {
                 channel.receiver = Some(receiver);
             }
+        }
+    }
+
+    pub(super) fn retain_subscriptions_for_fork(&mut self) {
+        for id in self
+            .thread_event_channels
+            .keys()
+            .copied()
+            .chain(self.agent_navigation.tracked_thread_ids())
+            .filter(|id| !self.side_threads.contains_key(id))
+        {
+            self.agents_overview
+                .dispatched_requests
+                .entry(id)
+                .or_default();
         }
     }
 
@@ -990,6 +1038,7 @@ impl App {
         if self.abandoned_side_threads.contains(&thread_id) {
             return Ok(());
         }
+        self.track_side_chat_title(thread_id, &notification);
         if self.current_displayed_thread_id() == Some(thread_id)
             && let ServerNotification::TurnCompleted(notification) = &notification
         {
@@ -1119,6 +1168,34 @@ impl App {
                 {
                     self.retain_inactive_realtime_transcript(thread_id, &notification);
                 }
+                if let Some(companion) = self.side_companions.get_mut(&thread_id)
+                    && companion.apply_notification(&notification, &guard, || {
+                        self.chat_widget.new_status_indicator()
+                    })
+                {
+                    self.chat_widget.request_redraw();
+                }
+                guard.replay_may_have_output |= !matches!(
+                    &notification,
+                    ServerNotification::ThreadStarted(_)
+                        | ServerNotification::ThreadStatusChanged(_)
+                        | ServerNotification::ThreadReadStateChanged(_)
+                        | ServerNotification::ThreadTokenUsageUpdated(_)
+                        | ServerNotification::ThreadNameUpdated(_)
+                        | ServerNotification::ThreadProjectUpdated(_)
+                        | ServerNotification::ThreadQueueChanged(_)
+                        | ServerNotification::ThreadPredictionUpdated(_)
+                        | ServerNotification::ThreadAttachmentUpdated(_)
+                        | ServerNotification::ThreadSettingsUpdated(_)
+                        | ServerNotification::McpToolCallProgress(_)
+                        | ServerNotification::FileChangePatchUpdated(_)
+                        | ServerNotification::ServerRequestResolved(_)
+                        | ServerNotification::ThreadRealtimeOutputAudioDelta(_)
+                        | ServerNotification::ThreadRealtimeSdp(_)
+                        | ServerNotification::ThreadRealtimeItemAdded(_)
+                        | ServerNotification::RawResponseItemCompleted(_)
+                        | ServerNotification::RawResponseCompleted(_)
+                );
                 guard.push_notification(notification);
                 None
             };
@@ -1588,6 +1665,7 @@ impl App {
         let AppServerStartedThread { session, turns, .. } = started;
         if let Some(channel) = self.thread_event_channels.get(&thread_id) {
             let mut store = channel.store.lock().await;
+            store.replay_may_have_output |= snapshot.turns != turns;
             store.set_session(session.clone(), turns.clone());
             store.rebase_buffer_after_session_refresh();
             snapshot.active_reasoning_item = store.active_reasoning_item.clone();

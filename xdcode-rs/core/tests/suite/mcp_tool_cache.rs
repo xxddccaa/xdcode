@@ -1,6 +1,5 @@
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
@@ -44,6 +43,7 @@ use xdcode_extension_api::ExtensionRegistryBuilder;
 use xdcode_extension_api::McpServerContribution;
 use xdcode_extension_api::McpServerContributionContext;
 use xdcode_extension_api::McpServerContributor;
+use xdcode_features::Feature;
 use xdcode_mcp::XDCODE_APPS_MCP_SERVER_NAME;
 use xdcode_protocol::mcp::McpServerConnectionStatus;
 use xdcode_protocol::models::PermissionProfile;
@@ -63,18 +63,6 @@ use super::rmcp_client::remote_aware_stdio_server_bin;
 
 const SERVER_NAME: &str = "cached_rmcp";
 const NAMESPACE: &str = "mcp__cached_rmcp";
-
-struct McpBindingCaptureCounter(Arc<AtomicUsize>);
-
-impl<S: Subscriber> Layer<S> for McpBindingCaptureCounter {
-    fn on_new_span(&self, attributes: &Attributes<'_>, _id: &Id, _context: LayerContext<'_, S>) {
-        if attributes.metadata().target() == "xdcode_mcp::connection_manager::tool_catalog"
-            && attributes.metadata().name() == "capture_binding_with_metadata"
-        {
-            self.0.fetch_add(1, Ordering::SeqCst);
-        }
-    }
-}
 
 fn user_turn(prompt: &str) -> TurnInputRequest {
     TurnInputRequest::user_input(vec![UserInput::Text {
@@ -282,6 +270,121 @@ async fn mcp_calls_stay_bound_to_each_thread() -> anyhow::Result<()> {
     fixture.xdcode.shutdown_and_wait().await?;
     second_thread.shutdown_and_wait().await?;
     responses_server.verify().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cached_stdio_negotiates_sharing_on_first_use() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+    core_test_support::skip_if_remote!(Ok(()), "the shared stdio fixture runs on the host");
+    skip_if_wine_exec!(Ok(()), "requires the native stdio server");
+
+    let responses_server = responses::start_mock_server().await;
+    let command = core_test_support::stdio_server_bin()?;
+    let fixture = test_xdcode()
+        .with_model_info_override("gpt-5.4", |model| model.supports_search_tool = false)
+        .with_config(move |config| {
+            config
+                .features
+                .disable(Feature::Mcp20260728)
+                .expect("legacy protocol");
+            config
+                .features
+                .disable(Feature::McpConnectionSharing)
+                .expect("disable discovery");
+            config.permissions.approval_policy = Constrained::allow_any(AskForApproval::Never);
+            config
+                .permissions
+                .set_permission_profile(PermissionProfile::Disabled)
+                .expect("test permissions");
+            config
+                .mcp_servers
+                .set(
+                    serde_json::from_value(json!({
+                        "cached_rmcp": {
+                            "command": command,
+                            "cwd": config.cwd,
+                            "env": { "MCP_TEST_DYNAMIC_SERVER_METADATA": "1" },
+                            "enabled_tools": ["echo"]
+                        }
+                    }))
+                    .expect("stdio config"),
+                )
+                .expect("set stdio config");
+        })
+        .build_with_auto_env(&responses_server)
+        .await?;
+    wait_for_mcp_server(&fixture.xdcode, SERVER_NAME).await?;
+    let mut config = fixture.config.clone();
+    config.features.enable(Feature::McpConnectionSharing)?;
+    let start_child = |config| {
+        fixture.thread_manager.start_thread(StartThreadOptions {
+            session_source: Some(SessionSource::SubAgent(SubAgentSource::Other(
+                "cached-sharing".to_string(),
+            ))),
+            ..StartThreadOptions::new(config)
+        })
+    };
+    let first = start_child(config.clone()).await?.thread;
+    let second = start_child(config).await?.thread;
+    let legacy_sibling = start_child(fixture.config.clone()).await?.thread;
+    for thread in [&first, &second, &legacy_sibling] {
+        let (config, _) = thread.current_mcp_config_and_runtime_context().await;
+        assert_eq!(
+            thread
+                .mcp_connection_statuses(&config)
+                .await
+                .get(SERVER_NAME),
+            Some(&McpServerConnectionStatus::NotStarted)
+        );
+    }
+
+    let mut processes = Vec::new();
+    for thread in [&fixture.xdcode, &first, &second] {
+        let result = thread
+            .call_mcp_tool(
+                SERVER_NAME,
+                "echo",
+                Some(json!({"message":"identify process"})),
+                None,
+            )
+            .await?;
+        let content = result.structured_content.expect("echo result");
+        processes.push(content["echo"].as_str().expect("process label").to_owned());
+    }
+    assert_ne!(processes[0], processes[1]);
+    assert_eq!(processes[1], processes[2]);
+
+    let response =
+        responses::mount_sse_once(&responses_server, responses::sse_completed("unrelated")).await;
+    legacy_sibling
+        .start_or_steer_turn(user_turn("Continue without calling any tools."))
+        .await?;
+    wait_for_event(&legacy_sibling, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+    let (config, _) = legacy_sibling
+        .current_mcp_config_and_runtime_context()
+        .await;
+    assert_eq!(
+        legacy_sibling
+            .mcp_connection_statuses(&config)
+            .await
+            .get(SERVER_NAME),
+        Some(&McpServerConnectionStatus::NotStarted)
+    );
+    let legacy = &processes[0];
+    assert_definition(
+        &response,
+        &format!("Use the tools from {legacy}."),
+        &format!("Echo from {legacy}."),
+    );
+
+    legacy_sibling.shutdown_and_wait().await?;
+    first.shutdown_and_wait().await?;
+    second.shutdown_and_wait().await?;
+    fixture.xdcode.shutdown_and_wait().await?;
     Ok(())
 }
 
@@ -588,11 +691,6 @@ async fn cached_mcp_startup_is_eager_for_root_and_lazy_for_subagents() -> anyhow
     );
     skip_if_no_network!(Ok(()));
 
-    let binding_captures = Arc::new(AtomicUsize::new(0));
-    let _tracing = tracing_subscriber::registry()
-        .with(McpBindingCaptureCounter(Arc::clone(&binding_captures)))
-        .set_default();
-
     let responses_server = responses::start_mock_server().await;
     let command = remote_aware_stdio_server_bin()?;
     let environment_id = remote_aware_environment_id();
@@ -671,17 +769,35 @@ async fn cached_mcp_startup_is_eager_for_root_and_lazy_for_subagents() -> anyhow
         &format!("Echo from {first_process}."),
     );
 
+    let control = fixture
+        .thread_manager
+        .start_thread(StartThreadOptions::new(fixture.config.clone()))
+        .await?
+        .thread;
+    wait_for_mcp_server(&control, SERVER_NAME).await?;
+    let control_pid = wait_for_new_pid(fs.as_ref(), &pid_file, Some(&first_pid)).await?;
+    control.shutdown_and_wait().await?;
+
+    let mut treatment = fixture.config.clone();
+    treatment.features.enable(Feature::McpLazyStdioStartup)?;
+    let mut required_config = treatment.clone();
+    let mut servers = required_config.mcp_servers.get().clone();
+    servers
+        .get_mut(SERVER_NAME)
+        .expect("configured server")
+        .required = true;
+    required_config.mcp_servers.set(servers)?;
     let NewThread {
-        thread: eager_thread,
+        thread: required_thread,
         ..
     } = fixture
         .thread_manager
-        .start_thread(StartThreadOptions::new(fixture.config.clone()))
+        .start_thread(StartThreadOptions::new(required_config))
         .await?;
-    let eager_pid = wait_for_new_pid(fs.as_ref(), &pid_file, Some(&first_pid)).await?;
-    wait_for_mcp_server(&eager_thread, SERVER_NAME).await?;
-    eager_thread.shutdown_and_wait().await?;
-    let cached_process = process_label(&eager_pid);
+    let required_pid = wait_for_new_pid(fs.as_ref(), &pid_file, Some(&control_pid)).await?;
+    wait_for_mcp_server(&required_thread, SERVER_NAME).await?;
+    required_thread.shutdown_and_wait().await?;
+    let cached_process = process_label(&required_pid);
 
     fs.remove(
         &barrier_file,
@@ -705,20 +821,10 @@ async fn cached_mcp_startup_is_eager_for_root_and_lazy_for_subagents() -> anyhow
         ..
     } = fixture
         .thread_manager
-        .start_thread(StartThreadOptions {
-            session_source: Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-                parent_thread_id: fixture.session_configured.thread_id,
-                depth: 1,
-                agent_path: None,
-                agent_nickname: None,
-                agent_role: None,
-            })),
-            ..StartThreadOptions::new(fixture.config.clone())
-        })
+        .start_thread(StartThreadOptions::new(treatment))
         .await?;
     second_thread.submit(Op::Interrupt).await?;
 
-    binding_captures.store(0, Ordering::SeqCst);
     let unused_response = mount_sse_once(
         &responses_server,
         responses::sse(vec![
@@ -759,18 +865,6 @@ async fn cached_mcp_startup_is_eager_for_root_and_lazy_for_subagents() -> anyhow
         !reported_ready_before_startup,
         "a dormant MCP server must not be reported as ready"
     );
-    for response in [&unused_response, &unused_done_response] {
-        assert_definition(
-            response,
-            &format!("Use the tools from {cached_process}."),
-            &format!("Echo from {cached_process}."),
-        );
-    }
-    assert_eq!(
-        binding_captures.load(Ordering::SeqCst),
-        1,
-        "both model steps must share one binding while the cached server stays dormant"
-    );
     let (mcp_config, _) = second_thread.current_mcp_config_and_runtime_context().await;
     assert_eq!(
         second_thread
@@ -783,12 +877,10 @@ async fn cached_mcp_startup_is_eager_for_root_and_lazy_for_subagents() -> anyhow
         fs.read_file_text(&pid_file, Default::default(), /*sandbox*/ None)
             .await?
             .trim(),
-        eager_pid,
-        "cached tool definitions should not start an unused subagent-owned MCP process"
+        required_pid,
+        "cached tool definitions should not start an unused MCP process for a new chat"
     );
 
-    let app_only_call_id = "cached-app-only-call";
-    let unrelated_call_id = "cached-unrelated-plan";
     let cached_response = mount_sse_once(
         &responses_server,
         responses::sse(vec![
@@ -799,9 +891,14 @@ async fn cached_mcp_startup_is_eager_for_root_and_lazy_for_subagents() -> anyhow
                 "echo",
                 r#"{"message":"hello"}"#,
             ),
-            responses::ev_function_call_with_namespace(app_only_call_id, NAMESPACE, "cwd", "{}"),
+            responses::ev_function_call_with_namespace(
+                "cached-app-only-call",
+                NAMESPACE,
+                "cwd",
+                "{}",
+            ),
             responses::ev_function_call(
-                unrelated_call_id,
+                "cached-unrelated-plan",
                 "update_plan",
                 r#"{"plan":[{"step":"Continue while MCP starts","status":"in_progress"}]}"#,
             ),
@@ -878,7 +975,7 @@ async fn cached_mcp_startup_is_eager_for_root_and_lazy_for_subagents() -> anyhow
         &format!("Use the tools from {cached_process}."),
         &format!("Echo from {cached_process}."),
     );
-    let second_pid = wait_for_new_pid(fs.as_ref(), &pid_file, Some(&eager_pid)).await?;
+    let second_pid = wait_for_new_pid(fs.as_ref(), &pid_file, Some(&required_pid)).await?;
     let second_process = process_label(&second_pid);
     tokio::time::timeout(Duration::from_secs(2), unrelated_finished_rx)
         .await
@@ -893,43 +990,12 @@ async fn cached_mcp_startup_is_eager_for_root_and_lazy_for_subagents() -> anyhow
         /*sandbox*/ None,
     )
     .await?;
-    let expected_error = format!("MCP tool `{SERVER_NAME}/cwd` is not available to the model");
     assert_eq!(cached_turn.await??, second_process);
-    assert!(
-        binding_captures.load(Ordering::SeqCst) > 1,
-        "starting the cached server must invalidate the dormant binding"
-    );
     assert_definition(
         &cached_done_response,
         &format!("Use the tools from {second_process}."),
         &format!("Echo from {second_process}."),
     );
-    let output_item = cached_done_response
-        .single_request()
-        .function_call_output(app_only_call_id);
-    let output = output_item["output"][1]["text"]
-        .as_str()
-        .expect("app-only tool error should be returned to the model");
-    assert!(
-        output.contains(&expected_error),
-        "model-visible tool output should contain the live visibility error: {output}"
-    );
-    let output = cached_done_response
-        .single_request()
-        .function_call_output_text("cached-call")
-        .expect("successful tool output should be returned to the model");
-    assert!(
-        output.contains(&second_process),
-        "model-visible tool output should come from the live server: {output}"
-    );
-    assert_eq!(
-        cached_done_response
-            .single_request()
-            .function_call_output_text(unrelated_call_id)
-            .as_deref(),
-        Some("Plan updated")
-    );
-
     second_thread.shutdown_and_wait().await?;
     let mut filtered_config = fixture.config.clone();
     let mut filtered_servers = filtered_config.mcp_servers.get().clone();

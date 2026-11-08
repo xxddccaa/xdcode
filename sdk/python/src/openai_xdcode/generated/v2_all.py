@@ -2655,6 +2655,7 @@ class ModelListParams(BaseModel):
         int | None,
         Field(description="Optional page size; defaults to a reasonable server-side value.", ge=0),
     ] = None
+    model_provider: Annotated[str | None, Field(alias="modelProvider")] = None
 
 
 class ModelProviderCapabilitiesReadParams(BaseModel):
@@ -3400,6 +3401,13 @@ class ProcessExitedNotification(BaseModel):
         populate_by_name=True,
     )
     exit_code: Annotated[int, Field(alias="exitCode", description="Process exit code.")]
+    output_drain_timed_out: Annotated[
+        bool | None,
+        Field(
+            alias="outputDrainTimedOut",
+            description="Whether output collection hit its post-exit deadline before seeing EOF or reaching the requested byte cap on either stream. Older servers omit this field.",
+        ),
+    ] = None
     process_handle: Annotated[
         str,
         Field(
@@ -8643,6 +8651,13 @@ class McpResourceReadParams(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    field_meta: Annotated[
+        dict[str, Any] | None,
+        Field(
+            alias="_meta",
+            description="Additional MCP request metadata. Account and turn routing keys are reserved.",
+        ),
+    ] = None
     connector_id: Annotated[str | None, Field(alias="connectorId")] = None
     origin_call_id: Annotated[
         str | None,
@@ -8975,6 +8990,13 @@ class QueuedSubmission(BaseModel):
     client_user_message_id: Annotated[str, Field(alias="clientUserMessageId")]
     id: str
     input: list[UserInput]
+    responsesapi_client_metadata: Annotated[
+        dict[str, Any] | None,
+        Field(
+            alias="responsesapiClientMetadata",
+            description="Metadata retained with this input, including across reconnect and restoration.",
+        ),
+    ] = None
 
 
 class RateLimitResetCredit(BaseModel):

@@ -18,6 +18,7 @@ fn provider_sort_key(snapshot: &CatalogSnapshot, provider: &str) -> (String, Str
 
 #[derive(Default)]
 pub(super) struct CatalogSelectionState {
+    pub(super) confirmed: Option<crate::session_state::NewSessionModelSelection>,
     current_id: Option<String>,
     normal: Option<CatalogModelSelection>,
     plan: Option<CatalogModelSelection>,
@@ -48,6 +49,18 @@ impl ChatWidget {
         mode.settings.model = selection.model.clone();
         mode.settings.reasoning_effort = selection.effort.clone();
         self.set_effective_collaboration_mode(mode);
+        self.catalog_selection_state.confirmed =
+            Some(crate::session_state::NewSessionModelSelection {
+                provider: selection.provider.clone(),
+                catalog_id: Some(selection.catalog_id.clone()),
+                collaboration_mode: self.effective_collaboration_mode(),
+            });
+    }
+
+    pub(crate) fn confirmed_model_selection(
+        &self,
+    ) -> Option<crate::session_state::NewSessionModelSelection> {
+        self.catalog_selection_state.confirmed.clone()
     }
 
     pub(crate) fn current_catalog_id(&self) -> Option<&str> {
@@ -402,7 +415,6 @@ impl ChatWidget {
         providers.sort_by_cached_key(|provider| provider_sort_key(&snapshot, provider));
         providers.dedup();
         let mut items = Vec::new();
-        let mut initial_selected_idx = None;
         if provider.is_none() && providers.len() > 1 {
             for provider in providers {
                 let selected = provider == self.config.model_provider_id;
@@ -476,9 +488,6 @@ impl ChatWidget {
                             && self.current_model() == model.model
                     },
                 );
-            if is_current && disabled.is_none() {
-                initial_selected_idx = Some(items.len());
-            }
             let provider_label = snapshot
                 .providers
                 .get(&model.provider)
@@ -507,7 +516,6 @@ impl ChatWidget {
             view_id: Some(CATALOG_MODEL_VIEW),
             header,
             items,
-            initial_selected_idx,
             is_searchable: true,
             search_placeholder: Some("Search provider, model, or catalog ID".into()),
             ..SelectionViewParams::picker()

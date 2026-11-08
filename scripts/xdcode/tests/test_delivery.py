@@ -183,6 +183,54 @@ class DeliveryTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("Old builds and runtime data retained", result.stdout)
 
+    def test_standalone_force_upgrade_retains_live_process_and_daemon_state(self):
+        old = self.install_archive()
+        write_receipt(self.build_dir, "personal2")
+        archive = package.package(self.build_dir, self.root / "dist")
+        daemon = self.data_home / "app-server-daemon"
+        daemon.mkdir()
+        record = daemon / "app-server.pid"
+        process = subprocess.Popen(
+            [str(old / "bin/xdcode"), "--hang"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            record.write_text(json.dumps({"pid": process.pid}))
+            recorded_state = record.read_bytes()
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(package.output_dir_installer(archive)),
+                    str(archive),
+                    "--force",
+                    "--install-root",
+                    str(self.install_root),
+                    "--bin-dir",
+                    str(self.bin_dir),
+                    "--xdcode-home",
+                    str(self.data_home),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("--force skips active daemon/task checks", result.stderr)
+            self.assertIn("running processes keep using their current builds", result.stderr)
+            self.assertEqual(
+                (self.bin_dir / "xdcode").resolve(),
+                self.install_root / "0.162.0-personal2/bin/xdcode",
+            )
+            self.assertIsNone(process.poll())
+            self.assertTrue(old.is_dir())
+            self.assertEqual(record.read_bytes(), recorded_state)
+            self.assertEqual((self.data_home / "keep.txt").read_text(), "user-owned data")
+        finally:
+            process.terminate()
+            process.wait(timeout=5)
+
     def test_upgrade_retains_old_build_and_other_commands(self):
         old = self.install_archive()
         for command in ("codex", "sc"):
@@ -197,8 +245,9 @@ class DeliveryTests(unittest.TestCase):
             self.assertEqual(
                 (self.bin_dir / command).read_text(), f"original {command}"
             )
-        with self.assertRaisesRegex(install.DeliveryError, "already installed"):
-            self.install_archive(second)
+        for force in (False, True):
+            with self.subTest(force=force), self.assertRaisesRegex(install.DeliveryError, "already installed"):
+                self.install_archive(second, force=force)
 
     def test_repack_is_deterministic_and_does_not_overwrite(self):
         second = package.package(self.build_dir, self.root / "second")
@@ -215,8 +264,9 @@ class DeliveryTests(unittest.TestCase):
             package.check_version(self.build_dir, "0.163.0")
 
     def test_bad_archive_digest_does_not_create_entry(self):
-        with self.assertRaisesRegex(install.DeliveryError, "archive checksum mismatch"):
-            self.install_archive(sha256="0" * 64)
+        for force in (False, True):
+            with self.subTest(force=force), self.assertRaisesRegex(install.DeliveryError, "archive checksum mismatch"):
+                self.install_archive(sha256="0" * 64, force=force)
         self.assertFalse(self.install_root.exists())
 
     def test_checksum_is_required_and_filename_is_bound(self):
@@ -236,10 +286,11 @@ class DeliveryTests(unittest.TestCase):
                 (m, b"tampered" if m.name == "NOTICE" else b) for m, b in contents
             ]
         )
-        with self.assertRaisesRegex(
-            install.DeliveryError, "package checksum mismatch: NOTICE"
-        ):
-            self.install_archive()
+        for force in (False, True):
+            with self.subTest(force=force), self.assertRaisesRegex(
+                install.DeliveryError, "package checksum mismatch: NOTICE"
+            ):
+                self.install_archive(force=force)
 
     def test_archive_links_traversal_duplicates_and_special_files(self):
         original = self.archive.read_bytes()
@@ -290,18 +341,21 @@ class DeliveryTests(unittest.TestCase):
             self.root / "sc/lib/xdcode",
             self.root / "bad/../xdcode",
         ):
-            with self.subTest(path=path), self.assertRaises(install.DeliveryError):
-                install.install(self.archive, path, self.bin_dir, self.data_home)
+            for force in (False, True):
+                with self.subTest(path=path, force=force), self.assertRaises(install.DeliveryError):
+                    install.install(self.archive, path, self.bin_dir, self.data_home, force=force)
         self.bin_dir.mkdir(parents=True)
         entry = self.bin_dir / "xdcode"
         entry.write_text("do not replace")
-        with self.assertRaisesRegex(install.DeliveryError, "non-managed"):
-            self.install_archive()
+        for force in (False, True):
+            with self.subTest(force=force), self.assertRaisesRegex(install.DeliveryError, "non-managed"):
+                self.install_archive(force=force)
         self.assertEqual(entry.read_text(), "do not replace")
         entry.unlink()
         entry.symlink_to("/usr/bin/true")
-        with self.assertRaises(install.DeliveryError):
-            self.install_archive()
+        for force in (False, True):
+            with self.subTest(force=force), self.assertRaises(install.DeliveryError):
+                self.install_archive(force=force)
         self.assertEqual(os.readlink(entry), "/usr/bin/true")
 
     def test_hidden_application_data_is_not_an_installation_target(self):
@@ -368,8 +422,9 @@ class DeliveryTests(unittest.TestCase):
     def test_install_lock_prevents_concurrent_switch(self):
         self.install_root.mkdir(parents=True)
         with install.install_lock(self.install_root):
-            with self.assertRaisesRegex(install.DeliveryError, "in progress"):
-                self.install_archive()
+            for force in (False, True):
+                with self.subTest(force=force), self.assertRaisesRegex(install.DeliveryError, "in progress"):
+                    self.install_archive(force=force)
 
     def test_late_activity_does_not_switch_or_delete_old_build(self):
         old = self.install_archive()
@@ -419,8 +474,9 @@ class DeliveryTests(unittest.TestCase):
 
     def test_unsupported_glibc_and_wrong_architecture_fail(self):
         with mock.patch.object(install, "host_glibc", return_value="2.16"):
-            with self.assertRaisesRegex(install.DeliveryError, "requires glibc"):
-                self.install_archive()
+            for force in (False, True):
+                with self.subTest(force=force), self.assertRaisesRegex(install.DeliveryError, "requires glibc"):
+                    self.install_archive(force=force)
         path = self.build_dir / "bin/xdcode-code-mode-host"
         contents = bytearray(path.read_bytes())
         contents[18:20] = b"\xb7\x00"  # AArch64, not x86_64.
@@ -456,10 +512,11 @@ class DeliveryTests(unittest.TestCase):
         )
         write_receipt(self.build_dir, "unloadable")
         archive = package.package(self.build_dir, self.root / "dist")
-        with self.assertRaisesRegex(
-            install.DeliveryError, "could not load/finish: xdcode-code-mode-host"
-        ):
-            self.install_archive(archive)
+        for force in (False, True):
+            with self.subTest(force=force), self.assertRaisesRegex(
+                install.DeliveryError, "could not load/finish: xdcode-code-mode-host"
+            ):
+                self.install_archive(archive, force=force)
         self.assertEqual((self.bin_dir / "xdcode").resolve(), old / "bin/xdcode")
         self.assertFalse((self.install_root / "0.162.0-unloadable").exists())
         self.assertEqual((self.data_home / "keep.txt").read_text(), "user-owned data")

@@ -25,7 +25,7 @@ xdcode-protocol = { workspace = true }
 xdcode-sandboxing = { workspace = true }
 xdcode-uds = { workspace = true }
 xdcode-utils-absolute-path = { workspace = true }
-globset = { workspace = true }
+ignore = { workspace = true }
 landlock = { workspace = true }
 libc = { workspace = true }
 rustix = { workspace = true }

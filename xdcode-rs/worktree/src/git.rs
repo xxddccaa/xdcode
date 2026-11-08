@@ -9,9 +9,12 @@
 //! repository-configured helpers without changing persistent Git settings.
 //!
 //! Working-tree operations also disable configured clean, smudge, and process filters.
+//! Worktree listing uses NUL records when supported. Older Git versions use registered
+//! administration paths instead of ambiguous newline-separated path output.
 
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
+use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
@@ -53,6 +56,60 @@ pub(crate) fn git_output(
     let output = command.args(args).output().context("failed to start git")?;
     ensure_git_success(&output)?;
     Ok(output)
+}
+
+pub(crate) fn git_worktree_porcelain_z(cwd: &Path) -> Result<Option<Vec<u8>>> {
+    let output = base_git_command(cwd)
+        .env("LC_ALL", "C")
+        .args(["worktree", "list", "--porcelain", "-z"])
+        .output()
+        .context("failed to list git worktrees")?;
+    if output.status.success() {
+        return Ok(Some(output.stdout));
+    }
+    if output.status.code() == Some(129)
+        && String::from_utf8_lossy(&output.stderr).contains("unknown switch `z'")
+    {
+        return Ok(None);
+    }
+    ensure_git_success(&output)?;
+    unreachable!()
+}
+
+pub(crate) fn registered_worktree_roots(common_dir: &Path) -> Result<Vec<PathBuf>> {
+    let registrations = match fs::read_dir(common_dir.join("worktrees")) {
+        Ok(registrations) => registrations,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error).context("cannot read worktree registrations"),
+    };
+    let mut roots = Vec::new();
+    for registration in registrations {
+        let registration = registration?;
+        if !registration.file_type()?.is_dir() {
+            continue;
+        }
+        let backlink = match fs::read(registration.path().join("gitdir")) {
+            Ok(backlink) => backlink,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error).context("cannot read worktree registration path"),
+        };
+        let backlink = backlink.strip_suffix(b"\n").unwrap_or(&backlink);
+        #[cfg(windows)]
+        let backlink = backlink.strip_suffix(b"\r").unwrap_or(backlink);
+        if backlink.contains(&0) {
+            bail!("worktree registration path contains a NUL byte");
+        }
+        let git_file = registration.path().join(git_path_from_bytes(backlink)?);
+        if git_file.file_name() != Some(OsStr::new(".git")) {
+            continue;
+        }
+        if let Some(root) = git_file.parent() {
+            roots.push(root.to_path_buf());
+        }
+    }
+    roots.sort();
+    roots.dedup();
+    Ok(roots)
 }
 
 pub(crate) fn git_stdout<I, S>(cwd: &Path, args: I) -> Result<String>

@@ -11,6 +11,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 use crate::inline_visualization::InlineVisualizationContext;
@@ -279,7 +280,8 @@ pub(crate) enum RecapTrigger {
 
 #[derive(Debug)]
 pub(crate) struct AgentsOverviewThreadRefresh {
-    pub(crate) threads: std::collections::HashMap<ThreadId, Option<Thread>>,
+    pub(crate) cleared_unread: Vec<ThreadId>,
+    pub(crate) threads: std::collections::HashMap<ThreadId, Option<(Thread, bool)>>,
     pub(crate) last_messages: std::collections::HashMap<ThreadId, String>,
     pub(crate) recent_seed_complete: bool,
     pub(crate) discovery: Option<crate::app::agents_overview_discovery::AgentsOverviewDiscovery>,
@@ -290,6 +292,55 @@ pub(crate) struct AgentsOverviewThreadRefresh {
 pub(crate) struct AgentPickerThreadRefresh {
     pub(crate) threads: Vec<Thread>,
     pub(crate) archived_thread_ids: std::collections::HashSet<ThreadId>,
+}
+
+/// Source-backed replacement for the outgoing widget's width-bound streaming rows.
+#[derive(Debug)]
+pub(crate) enum CapturedSideStream {
+    Answer {
+        cell: Arc<crate::history_cell::AgentMarkdownCell>,
+        item: Option<(String, String)>,
+    },
+    Plan(Arc<crate::history_cell::ProposedPlanCell>),
+}
+
+/// Presentation retained alongside the transcript while its composer is inactive.
+#[derive(Debug)]
+pub(crate) struct CapturedSideDisplay {
+    pub(crate) rendered_completion_turn_ids: std::collections::HashSet<String>,
+    pub(crate) active: Option<Box<dyn HistoryCell>>,
+    pub(crate) auxiliary: Vec<crate::terminal_hyperlinks::HyperlinkLine>,
+    pub(crate) draft: Box<crate::bottom_pane::TextArea>,
+    pub(crate) status: Option<String>,
+    pub(crate) work: Option<CapturedSideWork>,
+    pub(crate) last_completed_agent_message: Option<(String, String)>,
+    pub(crate) cwd: AbsolutePathBuf,
+    pub(crate) visualizations: Option<crate::inline_visualization::InlineVisualizationContext>,
+}
+
+/// The inactive composer keeps counting from the time already spent in the active pane.
+#[derive(Debug)]
+pub(crate) struct CapturedSideWork {
+    pub(crate) turn_id: String,
+    pub(crate) row: Box<crate::status_indicator_widget::StatusIndicatorWidget>,
+    pub(crate) timer: crate::status_indicator_widget::StatusTimer,
+}
+
+impl CapturedSideWork {
+    pub(crate) fn new(
+        turn_id: String,
+        mut row: crate::status_indicator_widget::StatusIndicatorWidget,
+        elapsed: Duration,
+    ) -> Self {
+        let mut timer = crate::status_indicator_widget::StatusTimer::default();
+        timer.reset(elapsed);
+        row.set_interrupt_hint_visible(false);
+        Self {
+            turn_id,
+            row: Box::new(row),
+            timer,
+        }
+    }
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -315,6 +366,11 @@ pub(crate) enum AppEvent {
     /// Open the live command center for recent and locally retained root sessions.
     OpenAgentsOverview,
     ShowMoreAgentsOverview,
+    RefreshViewedThread {
+        backend_id: crate::backend_id::BackendId,
+        thread_id: ThreadId,
+        revision: String,
+    },
     /// Create an empty thread from the command center.
     NewAgentsOverviewSession {
         cwd: Option<AbsolutePathBuf>,
@@ -398,14 +454,6 @@ pub(crate) enum AppEvent {
         thread_id: ThreadId,
         action: AgentsOverviewAction,
     },
-    /// Start the shared app-server daemon without moving the current embedded session.
-    #[cfg(any(unix, windows))]
-    StartAgentsDaemon,
-    /// Report whether starting the shared app-server daemon succeeded.
-    #[cfg(any(unix, windows))]
-    AgentsDaemonStarted {
-        result: Result<(), String>,
-    },
     /// Open the agent picker for switching active threads.
     OpenAgentPicker,
     /// Merge a completed root-scoped agent-picker refresh without blocking terminal input.
@@ -417,10 +465,35 @@ pub(crate) enum AppEvent {
     /// Switch the active thread to the selected agent.
     SelectAgentThread(ThreadId),
 
-    /// Fork the current thread into a transient side conversation.
+    /// Open a transient side conversation for the current thread.
     StartSide {
         parent_thread_id: ThreadId,
         user_message: Option<UserMessage>,
+        mode: SideStartMode,
+    },
+
+    SideCreated {
+        backend_id: crate::backend_id::BackendId,
+        parent: ThreadId,
+        request: uuid::Uuid,
+        result: Result<Box<crate::app_server_session::SidebarFork>, String>,
+    },
+    SideChatRemovalFinished {
+        backend_id: crate::backend_id::BackendId,
+        target: ThreadId,
+        request: uuid::Uuid,
+        action: SideChatRemoval,
+        result: Result<(), String>,
+    },
+    SideChatArchived {
+        backend_id: crate::backend_id::BackendId,
+        target: ThreadId,
+    },
+    SavedSideChatsLoaded {
+        backend_id: crate::backend_id::BackendId,
+        parent: ThreadId,
+        request: uuid::Uuid,
+        result: Result<Vec<crate::app_server_session::SideChat>, String>,
     },
 
     /// Submit an op to the specified thread, regardless of current focus.
@@ -463,6 +536,13 @@ pub(crate) enum AppEvent {
         model: String,
         turn: AppCommand,
         prompt: UserMessage,
+    },
+
+    /// Fork before a blocked turn and send the selected safer follow-up.
+    ContinueSafetyRecourse {
+        thread_id: ThreadId,
+        turn_id: String,
+        prompt: String,
     },
 
     /// Deliver a synthetic history lookup response to a specific thread channel.
@@ -617,6 +697,26 @@ pub(crate) enum AppEvent {
         name: Option<String>,
     },
 
+    /// Move the outgoing transcript once its previously queued history edits have run.
+    ParkSideCompanion {
+        pair: ThreadId,
+        thread_id: ThreadId,
+        stream: Option<CapturedSideStream>,
+        display: CapturedSideDisplay,
+    },
+
+    /// Release input and drawing after the destination snapshot's queued history edits.
+    SideReplayFinished(ThreadId),
+
+    /// Deliver the original pointer press after the target conversation's replay finishes.
+    SidePanePressAfterReplay {
+        peer: ThreadId,
+        draft_cursor: Option<usize>,
+        thread_id: ThreadId,
+        area: ratatui::layout::Rect,
+        press: crossterm::event::MouseEvent,
+    },
+
     /// Clear history queued by the previous thread before the new thread's replay events.
     ResetTranscriptForThreadSwitch,
     /// Reset queued history while keeping the startup draft visible until the next frame.
@@ -673,6 +773,8 @@ pub(crate) enum AppEvent {
     /// escape hatch that skips shutdown and may drop in-flight work (e.g.,
     /// background tasks, rollout flush, or child process cleanup).
     Exit(ExitMode),
+    /// The user accepted stopping other sessions owned by this embedded server.
+    ConfirmedEmbeddedExit(ExitMode),
 
     /// Apply a choice from the running-task exit menu to its originating thread.
     RunningTaskExit {
@@ -1154,6 +1256,14 @@ pub(crate) enum AppEvent {
         result: Result<SkillsListResponse, String>,
     },
 
+    /// Result of the skills refresh issued while replaying a docked conversation.
+    SideReplaySkillsLoaded {
+        request_id: Uuid,
+        thread_id: ThreadId,
+        cwd: PathBuf,
+        result: Result<SkillsListResponse, String>,
+    },
+
     /// Begin buffering initial resume replay rows before they are written to scrollback.
     BeginInitialHistoryReplayBuffer,
 
@@ -1201,12 +1311,19 @@ pub(crate) enum AppEvent {
     /// `deferred_history_cell` lets callers add the final stream tail to the
     /// transcript without first writing its provisional render to scrollback.
     ConsolidateAgentMessage {
+        interrupted_item: Option<(String, String)>,
         source: String,
         copy_source: Option<String>,
         cwd: PathBuf,
         inline_visualization_context: Option<InlineVisualizationContext>,
         scrollback_reflow: ConsolidationScrollbackReflow,
         deferred_history_cell: Option<Box<dyn HistoryCell>>,
+    },
+
+    /// Update a message already committed before a tool started with its completed text.
+    CorrectFlushedAgentMessage {
+        item: (String, String),
+        cell: crate::history_cell::AgentMarkdownCell,
     },
 
     /// Replace the contiguous run of streaming `ProposedPlanStreamCell`s at the
@@ -1677,6 +1794,8 @@ pub(crate) enum AppEvent {
     /// Remember the Command Center grouping across launches.
     PersistAgentsOverviewGrouping(xdcode_config::types::AgentsOverviewGrouping),
 
+    Provider(crate::app::provider::Event),
+
     /// Open an existing editor above the configuration panel.
     OpenConfigEditor(crate::config_panel::ConfigEditorHandoff),
 
@@ -1816,4 +1935,16 @@ pub(crate) enum FeedbackCategory {
     Bug,
     SafetyCheck,
     Other,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SideStartMode {
+    Reuse,
+    New,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SideChatRemoval {
+    CloseTab,
+    Archive,
 }

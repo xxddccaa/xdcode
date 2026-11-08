@@ -302,6 +302,7 @@ fn known_segment_name(text: &str, source: TextSource<'_>) -> Option<String> {
             ("", "MODEL_INSTRUCTIONS"),
         ],
         TextSource::Message("developer") => &[
+            ("<xdcode_model_configuration>", "XDCODE_MODEL_CONFIGURATION"),
             (GUARDIAN_INSTRUCTIONS_PREFIX, "GUARDIAN_INSTRUCTIONS"),
             (GUARDIAN_PROVENANCE_PREFIX, "GUARDIAN_INSTRUCTIONS"),
         ],
@@ -527,6 +528,14 @@ pub(super) fn portable_tool_schema(tool: &Value) -> Value {
 
 pub(super) fn is_bundled_model_instructions(text: &str) -> bool {
     static PROMPTS: OnceLock<Vec<String>> = OnceLock::new();
+    let application_identity = include_str!("../../../../prompts/templates/identity.md").trim_end();
+    if text == application_identity {
+        return true;
+    }
+    let text = text
+        .strip_suffix(application_identity)
+        .and_then(|template| template.strip_suffix("\n\n"))
+        .unwrap_or(text);
     text == xdcode_models_manager::model_info::BASE_INSTRUCTIONS
         || PROMPTS
             .get_or_init(|| {

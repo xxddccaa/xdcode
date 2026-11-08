@@ -14,6 +14,8 @@ use super::GitOperation;
 use super::configured_filters;
 use super::git_output;
 use super::git_stdout;
+use super::git_worktree_porcelain_z;
+use super::registered_worktree_roots;
 
 fn setup_git(cwd: &Path, args: &[&str]) -> Result<()> {
     let output = Command::new("git").current_dir(cwd).args(args).output()?;
@@ -43,6 +45,34 @@ fn repository() -> Result<(TempDir, std::path::PathBuf)> {
 fn git_stdout_returns_trimmed_output() -> Result<()> {
     let (_directory, root) = repository()?;
     assert_eq!(git_stdout(&root, ["branch", "--show-current"])?, "main");
+    Ok(())
+}
+
+#[test]
+fn nul_worktree_listing_does_not_hide_non_repository_errors() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    assert!(git_worktree_porcelain_z(directory.path()).is_err());
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn registered_worktree_paths_preserve_newlines_quotes_and_native_bytes() -> Result<()> {
+    use std::os::unix::ffi::OsStringExt;
+    let (directory, root) = repository()?;
+    let checkout = directory.path().join(std::ffi::OsString::from_vec(
+        b"checkout\nwith \"quotes\" \\ and \xff".to_vec(),
+    ));
+    let output = Command::new("git")
+        .current_dir(&root)
+        .args(["worktree", "add", "--detach"])
+        .arg(&checkout)
+        .output()?;
+    assert!(output.status.success());
+    assert_eq!(
+        registered_worktree_roots(&root.join(".git"))?,
+        vec![checkout]
+    );
     Ok(())
 }
 

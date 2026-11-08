@@ -203,6 +203,14 @@ pub struct CatalogSnapshot {
     pub source: PathBuf,
 }
 
+#[derive(Deserialize)]
+struct CatalogFileConfig {
+    #[serde(default)]
+    models: Vec<CatalogModel>,
+    #[serde(default)]
+    model_providers: HashMap<String, ModelProviderInfo>,
+}
+
 impl CatalogSnapshot {
     pub fn load(path: &Path) -> Result<Self> {
         let raw = read_config(path)?;
@@ -659,42 +667,94 @@ fn edit_catalog(
     preview: bool,
     edit: impl FnOnce(&mut DocumentMut) -> Result<()>,
 ) -> Result<CatalogWriteResult> {
-    let paths = resolve_symlink_write_paths(path)?;
-    let write_path = &paths.write_path;
-    if let Some(parent) = write_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let lock_path = write_path.with_extension("toml.models.lock");
-    let _lock = CatalogLock::acquire(lock_path)?;
-    let raw = read_config(path)?;
-    let old_version = content_version(&raw);
-    if expected.is_some_and(|version| version != old_version) {
-        bail!("configuration version changed; reload and retry");
-    }
-    let mut doc = raw.parse::<DocumentMut>()?;
-    edit(&mut doc)?;
-    let updated = doc.to_string();
-    let changed = raw != updated;
-    let models = CatalogSnapshot::from_raw(path, &updated)?.models;
-    if changed && !preview {
-        // Check the actual file mode even when running as root, so read-only is respected.
-        if fs::metadata(write_path)
-            .ok()
-            .is_some_and(|metadata| metadata.permissions().readonly())
-        {
-            bail!("configuration is read-only; changes were not saved");
+    let mut transaction = ConfigurationFile::open(path)?;
+    transaction.check_version(expected, false)?;
+    edit(transaction.document())?;
+    transaction.finish(preview)
+}
+
+pub struct ConfigurationFile {
+    path: PathBuf,
+    read_path: Option<PathBuf>,
+    write_path: PathBuf,
+    original: String,
+    document: DocumentMut,
+    _lock: CatalogLock,
+}
+
+impl ConfigurationFile {
+    pub fn open(path: &Path) -> Result<Self> {
+        let paths = resolve_symlink_write_paths(path)?;
+        if let Some(parent) = paths.write_path.parent() {
+            fs::create_dir_all(parent)?;
         }
-        if content_version(&read_config(path)?) != old_version {
-            bail!("configuration changed while editing; reload and retry");
-        }
-        write_atomically(write_path, &updated)?;
+        let lock = CatalogLock::acquire(paths.write_path.with_extension("toml.models.lock"))?;
+        let original = match &paths.read_path {
+            Some(read_path) => read_config(read_path)?,
+            None => String::new(),
+        };
+        let document = original.parse::<DocumentMut>()?;
+        Ok(Self {
+            path: path.to_path_buf(),
+            read_path: paths.read_path,
+            write_path: paths.write_path,
+            original,
+            document,
+            _lock: lock,
+        })
     }
-    Ok(CatalogWriteResult {
-        version: content_version(&updated),
-        changed,
-        preview,
-        models,
-    })
+
+    pub fn check_version(&self, expected: Option<&str>, accept_legacy: bool) -> Result<()> {
+        let Some(expected) = expected else {
+            return Ok(());
+        };
+        if expected == content_version(&self.original) {
+            return Ok(());
+        }
+        if accept_legacy {
+            let value: toml::Value = self.original.parse()?;
+            if expected == crate::version_for_toml(&value) {
+                return Ok(());
+            }
+        }
+        bail!("configuration version changed; reload and retry")
+    }
+
+    pub fn document(&mut self) -> &mut DocumentMut {
+        &mut self.document
+    }
+
+    pub fn finish(self, preview: bool) -> Result<CatalogWriteResult> {
+        let updated = self.document.to_string();
+        let changed = self.original != updated;
+        let models = CatalogSnapshot::from_raw(&self.path, &updated)?.models;
+        if changed && !preview {
+            let paths = resolve_symlink_write_paths(&self.path)?;
+            if paths.write_path != self.write_path || paths.read_path != self.read_path {
+                bail!("configuration path changed while editing; reload and retry");
+            }
+            if fs::metadata(&self.write_path)
+                .ok()
+                .is_some_and(|metadata| metadata.permissions().readonly())
+            {
+                bail!("configuration is read-only; changes were not saved");
+            }
+            let current = match &paths.read_path {
+                Some(read_path) => read_config(read_path)?,
+                None => String::new(),
+            };
+            if content_version(&current) != content_version(&self.original) {
+                bail!("configuration changed while editing; reload and retry");
+            }
+            write_atomically(&self.write_path, &updated)?;
+        }
+        Ok(CatalogWriteResult {
+            version: content_version(&updated),
+            changed,
+            preview,
+            models,
+        })
+    }
 }
 
 struct CatalogLock {
@@ -784,7 +844,7 @@ pub fn catalog_write_target(stack: &crate::ConfigLayerStack) -> Result<PathBuf> 
         .context("no writable user configuration")
 }
 
-fn effective_config(path: &Path, raw: &str) -> Result<crate::config_toml::ConfigToml> {
+fn effective_config(path: &Path, raw: &str) -> Result<CatalogFileConfig> {
     let mut value: toml::Value = toml::from_str(raw).context("invalid model configuration")?;
     // Named profiles are sibling TOML files. Use the same table merge/array replacement
     // semantics as the runtime loader without moving the write target to the base file.

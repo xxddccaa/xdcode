@@ -588,7 +588,7 @@ async fn interactive_tmux_startup_does_not_execute_workspace_helpers() -> Result
             tokio::select! {
                 result = &mut exit_rx => return result,
                 _ = quit_retry.tick() => {
-                    let _ = writer.send(b"2".to_vec()).await;
+                    let _ = writer.send(b"\x03".to_vec()).await;
                 }
                 Some(_) = output_rx.recv() => {}
             }

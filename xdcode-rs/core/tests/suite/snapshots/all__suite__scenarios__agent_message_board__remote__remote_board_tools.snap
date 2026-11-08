@@ -1,5 +1,6 @@
 ---
 source: core/tests/suite/scenarios_agent_message_board_remote.rs
+assertion_line: 198
 expression: "context_snapshot::format_context_snapshot(\"Remote board tools and active-turn notifications share the existing session identity.\",\n&bodies.iter().map(SnapshotEntry::body).collect::<Vec<_>>(),\n&ContextSnapshotOptions::default().rewrite_known_segments(),)"
 ---
 Scenario: Remote board tools and active-turn notifications share the existing session identity.
@@ -14,8 +15,9 @@ Scenario: Remote board tools and active-turn notifications share the existing se
     <turn_aborted>
     The previous turn was interrupted on purpose. Any running unified exec processes may still be running in...mands were aborted, they may have partially executed. [hash=cee256d92b55ad65]
     </turn_aborted>
-03:message/developer:
-    <PERMISSIONS_INSTRUCTIONS>
+03:message/developer[2]:
+    [01] <XDCODE_MODEL_CONFIGURATION>
+    [02] <PERMISSIONS_INSTRUCTIONS>
 04:message/developer:
     You are `/root`, the primary agent in a team of agents collaborating to fulfill the user's goals.
 

@@ -81,6 +81,26 @@ impl TranscriptView {
         }
     }
 
+    /// Keep the parked reading revision and rebind a quiet tail to its replayed identity.
+    pub(crate) fn restore_after_replay(
+        &mut self,
+        parked: &[Arc<dyn HistoryCell>],
+        replayed: &[Arc<dyn HistoryCell>],
+        replay_may_have_output: bool,
+        replayed_live: Option<ActiveCellTranscriptKey>,
+    ) {
+        if matches!(self.position, Position::Reading(_)) && self.snapshot().is_none() {
+            self.held_reading = Some(self.capture_snapshot(parked));
+        }
+        if !replay_may_have_output {
+            self.last_tail = replayed.last().map(EntryKey::cell);
+            self.live_key = replayed_live.map(|mut key| {
+                key.cacheable = false;
+                (self.area.width, key)
+            });
+        }
+    }
+
     /// Keep a live, mutable, or replaced cell revision while reading inside it. Navigation
     /// rejoins current history when it reaches a surviving cell.
     pub(super) fn hold_live_reading(

@@ -17,7 +17,6 @@ use xdcode_protocol::protocol::EventMsg;
 use xdcode_protocol::protocol::HistoryPosition;
 use xdcode_protocol::protocol::ItemCompletedEvent;
 use xdcode_protocol::protocol::MultiAgentVersion;
-use xdcode_protocol::protocol::SandboxPolicy;
 use xdcode_protocol::protocol::ThreadHistoryMode;
 use xdcode_protocol::protocol::TurnCompleteEvent;
 use xdcode_protocol::protocol::TurnContextItem;
@@ -745,10 +744,8 @@ fn turn_context(root: &Path, turn_id: &str) -> RolloutItem {
         cwd: serde_json::from_value(serde_json::json!(root)).expect("absolute cwd"),
         approval_policy: AskForApproval::Never,
         approvals_reviewer: None,
-        sandbox_policy: SandboxPolicy::new_read_only_policy(),
-        permission_profile: None,
+        permission_profile: xdcode_protocol::models::PermissionProfile::read_only(),
         active_permission_profile: None,
-        file_system_sandbox_policy: None,
         model: "test-model".to_string(),
         comp_hash: None,
         collaboration_mode: None,

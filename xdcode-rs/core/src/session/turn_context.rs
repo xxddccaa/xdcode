@@ -10,6 +10,7 @@ use crate::exec_policy::AllowPrefixRules;
 use crate::shell_snapshot::ShellSnapshot;
 use crate::shell_snapshot::ShellSnapshotFile;
 use crate::shell_snapshot::ShellSnapshotSandbox;
+use crate::skills::HostSkillDiscovery;
 use crate::tools::sandboxing::configured_windows_sandbox_selection;
 use crate::tools::sandboxing::executor_windows_sandbox_selection;
 use arc_swap::ArcSwap;
@@ -36,7 +37,6 @@ use xdcode_protocol::config_types::ShellEnvironmentPolicy;
 use xdcode_protocol::model_types::MODEL_SPECIALTY_CYBER;
 use xdcode_protocol::model_types::ModelInfo;
 use xdcode_protocol::models::AdditionalPermissionProfile;
-use xdcode_protocol::permissions::RawFileSystemSandboxPolicy;
 use xdcode_protocol::protocol::EnvironmentConfig;
 use xdcode_protocol::protocol::EnvironmentConfigState;
 use xdcode_protocol::protocol::ErrorEvent;
@@ -110,6 +110,10 @@ impl TurnEnvironment {
             unreachable!("ready turn environments always carry resolved configuration")
         };
         config
+    }
+
+    pub(crate) fn environment(&self) -> &Environment {
+        &self.environment
     }
 
     pub(crate) fn shell_environment_policy(&self) -> &ShellEnvironmentPolicy {
@@ -420,7 +424,10 @@ impl TurnContext {
     ) -> Self {
         let session_telemetry = step_settings.telemetry(&self.session_telemetry);
         let extension_data = Arc::new(xdcode_extension_api::ExtensionData::new(sub_id.clone()));
-        extension_data.insert(self.skills_snapshot().as_ref().clone());
+        extension_data.insert_arc(self.skills_snapshot());
+        if let Some(discovery) = self.extension_data.get::<HostSkillDiscovery>() {
+            extension_data.insert_arc(discovery);
+        }
 
         Self {
             sub_id,
@@ -491,6 +498,34 @@ impl TurnContext {
             .get(environment_id)
             .cloned();
         merge_permission_profiles(session_grants.as_ref(), turn_grants.as_ref())
+    }
+
+    #[expect(
+        clippy::expect_used,
+        reason = "poisoned grant state must not authorize further operations"
+    )]
+    pub(crate) fn turn_skill_filesystem_grants(
+        &self,
+        environments: &TurnEnvironmentSnapshot,
+    ) -> Option<xdcode_skills_extension::TurnSkillFilesystemGrants> {
+        let grants = self
+            .turn_grants
+            .lock()
+            .expect("turn permission grants lock poisoned");
+        let environment_ids = environments
+            .turn_environments()
+            .map(|environment| &environment.selection.environment_id)
+            .filter(|id| {
+                grants
+                    .granted_permissions_by_environment_id
+                    .get(*id)
+                    .and_then(|profile| profile.file_system.as_ref())
+                    .is_some_and(|fs| !fs.is_empty())
+            })
+            .cloned()
+            .collect::<std::collections::HashSet<_>>();
+        (!environment_ids.is_empty())
+            .then_some(xdcode_skills_extension::TurnSkillFilesystemGrants { environment_ids })
     }
 
     #[expect(
@@ -738,10 +773,6 @@ impl TurnContext {
         })
     }
 
-    pub(crate) fn file_system_sandbox_policy(&self) -> FileSystemSandboxPolicy {
-        self.permission_profile().file_system_sandbox_policy()
-    }
-
     pub(crate) fn network_sandbox_policy(&self) -> NetworkSandboxPolicy {
         self.permission_profile().network_sandbox_policy()
     }
@@ -887,25 +918,6 @@ impl TurnContext {
         }
     }
 
-    fn non_legacy_file_system_sandbox_policy(&self) -> Option<RawFileSystemSandboxPolicy> {
-        // Omit the derived split filesystem policy when it is equivalent to
-        // the legacy sandbox policy. This keeps turn-context payloads stable
-        // while both fields exist; once callers consume only the split policy,
-        // this comparison and the legacy projection should go away.
-        let legacy_file_system_sandbox_policy =
-            FileSystemSandboxPolicy::from_legacy_sandbox_policy_for_cwd(
-                &self.sandbox_policy(),
-                #[allow(deprecated)]
-                &self.cwd,
-            );
-        let file_system_sandbox_policy = self.file_system_sandbox_policy();
-        // `permission_profile` below is authoritative and serializes the same
-        // runtime entries, so this compatibility field may omit an unrenderable policy.
-        (file_system_sandbox_policy != legacy_file_system_sandbox_policy)
-            .then(|| file_system_sandbox_policy.try_into().ok())
-            .flatten()
-    }
-
     pub(crate) fn to_turn_context_item(&self) -> TurnContextItem {
         #[allow(deprecated)]
         let cwd = self.cwd.clone();
@@ -920,13 +932,11 @@ impl TurnContext {
             cwd,
             approval_policy: self.approval_policy(),
             approvals_reviewer: Some(self.config.approvals_reviewer),
-            sandbox_policy: self.sandbox_policy(),
-            permission_profile: Some(self.permission_profile()),
+            permission_profile: self.permission_profile(),
             active_permission_profile: self.initial_environments.primary().map_or_else(
                 || self.config.permissions.active_permission_profile(),
                 TurnEnvironment::active_permission_profile,
             ),
-            file_system_sandbox_policy: self.non_legacy_file_system_sandbox_policy(),
             model: self.model_info().slug.clone(),
             comp_hash: self.model_info().comp_hash.clone(),
             collaboration_mode: Some(self.collaboration_mode()),
@@ -1279,6 +1289,10 @@ impl Session {
     }
 
     #[instrument(name = "turn_context.build", level = "trace", skip_all, fields(?build_mode))]
+    #[expect(
+        clippy::expect_used,
+        reason = "poisoned session grants must not authorize discovery"
+    )]
     async fn new_turn_context_from_configuration(
         &self,
         sub_id: String,
@@ -1299,46 +1313,30 @@ impl Session {
             .map(TurnEnvironment::permission_profile)
             .cloned()
             .unwrap_or_else(|| session_configuration.permission_profile());
+        let models_manager = self
+            .services
+            .model_catalog
+            .for_config(&per_turn_config, Arc::clone(&self.services.auth_manager));
         let mut model_info = session_configuration
             .step_settings
             .resolve_model_info(
-                self.services.models_manager.as_ref(),
+                models_manager.as_ref(),
                 &session_configuration.model_info_overrides,
             )
             .await;
         // User catalog selections are authoritative, including custom strings and
         // service default. Do not replace explicit omission with upstream defaults.
-        if let Some(id) = &per_turn_config.model_catalog_id
-            && let Some(entry) = per_turn_config.models.iter().find(|entry| &entry.id == id)
-        {
-            // Catalog IDs can share the same wire slug across vendors. Never reuse
-            // another provider's remote capability, compression or hosted-tool metadata.
-            let mut generic = xdcode_models_manager::model_info::model_info_from_slug(&entry.model);
-            generic.max_context_window = None;
-            model_info = xdcode_models_manager::model_info::with_config_overrides(
-                generic,
-                &session_configuration
-                    .model_info_overrides
-                    .models_manager_config(per_turn_config.personality),
-            );
-            model_info.display_name = entry.name.clone();
-            model_info.supports_reasoning_summary_parameter = false;
-            model_info.default_reasoning_summary =
-                xdcode_protocol::config_types::ReasoningSummary::None;
-            model_info.default_reasoning_level = None;
-            model_info.supported_reasoning_levels = entry
-                .reasoning_efforts
-                .as_deref()
-                .unwrap_or_default()
-                .iter()
-                .cloned()
-                .map(
-                    |effort| xdcode_protocol::model_types::ReasoningEffortPreset {
-                        description: effort.to_string(),
-                        effort,
-                    },
-                )
-                .collect();
+        if let Some(info) = super::configured_catalog_model_info(
+            &per_turn_config,
+            session_configuration
+                .step_settings
+                .collaboration_mode
+                .model(),
+            &session_configuration
+                .model_info_overrides
+                .models_manager_config(per_turn_config.personality),
+        ) {
+            model_info = info;
         }
         let multi_agent_version = match build_mode {
             TurnContextBuildMode::Full => {
@@ -1366,7 +1364,7 @@ impl Session {
             &plugin_outcome,
             per_turn_config.xdcode_home.as_path(),
         );
-        let skills_snapshot = if matches!(build_mode, TurnContextBuildMode::InjectItems)
+        let skill_discovery = if matches!(build_mode, TurnContextBuildMode::InjectItems)
             || crate::guardian::is_basic_session_source(&session_configuration.session_source)
             || (per_turn_config
                 .features
@@ -1374,7 +1372,7 @@ impl Session {
                 && !self.services.extensions.requires_host_skill_discovery())
         {
             // Executor and orchestrator catalogs are supplied independently of host skills.
-            HostSkillsSnapshot::new(Arc::new(SkillLoadOutcome::default()))
+            None
         } else {
             let effective_skill_roots = plugin_outcome.effective_plugin_skill_roots();
             let (skills_input, fs) = crate::skills::skills_load_input_for_environments(
@@ -1383,10 +1381,37 @@ impl Session {
                 effective_skill_roots,
                 &turn_environments,
             );
-            self.services
+            let access = fs.map(|environment| {
+                let grants = self
+                    .services
+                    .granted_permissions_by_environment_id
+                    .lock()
+                    .expect("session permission grants lock poisoned")
+                    .get(&environment.selection.environment_id)
+                    .cloned();
+                environment.fs_accessor(grants)
+            });
+            let snapshot = self
+                .services
                 .skills_service
-                .snapshot_for_config(&skills_input, fs)
-                .await
+                .snapshot_for_config_on_executor(
+                    &skills_input,
+                    fs.zip(access.as_ref()).map(|(environment, access)| {
+                        (
+                            environment.environment().filesystem_ref(),
+                            access as &dyn EnvironmentAccess,
+                        )
+                    }),
+                )
+                .await;
+            let repository = fs
+                .zip(access.as_ref())
+                .map(|(environment, access)| (environment.cwd().clone(), access.cache_key()));
+            Some(HostSkillDiscovery {
+                input: Arc::new(skills_input),
+                repository,
+                snapshot: Arc::new(snapshot),
+            })
         };
         let step_settings = Arc::new(
             ResolvedStepSettings::new(
@@ -1422,7 +1447,7 @@ impl Session {
             multi_agent_version,
             per_turn_config,
             step_settings,
-            &self.services.models_manager,
+            &models_manager,
             self.services
                 .network_proxy
                 .load_full()
@@ -1436,8 +1461,14 @@ impl Session {
             turn_environments,
             cwd,
             sub_id,
-            skills_snapshot,
+            skill_discovery
+                .as_ref()
+                .map(|discovery| discovery.snapshot.as_ref().clone())
+                .unwrap_or_else(|| HostSkillsSnapshot::new(Arc::new(SkillLoadOutcome::default()))),
         );
+        if let Some(discovery) = skill_discovery {
+            turn_context.extension_data.insert(discovery);
+        }
         turn_context.code_mode_available = self.services.code_mode_service.is_available();
         turn_context.extension_data.insert(trusted_plugin_roots);
         turn_context.active_host_plugin_identities = Some(

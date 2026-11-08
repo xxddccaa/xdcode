@@ -723,6 +723,74 @@ fn network_maps_use_regular_toml_merge() {
 }
 
 #[test]
+fn network_aliases_merge_with_layer_precedence_and_sources() {
+    for (low_key, high_key) in [
+        ("network_proxy", "experimental_network"),
+        ("experimental_network", "network_proxy"),
+    ] {
+        let low = layer(
+            "req_low",
+            "Low",
+            &format!(
+                "[{low_key}]\nenabled = true\nallow_local_binding = false\n\
+                 [{low_key}.domains]\n'low.example.com' = 'allow'\n'shared.example.com' = 'allow'"
+            ),
+        );
+        let high = layer(
+            "req_high",
+            "High",
+            &format!(
+                "[{high_key}]\nenabled = false\nallow_upstream_proxy = true\n\
+                 [{high_key}.domains]\n'high.example.com' = 'allow'\n'shared.example.com' = 'deny'"
+            ),
+        );
+        let expected_source =
+            RequirementSource::composite([high.source.clone(), low.source.clone()]);
+        let composed = compose_requirements_for_hostname(vec![low, high], None)
+            .expect("compose network aliases")
+            .expect("requirements present");
+        assert_eq!(
+            composed.network,
+            Some(Sourced::new(
+                expected_requirements(
+                    "[network_proxy]\nenabled = false\nallow_local_binding = false\nallow_upstream_proxy = true\n\
+                     [network_proxy.domains]\n'low.example.com' = 'allow'\n'high.example.com' = 'allow'\n'shared.example.com' = 'deny'"
+                )
+                .network
+                .expect("network requirements"),
+                expected_source,
+            ))
+        );
+    }
+}
+
+#[test]
+fn permissions_network_conflicts_with_top_level_network_across_layers() {
+    for table in ["network_proxy", "experimental_network"] {
+        for (root_first, root_values) in [(true, "enabled = true"), (false, "")] {
+            let root = layer("root", "Root", &format!("[{table}]\n{root_values}"));
+            let permissions = layer(
+                "permissions",
+                "Permissions",
+                "[permissions.network]\nenabled = true",
+            );
+            let root_source = root.source.clone();
+            let permissions_source = permissions.source.clone();
+            let layers = if root_first {
+                vec![root, permissions]
+            } else {
+                vec![permissions, root]
+            };
+            let err = compose_requirements_for_hostname(layers, None)
+                .expect_err("network requirement surfaces must not coexist")
+                .to_string();
+            assert!(err.contains(&root_source.to_string()), "{err}");
+            assert!(err.contains(&permissions_source.to_string()), "{err}");
+        }
+    }
+}
+
+#[test]
 fn browser_and_computer_use_requirements_use_regular_toml_merge() {
     let composed = compose(vec![
         layer(
@@ -1388,6 +1456,75 @@ deny_read = [{high_path:?}, {low_path:?}]
 
 [permissions.managed-standard]
 description = "High profile"
+extends = ":workspace"
+"#
+        ))
+    );
+}
+
+#[test]
+fn permissions_network_merges_with_higher_precedence_filesystem_requirements() {
+    let denied_path = if cfg!(windows) {
+        "C:\\secret"
+    } else {
+        "/secret"
+    };
+    let low = layer(
+        "req_low",
+        "Low",
+        "[permissions.network]\nenabled = true\n[permissions.managed]\nextends = ':workspace'",
+    );
+    let high = layer(
+        "req_high",
+        "High",
+        &format!(
+            r#"
+[permissions.filesystem]
+deny_read = [{denied_path:?}]
+
+[permissions.network.domains]
+'example.com' = 'allow'
+"#
+        ),
+    );
+    let network_source = RequirementSource::composite([high.source.clone(), low.source.clone()]);
+    let filesystem_source = high.source.clone();
+    let composed = compose_requirements_for_hostname(
+        [
+            low,
+            high,
+            layer(
+                "profile",
+                "Profile",
+                "[permissions.other]\nextends = ':workspace'",
+            ),
+        ],
+        None,
+    )
+    .expect("compose requirements")
+    .expect("requirements present");
+    let effective = crate::ConfigRequirements::try_from(composed.clone()).expect("requirements");
+    assert_eq!(effective.network.expect("network").source, network_source);
+    assert_eq!(
+        effective.filesystem.expect("filesystem").source,
+        filesystem_source
+    );
+    assert_eq!(
+        composed.into_toml(),
+        expected_requirements(format!(
+            r#"
+[permissions.filesystem]
+deny_read = [{denied_path:?}]
+
+[permissions.network]
+enabled = true
+[permissions.network.domains]
+'example.com' = 'allow'
+
+[permissions.other]
+extends = ":workspace"
+
+[permissions.managed]
 extends = ":workspace"
 "#
         ))

@@ -38,6 +38,12 @@ impl ReasoningReplay {
     }
 
     pub(super) fn before_event(&mut self, event: &ThreadBufferedEvent, chat: &mut ChatWidget) {
+        if let ThreadBufferedEvent::Notification(notification) = event
+            && let ServerNotification::ItemStarted(started) = notification.as_ref()
+            && let ThreadItem::Reasoning { id, .. } = &started.item
+        {
+            chat.remember_typed_reasoning_item(started.turn_id.clone(), id);
+        }
         if self.started.as_ref().is_some_and(|started| {
             matches!(event, ThreadBufferedEvent::Notification(notification) if match notification.as_ref() {
                 ServerNotification::ItemStarted(item) => {

@@ -121,8 +121,7 @@ pub enum Feature {
 
     /// Automatically start the shared local daemon for eligible interactive launches.
     DaemonAutoStart,
-    /// Allow the TUI to discover and select among multiple conversation backends.
-    TuiMultiBackend,
+    TuiWorkspace,
     /// Enable negotiated zstd compression for app-server WebSocket and UDS connections.
     AppServerWebSocketCompression,
 
@@ -251,6 +250,7 @@ pub enum Feature {
     InstantInterrupt,
     /// Enable shared discussion tools for an agent tree.
     AgentMessageBoard,
+    AgentMessageBoardMcp,
     /// Removed compatibility flag retained as a no-op.
     MultiAgentMode,
     /// Removed compatibility flag for the deleted agent-job tools.
@@ -265,8 +265,13 @@ pub enum Feature {
     Mcp20260728,
     /// Honor ordinary MCP server tool-list notifications within a turn.
     McpToolListChanged,
+    /// Discover and share eligible local stdio connections across chats.
+    McpConnectionSharing,
+    /// Defer optional stdio server startup in regular chats with a warm tool catalog.
+    McpLazyStdioStartup,
     /// Enable MCP protocol version 2026-07-28 for the host-owned Xdcode Apps server.
     XdcodeAppsMcp20260728,
+    /// Let host-owned Apps catalog reads overlap the initial tool inventory.
     /// Let RMCP coordinate OAuth refresh through the configured credential store.
     McpOAuthRefreshCoordination,
     /// Enable enterprise refresh-token authorization for configured MCP resources.
@@ -371,6 +376,8 @@ pub enum Feature {
     SkillMcpDependencyInstall,
     /// Run cheap skill-search methods in shadow mode and emit experiment metrics.
     SkillSearch,
+    /// Append skill additions and edits within a cumulative context budget.
+    SkillCatalogDeltas,
     /// Removed compatibility flag for deleted skill env var dependency prompting.
     SkillEnvVarDependencyPrompt,
     /// Enable the unified mention popup used by default in the TUI.
@@ -1099,9 +1106,13 @@ pub const FEATURES: &[FeatureSpec] = &[
         default_enabled: true,
     },
     FeatureSpec {
-        id: Feature::TuiMultiBackend,
-        key: "tui_multi_backend",
-        stage: Stage::UnderDevelopment,
+        id: Feature::TuiWorkspace,
+        key: "tui_workspace",
+        stage: Stage::Experimental {
+            name: "Conversation sidebar",
+            menu_description: "Local/remote App Server conversation panes, tabs, focus and resizing. Requires fullscreen transcript and alternate screen. Restart the TUI; hiding or disabling retains history.",
+            announcement: "",
+        },
         default_enabled: false,
     },
     FeatureSpec {
@@ -1542,7 +1553,11 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::RespectSystemProxy,
         key: "respect_system_proxy",
-        stage: Stage::UnderDevelopment,
+        stage: Stage::Experimental {
+            name: "System proxy",
+            menu_description: "Use macOS or Windows system proxy settings for Xdcode requests.",
+            announcement: "",
+        },
         default_enabled: false,
     },
     FeatureSpec {
@@ -1602,7 +1617,21 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::AgentMessageBoard,
         key: "agent_message_board",
-        stage: Stage::UnderDevelopment,
+        stage: Stage::Experimental {
+            name: "Local agent message board",
+            menu_description: "Persist local discussion messages for already-authorized agents. Requires multi_agent_v2 and an App Server restart. Never spawns agents.",
+            announcement: "",
+        },
+        default_enabled: false,
+    },
+    FeatureSpec {
+        id: Feature::AgentMessageBoardMcp,
+        key: "agent_message_board_mcp",
+        stage: Stage::Experimental {
+            name: "Message board MCP",
+            menu_description: "Expose the local agent message board as MCP tools. Requires agent_message_board and an App Server restart; no Cloud service.",
+            announcement: "",
+        },
         default_enabled: false,
     },
     FeatureSpec {
@@ -1645,6 +1674,26 @@ pub const FEATURES: &[FeatureSpec] = &[
         id: Feature::McpToolListChanged,
         key: "mcp_tool_list_changed",
         stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
+        id: Feature::McpConnectionSharing,
+        key: "mcp_connection_sharing",
+        stage: Stage::Experimental {
+            name: "Shared local MCP connections",
+            menu_description: "Share negotiated stateless stdio servers with isolated session leases. Legacy/input-at-startup servers stay independent. Requires App Server restart.",
+            announcement: "",
+        },
+        default_enabled: false,
+    },
+    FeatureSpec {
+        id: Feature::McpLazyStdioStartup,
+        key: "mcp_lazy_stdio_startup",
+        stage: Stage::Experimental {
+            name: "Lazy stdio MCP startup",
+            menu_description: "Start eligible local stdio servers on first use after a cached tool inventory. Startup errors remain visible. Requires App Server restart.",
+            announcement: "",
+        },
         default_enabled: false,
     },
     FeatureSpec {
@@ -1898,6 +1947,16 @@ pub const FEATURES: &[FeatureSpec] = &[
         key: "skill_search",
         stage: Stage::Stable,
         default_enabled: true,
+    },
+    FeatureSpec {
+        id: Feature::SkillCatalogDeltas,
+        key: "skill_catalog_deltas",
+        stage: Stage::Experimental {
+            name: "Incremental skill catalog",
+            menu_description: "Send optional incremental skill catalog updates instead of repeating unchanged entries. Filesystem permissions still apply. Requires App Server restart.",
+            announcement: "",
+        },
+        default_enabled: false,
     },
     FeatureSpec {
         id: Feature::SkillEnvVarDependencyPrompt,

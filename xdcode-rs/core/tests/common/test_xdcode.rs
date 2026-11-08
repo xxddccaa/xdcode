@@ -31,7 +31,7 @@ use xdcode_core::config::Config;
 use xdcode_core::resolve_installation_id;
 use xdcode_core::shell::Shell;
 use xdcode_core::shell::get_shell_by_model_provided_path;
-use xdcode_core::thread_store_from_config;
+use xdcode_core::thread_store_from_config_with_cleanup;
 use xdcode_core::windows_sandbox::WindowsSandboxLevelExt;
 use xdcode_exec_server::CreateDirectoryOptions;
 use xdcode_exec_server::ExecutorFileSystem;
@@ -831,10 +831,19 @@ impl TestXdcodeBuilder {
         environment_manager: Arc<xdcode_exec_server::EnvironmentManager>,
     ) -> anyhow::Result<TestXdcode> {
         let state_db = xdcode_core::init_state_db(&config).await;
-        let thread_store = self
-            .thread_store
-            .clone()
-            .unwrap_or_else(|| thread_store_from_config(&config, state_db.clone()));
+        let thread_store = self.thread_store.clone().unwrap_or_else(|| {
+            let sqlite = config.sqlite_config().clone();
+            thread_store_from_config_with_cleanup(&config, state_db.clone(), move |thread_ids| {
+                let sqlite = sqlite.clone();
+                Box::pin(async move {
+                    xdcode_agent_message_board_host::delete_agent_message_boards(
+                        &sqlite,
+                        &thread_ids,
+                    )
+                    .await
+                })
+            })
+        });
         let installation_id = resolve_installation_id(&config.xdcode_home).await?;
         let user_instructions_provider =
             self.user_instructions_provider.clone().unwrap_or_else(|| {
@@ -853,7 +862,10 @@ impl TestXdcodeBuilder {
             .or_else(|| xdcode_utils_cargo_bin::cargo_bin("xdcode-code-mode-host").ok());
         let thread_manager = Arc::new_cyclic(|manager| {
             let mut extensions = self.extensions.to_builder();
-            xdcode_core::install_agent_message_board(&mut extensions, manager.clone());
+            xdcode_agent_message_board_host::install_agent_message_board(
+                &mut extensions,
+                manager.clone(),
+            );
             if config.features.enabled(Feature::GuardianV2) {
                 xdcode_guardian_v2::install(&mut extensions, auth_manager.clone(), manager.clone());
             } else {

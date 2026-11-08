@@ -3,6 +3,7 @@ use std::time::Duration;
 use anyhow::Error;
 use anyhow::Result;
 use app_test_support::ChatGptAuthFixture;
+use app_test_support::MockResponsesConfig;
 use app_test_support::TestAppServer;
 use app_test_support::write_chatgpt_auth;
 use app_test_support::write_models_cache;
@@ -28,6 +29,12 @@ use xdcode_app_server_protocol::ModelServiceTier;
 use xdcode_app_server_protocol::ModelUpgradeInfo;
 use xdcode_app_server_protocol::ReasoningEffortOption;
 use xdcode_app_server_protocol::RequestId;
+use xdcode_app_server_protocol::ThreadStartParams;
+use xdcode_app_server_protocol::ThreadStartResponse;
+use xdcode_app_server_protocol::TurnCompletedNotification;
+use xdcode_app_server_protocol::TurnStartParams;
+use xdcode_app_server_protocol::TurnStartResponse;
+use xdcode_app_server_protocol::TurnStatus;
 use xdcode_config::types::AuthCredentialsStoreMode;
 use xdcode_login::AuthKeyringBackendKind;
 use xdcode_login::login_with_api_key;
@@ -38,6 +45,116 @@ use xdcode_protocol::model_types::ModelsResponse;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 const INVALID_REQUEST_ERROR_CODE: i64 = -32600;
+
+#[tokio::test]
+async fn scoped_provider_queries_preserve_thread_routing_and_configuration() -> Result<()> {
+    let provider_a = MockServer::start().await;
+    let provider_b = MockServer::start().await;
+    let home = TempDir::new()?;
+    let config = format!(
+        r#"# preserve this comment
+model = "shared-model"
+model_provider = "provider_a"
+approval_policy = "never"
+sandbox_mode = "read-only"
+
+[model_providers.provider_a]
+name = "Provider A"
+base_url = "{}/v1"
+wire_api = "responses"
+experimental_bearer_token = "catalog-query-test-a"
+
+[model_providers.provider_b]
+name = "Provider B"
+base_url = "{}/v1"
+wire_api = "responses"
+experimental_bearer_token = "catalog-query-test-b"
+"#,
+        provider_a.uri(),
+        provider_b.uri(),
+    );
+    let path = home.path().join("config.toml");
+    std::fs::write(&path, &config)?;
+    let mut server = TestAppServer::builder()
+        .with_xdcode_home(home.path())
+        .without_auto_env()
+        .build_initialized()
+        .await?;
+    let before: ModelListResponse = server
+        .request(|request_id| ClientRequest::ModelList {
+            request_id,
+            params: ModelListParams::default(),
+        })
+        .await?;
+    assert!(!before.data.is_empty());
+    let scoped: ModelListResponse = server
+        .request(|request_id| ClientRequest::ModelList {
+            request_id,
+            params: ModelListParams {
+                model_provider: Some("provider_b".into()),
+                ..Default::default()
+            },
+        })
+        .await?;
+    assert!(!scoped.data.is_empty());
+    let unknown_id = server
+        .send_list_models_request(ModelListParams {
+            model_provider: Some("unknown_provider".into()),
+            ..Default::default()
+        })
+        .await?;
+    let unknown = timeout(
+        DEFAULT_TIMEOUT,
+        server.read_stream_until_error_message(RequestId::Integer(unknown_id)),
+    )
+    .await??;
+    assert_eq!(unknown.error.code, INVALID_REQUEST_ERROR_CODE);
+    assert!(unknown.error.message.contains("unknown_provider"));
+    let after: ModelListResponse = server
+        .request(|request_id| ClientRequest::ModelList {
+            request_id,
+            params: ModelListParams::default(),
+        })
+        .await?;
+    assert_eq!(after, before);
+    let started: ThreadStartResponse = server
+        .request(|request_id| ClientRequest::ThreadStart {
+            request_id,
+            params: ThreadStartParams::default(),
+        })
+        .await?;
+    assert_eq!(started.model_provider, "provider_a");
+    let response = core_test_support::responses::mount_sse_once(
+        &provider_a,
+        core_test_support::responses::sse_completed("provider-a-response"),
+    )
+    .await;
+    let _: TurnStartResponse = server
+        .request(|request_id| ClientRequest::TurnStart {
+            request_id,
+            params: TurnStartParams {
+                thread_id: started.thread.id,
+                input: vec![xdcode_app_server_protocol::UserInput::Text {
+                    text: "Check the current provider.".into(),
+                    text_elements: Vec::new(),
+                }],
+                ..Default::default()
+            },
+        })
+        .await?;
+    let completed: TurnCompletedNotification =
+        timeout(DEFAULT_TIMEOUT, server.read_notification("turn/completed")).await??;
+    assert_eq!(completed.turn.status, TurnStatus::Completed);
+    let request = response.single_request();
+    assert_eq!(request.body_json()["model"], "shared-model");
+    assert_eq!(
+        request.header("authorization"),
+        Some("Bearer catalog-query-test-a".into())
+    );
+    assert!(provider_b.received_requests().await.unwrap().is_empty());
+    assert_eq!(std::fs::read_to_string(path)?, config);
+    Ok(())
+}
 
 #[test_case(None, None, true; "default on")]
 #[test_case(None, Some(false), true; "app rollback")]
@@ -153,6 +270,7 @@ requires_hosted_auth = true
         .request(|request_id| ClientRequest::ModelList {
             request_id,
             params: ModelListParams {
+                model_provider: None,
                 limit: Some(100),
                 include_hidden: Some(true),
                 cursor: None,
@@ -258,6 +376,7 @@ fn expected_visible_models() -> Vec<Model> {
 #[tokio::test]
 async fn list_models_returns_all_models_with_large_limit() -> Result<()> {
     let xdcode_home = TempDir::new()?;
+    MockResponsesConfig::new("http://127.0.0.1:9").write(xdcode_home.path())?;
     write_models_cache(xdcode_home.path()).await?;
     let mut mcp = TestAppServer::builder()
         .with_xdcode_home(xdcode_home.path())
@@ -271,6 +390,7 @@ async fn list_models_returns_all_models_with_large_limit() -> Result<()> {
         .request(|request_id| ClientRequest::ModelList {
             request_id,
             params: ModelListParams {
+                model_provider: None,
                 limit: Some(100),
                 cursor: None,
                 include_hidden: None,
@@ -288,6 +408,7 @@ async fn list_models_returns_all_models_with_large_limit() -> Result<()> {
 #[tokio::test]
 async fn list_models_includes_hidden_models() -> Result<()> {
     let xdcode_home = TempDir::new()?;
+    MockResponsesConfig::new("http://127.0.0.1:9").write(xdcode_home.path())?;
     write_models_cache(xdcode_home.path()).await?;
     let mut mcp = TestAppServer::builder()
         .with_xdcode_home(xdcode_home.path())
@@ -301,6 +422,7 @@ async fn list_models_includes_hidden_models() -> Result<()> {
         .request(|request_id| ClientRequest::ModelList {
             request_id,
             params: ModelListParams {
+                model_provider: None,
                 limit: Some(100),
                 cursor: None,
                 include_hidden: Some(true),
@@ -423,6 +545,7 @@ model_catalog_url = "{server_uri}/v1/models"
         .await?;
     let request_id = mcp
         .send_list_models_request(ModelListParams {
+            model_provider: None,
             limit: Some(100),
             cursor: None,
             include_hidden: None,
@@ -487,6 +610,7 @@ model_catalog_url = "{server_uri}/v1/models"
 #[tokio::test]
 async fn list_models_pagination_works() -> Result<()> {
     let xdcode_home = TempDir::new()?;
+    MockResponsesConfig::new("http://127.0.0.1:9").write(xdcode_home.path())?;
     write_models_cache(xdcode_home.path()).await?;
     let mut mcp = TestAppServer::builder()
         .with_xdcode_home(xdcode_home.path())
@@ -506,6 +630,7 @@ async fn list_models_pagination_works() -> Result<()> {
             .request(|request_id| ClientRequest::ModelList {
                 request_id,
                 params: ModelListParams {
+                    model_provider: None,
                     limit: Some(1),
                     cursor: cursor.clone(),
                     include_hidden: None,
@@ -533,6 +658,7 @@ async fn list_models_pagination_works() -> Result<()> {
 #[tokio::test]
 async fn list_models_rejects_invalid_cursor() -> Result<()> {
     let xdcode_home = TempDir::new()?;
+    MockResponsesConfig::new("http://127.0.0.1:9").write(xdcode_home.path())?;
     write_models_cache(xdcode_home.path()).await?;
     let mut mcp = TestAppServer::builder()
         .with_xdcode_home(xdcode_home.path())
@@ -542,6 +668,7 @@ async fn list_models_rejects_invalid_cursor() -> Result<()> {
 
     let request_id = mcp
         .send_list_models_request(ModelListParams {
+            model_provider: None,
             limit: None,
             cursor: Some("invalid".to_string()),
             include_hidden: None,

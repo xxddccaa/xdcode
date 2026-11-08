@@ -337,21 +337,41 @@ async fn replayed_delegated_tool_output_is_attributed_without_seeding_composer_h
         name: "send_message_to_thread".to_string(),
         namespace: Some("xdcode_tui".to_string()),
         output: FunctionCallOutputBody::Text(
-            "<xdcode_delegation>\n  <source_thread_id>source-task</source_thread_id>\n  <input>Follow &lt;up&gt; &amp; report</input>\n</xdcode_delegation>".to_string(),
+            concat!(
+                "<xdcode_delegation>\n  <source_thread_id>source-task</source_thread_id>\n  <input>",
+                "**Follow up** on [the PR](https://example.com/pr).\n\n",
+                "- Review `&lt;up&gt; &amp; report`.\n",
+                "- Share the result.",
+                "</input>\n</xdcode_delegation>",
+            )
+            .to_string(),
         ),
     };
+
+    chat.handle_server_notification(
+        ServerNotification::ItemCompleted(ItemCompletedNotification {
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            item: item.clone(),
+            completed_at_ms: 0,
+        }),
+        None,
+    );
+    let live = drain_insert_history(&mut rx);
+
     chat.replay_thread_item(
         item.clone(),
         "turn-1".to_string(),
         ReplayKind::ResumeInitialMessages,
     );
-
     let cells = drain_insert_history(&mut rx);
     assert_eq!(cells.len(), 1);
+    assert_eq!(live, cells);
     assert_chatwidget_snapshot!(
         "replayed_delegated_tool_output",
         lines_to_single_string(&cells[0])
     );
+
     let projected = crate::thread_transcript::thread_items_to_transcript_cells(
         /*thread_id*/ None,
         &chat.config.cwd,
@@ -362,10 +382,23 @@ async fn replayed_delegated_tool_output_is_attributed_without_seeding_composer_h
     assert_eq!(
         projected
             .iter()
-            .map(|cell| lines_to_single_string(&cell.transcript_lines(/*width*/ 80)))
+            .map(|cell| cell.transcript_lines(80))
             .collect::<Vec<_>>(),
-        vec![lines_to_single_string(&cells[0])]
+        cells,
     );
+    assert_eq!(
+        projected[0]
+            .transcript_hyperlink_lines(80)
+            .iter()
+            .flat_map(|line| &line.hyperlinks)
+            .map(|link| link.destination.as_str())
+            .collect::<std::collections::BTreeSet<_>>(),
+        std::collections::BTreeSet::from(["https://example.com/pr"]),
+    );
+    let narrow = projected[0].transcript_hyperlink_lines(32);
+    let first = narrow[0].source.as_ref().unwrap();
+    let continuation = narrow[1].source.as_ref().unwrap();
+    assert!(std::sync::Arc::ptr_eq(&first.text, &continuation.text));
 
     chat.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
     assert_eq!(chat.bottom_pane.composer_text(), "");

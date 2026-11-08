@@ -754,40 +754,19 @@ fn apply_blocking_to_resolved_file(
         return Ok(());
     }
 
-    let write_paths = resolve_symlink_write_paths(resolved_config_file)?;
-    let serialized = match write_paths.read_path {
-        Some(path) => match std::fs::read_to_string(&path) {
-            Ok(contents) => contents,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
-            Err(err) => return Err(err.into()),
-        },
-        None => String::new(),
-    };
+    let mut transaction =
+        xdcode_config::model_catalog::ConfigurationFile::open(resolved_config_file)?;
+    apply_to_document(transaction.document(), edits)?;
+    transaction.finish(false)?;
+    Ok(())
+}
 
-    let doc = if serialized.is_empty() {
-        DocumentMut::new()
-    } else {
-        serialized.parse::<DocumentMut>()?
-    };
-
-    let mut document = ConfigDocument::new(doc);
-    let mut mutated = false;
-
+pub fn apply_to_document(document: &mut DocumentMut, edits: &[ConfigEdit]) -> anyhow::Result<()> {
+    let mut editing = ConfigDocument::new(std::mem::take(document));
     for edit in edits {
-        mutated |= document.apply(edit)?;
+        editing.apply(edit)?;
     }
-
-    if !mutated {
-        return Ok(());
-    }
-
-    write_atomically(&write_paths.write_path, &document.doc.to_string()).with_context(|| {
-        format!(
-            "failed to persist config at {}",
-            write_paths.write_path.display()
-        )
-    })?;
-
+    *document = editing.doc;
     Ok(())
 }
 

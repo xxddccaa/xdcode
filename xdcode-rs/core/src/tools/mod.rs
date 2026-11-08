@@ -31,7 +31,7 @@ pub(crate) use approvals::ApprovalContext;
 pub(crate) use approvals::ApprovalResolution;
 pub(crate) use approvals::ApprovalResolutionSource;
 pub(crate) use executed_tool_calls::ExecutedToolCalls;
-pub(crate) use multi_agent_tool::MULTI_AGENT_V2_NAMESPACE_DESCRIPTION;
+pub use multi_agent_tool::MULTI_AGENT_V2_NAMESPACE_DESCRIPTION;
 pub use router::ToolRouter;
 use xdcode_features::Feature;
 use xdcode_protocol::exec_output::ExecToolCallOutput;

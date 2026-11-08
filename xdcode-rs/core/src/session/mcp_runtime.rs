@@ -60,7 +60,7 @@ impl Session {
     pub(crate) async fn prepare_mcp_call(
         self: &Arc<Self>,
         advertised_tool: &ToolInfo,
-    ) -> Option<PreparedMcpCall> {
+    ) -> anyhow::Result<PreparedMcpCall> {
         self.refresh_mcp_if_dirty().await;
         self.services
             .mcp_runtime
@@ -358,18 +358,18 @@ impl Session {
             }),
         );
         let mcp_config = Arc::new(config);
-        let runtime_context = McpRuntimeContext::new(
-            self.services.turn_environments.environment_manager(),
-            desired.local_process_cwd.clone(),
-        )
-        .with_selected_environments(
-            desired.environments.all_selections().into(),
-            desired.environments.ready_environment_handles(),
-        );
+        let runtime_context =
+            self.mcp_runtime_context(&desired.environments, &desired.local_process_cwd);
         McpRuntimeInput {
             network_policy_metadata: None,
             startup_policy: if matches!(desired.session_source, SessionSource::SubAgent(_)) {
-                McpStartupPolicy::LazyWhenCached
+                McpStartupPolicy::DeferCachedServers
+            } else if desired
+                .config
+                .features
+                .enabled(Feature::McpLazyStdioStartup)
+            {
+                McpStartupPolicy::DeferCachedStdio
             } else {
                 McpStartupPolicy::Eager
             },

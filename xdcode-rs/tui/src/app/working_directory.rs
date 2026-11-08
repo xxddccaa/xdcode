@@ -219,6 +219,14 @@ impl App {
             managed_worktree.as_ref().map(|(_, _, mode, _)| mode),
             Some(crate::app_event::ManagedWorktreeMode::New)
         );
+        let inherited_selection = if is_new_worktree {
+            match self.confirmed_new_session_selection().await {
+                Ok(selection) => selection,
+                Err(error) => return self.working_directory_error(error.to_string()),
+            }
+        } else {
+            None
+        };
         let rollout = self.chat_widget.rollout_path();
         let mut has_rollout = rollout.as_deref().is_some_and(rollout_path_is_resumable);
         let channels = &self.thread_event_channels;
@@ -391,7 +399,10 @@ impl App {
             return;
         }
         let local_settings = self.local_settings.reloaded(&config);
-        let keymap = match RuntimeKeymap::from_config(&local_settings.tui.keymap) {
+        let keymap = match RuntimeKeymap::for_session(
+            &local_settings.tui.keymap,
+            local_settings.workspace_enabled(&config),
+        ) {
             Ok(keymap) => keymap,
             Err(error) => return self.chat_widget.add_error_message(error),
         };
@@ -405,6 +416,9 @@ impl App {
                 &self.cli_kv_overrides,
                 &self.harness_overrides,
             );
+            if let Some(selection) = &inherited_selection {
+                selection.apply_to_config(&mut config);
+            }
         }
         // Config reads and folder consent can overlap work from another client.
         if !self
@@ -461,12 +475,13 @@ impl App {
                 .await
         } else {
             app_server
-                .start_thread_with_session_start_source(
+                .start_thread_with_inherited_selection(
                     &local_settings,
                     &config,
                     /*session_start_source*/ None,
                     /*remote_cwd_override*/ None,
                     selected_profile.as_ref(),
+                    inherited_selection.as_ref(),
                 )
                 .await
         };
@@ -547,6 +562,9 @@ impl App {
             if let Err(error) = app_server.thread_unsubscribe(tracked_id).await {
                 tracing::warn!("failed to unsubscribe tracked thread {tracked_id}: {error}");
             }
+        }
+        if is_new_worktree {
+            self.chat_widget.consume_new_session_command_draft();
         }
         let attach = ManagedWorktreeAttach {
             started: transitioned,

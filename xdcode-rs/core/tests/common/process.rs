@@ -40,7 +40,7 @@ async fn wait_for_process_exit_inner(pid: String) -> anyhow::Result<()> {
 
 pub async fn wait_for_process_exit(pid: &str) -> anyhow::Result<()> {
     let pid = pid.to_string();
-    tokio::time::timeout(Duration::from_secs(2), wait_for_process_exit_inner(pid))
+    tokio::time::timeout(Duration::from_secs(5), wait_for_process_exit_inner(pid))
         .await
         .context("timed out waiting for process to exit")??;
 

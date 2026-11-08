@@ -6,6 +6,7 @@ use pretty_assertions::assert_eq;
 use tempfile::tempdir;
 use tokio::sync::Semaphore;
 use xdcode_exec_server::ExecutorFileSystem;
+use xdcode_exec_server::FileSystemEnvironmentAccessor;
 use xdcode_exec_server::LOCAL_FS;
 use xdcode_protocol::protocol::SkillScope;
 use xdcode_skills::SkillMetadata;
@@ -15,6 +16,7 @@ use xdcode_utils_path_uri::PathUri;
 
 use crate::loader::HostSkillRoot;
 use crate::loader::MAX_CONCURRENT_ROOT_SCANS;
+use crate::loader::SKILLS_METADATA_FILENAME;
 use crate::loader::io_test_support::ManifestMetadataBehavior;
 use crate::loader::io_test_support::RecordingFileSystem;
 use crate::loader::load_and_merge_host_skill_roots;
@@ -37,7 +39,9 @@ async fn host_loading_reuses_walk_inventory_for_symlinked_skill_pack() {
         )
         .expect("skill");
     }
-    let metadata_path = skills_root.join("first/agents/xdcode.yaml");
+    let metadata_path = skills_root
+        .join("first/agents")
+        .join(SKILLS_METADATA_FILENAME);
     fs::create_dir_all(metadata_path.parent().expect("metadata parent")).expect("metadata dir");
     fs::write(
         &metadata_path,
@@ -55,12 +59,13 @@ async fn host_loading_reuses_walk_inventory_for_symlinked_skill_pack() {
         ManifestMetadataBehavior::Immediate,
     ));
     let file_system: Arc<dyn ExecutorFileSystem> = recording.clone();
+    let access = FileSystemEnvironmentAccessor::unrestricted(&file_system);
     let root_scan_slots = Semaphore::new(MAX_CONCURRENT_ROOT_SCANS);
     let future = load_and_merge_host_skill_roots(
         vec![HostSkillRoot::host(
             host_root.abs(),
             SkillScope::User,
-            file_system,
+            &access,
         )],
         &root_scan_slots,
         /*restriction_product*/ None,
@@ -123,7 +128,7 @@ async fn host_loading_reuses_walk_inventory_for_symlinked_skill_pack() {
         calls
             .metadata_files
             .iter()
-            .all(|path| path.basename().as_deref() != Some("xdcode.yaml"))
+            .all(|path| path.basename().as_deref() != Some(SKILLS_METADATA_FILENAME))
     );
     let manifest_uri =
         PathUri::from_host_native_path(dunce::canonicalize(manifest_path).unwrap()).unwrap();

@@ -4,10 +4,14 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use crate::width::display_width;
 
-pub(crate) fn line_width(line: &Line<'_>) -> usize {
-    line.iter()
-        .map(|span| display_width(span.content.as_ref()))
+pub(crate) fn span_width(span: &Span<'_>) -> usize {
+    span.styled_graphemes(ratatui::style::Style::default())
+        .map(|grapheme| usize::from(ratatui::buffer::CellWidth::cell_width(grapheme.symbol)))
         .sum()
+}
+
+pub(crate) fn line_width(line: &Line<'_>) -> usize {
+    line.iter().map(span_width).sum()
 }
 
 pub(crate) fn truncate_line_to_width(line: Line<'static>, max_width: usize) -> Line<'static> {

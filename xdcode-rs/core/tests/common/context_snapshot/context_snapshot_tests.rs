@@ -42,6 +42,52 @@ fn captured(body: &Value) -> String {
 }
 
 #[test]
+fn active_model_configuration_is_rewritten_only_for_known_guidance_snapshots() {
+    let first = message(
+        "developer",
+        "<xdcode_model_configuration>{\"config_file\":\"/tmp/first-config.toml\",\"profile\":null}</xdcode_model_configuration>\nUse the confirmed configuration.",
+    );
+    let second = message(
+        "developer",
+        "<xdcode_model_configuration>{\"config_file\":\"/tmp/second-config.toml\",\"profile\":\"worker\"}</xdcode_model_configuration>\nUse the confirmed configuration.",
+    );
+    assert_eq!(rewritten(&[first.clone()]), rewritten(&[second]));
+    assert!(rewritten(&[first.clone()]).contains("<XDCODE_MODEL_CONFIGURATION>"));
+    assert!(detailed(&[first]).contains("/tmp/first-config.toml"));
+    assert!(
+        rewritten(&[message(
+            "user",
+            "<xdcode_model_configuration>user input</xdcode_model_configuration>"
+        )])
+        .contains("user input")
+    );
+}
+
+#[test]
+fn only_exact_bundled_instructions_with_application_identity_are_rewritten() {
+    let application_identity = include_str!("../../../../prompts/templates/identity.md").trim_end();
+    let bundled = xdcode_models_manager::model_info::BASE_INSTRUCTIONS;
+    let rendered = format!("{bundled}\n\n{application_identity}");
+    assert!(is_bundled_model_instructions(&rendered));
+    assert!(is_bundled_model_instructions(application_identity));
+    assert!(!is_bundled_model_instructions(&format!(
+        "{bundled}\nCustom project instruction\n\n{application_identity}"
+    )));
+    assert!(!is_bundled_model_instructions(&format!(
+        "{rendered}\nCustom project instruction"
+    )));
+    let snapshot = format_context_snapshot(
+        "test",
+        &[SnapshotEntry::body(
+            &json!({"input": [message("developer", &rendered)]}),
+        )],
+        &ContextSnapshotOptions::default().rewrite_known_segments(),
+    );
+    assert!(snapshot.contains("<MODEL_INSTRUCTIONS>"));
+    assert!(rewritten(&[message("user", &rendered)]).contains("# Application identity"));
+}
+
+#[test]
 fn lite_tool_catalog_and_code_calls_are_visible() {
     let rendered = render_test_items(
         &[

@@ -28,6 +28,12 @@ impl ChatComposer {
         if area.is_empty() {
             return;
         }
+        if options.unfocused {
+            if let Some(content) = self.footer.status_line_value.as_ref() {
+                crate::bottom_pane::footer::render_unfocused_status(content.to_string(), area, buf);
+            }
+            return;
+        }
         let mut props = self.footer_props();
         let show_cycle_hint = !props.is_task_running
             && !self.blocks_direct_input

@@ -500,6 +500,7 @@ impl<'a> SandboxAttempt<'a> {
             .transform(SandboxTransformRequest {
                 command,
                 permissions: self.permissions,
+                workspace_roots: None,
                 sandbox: self.sandbox,
                 enforce_managed_network: self.enforce_managed_network,
                 environment_id,
@@ -535,6 +536,7 @@ impl<'a> SandboxAttempt<'a> {
             .transform(SandboxTransformRequest {
                 command,
                 permissions: self.permissions,
+                workspace_roots: None,
                 // The exec-server must receive the native command, not this host's wrapper.
                 sandbox: SandboxType::None,
                 enforce_managed_network: self.enforce_managed_network,

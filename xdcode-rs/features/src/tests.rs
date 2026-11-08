@@ -66,6 +66,42 @@ fn under_development_features_are_disabled_by_default() {
 }
 
 #[test]
+fn selected_main_experiments_require_independent_opt_in_and_can_be_disabled() {
+    let experiments = [
+        Feature::TuiWorkspace,
+        Feature::McpConnectionSharing,
+        Feature::McpLazyStdioStartup,
+        Feature::AgentMessageBoard,
+        Feature::AgentMessageBoardMcp,
+        Feature::SkillCatalogDeltas,
+    ];
+    let defaults = Features::with_defaults();
+    for experiment in experiments {
+        assert!(!defaults.enabled(experiment), "{}", experiment.key());
+        let configured = FeaturesToml::from(BTreeMap::from([(experiment.key().to_string(), true)]));
+        let mut features = Features::with_defaults();
+        features.apply_toml(&configured);
+        assert!(features.enabled(experiment), "{}", experiment.key());
+        assert_eq!(
+            features.enabled(Feature::MultiAgentV2),
+            defaults.enabled(Feature::MultiAgentV2)
+        );
+        for other in experiments {
+            assert_eq!(
+                features.enabled(other),
+                other == experiment,
+                "{}",
+                other.key()
+            );
+        }
+        features.disable(experiment);
+        for other in experiments {
+            assert!(!features.enabled(other), "{}", other.key());
+        }
+    }
+}
+
+#[test]
 fn tool_registry_config_is_not_a_feature_toggle() {
     let features: FeaturesToml = toml::from_str(
         "[tool_registry]\nerror_on_tool_collisions = true\nturn_metadata_includes_tool_info = true\n",

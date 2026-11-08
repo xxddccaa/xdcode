@@ -152,7 +152,12 @@ fn unavailable_thread_dispatches_recovery_and_local_commands() {
             ),
             InputResult::Command(command),
         );
-        assert_eq!(composer.current_text(), "");
+        let expected_draft = if command == SlashCommand::New {
+            "/new"
+        } else {
+            ""
+        };
+        assert_eq!(composer.current_text(), expected_draft);
     }
 }
 

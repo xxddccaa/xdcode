@@ -64,31 +64,38 @@ impl App {
     }
 
     pub(super) fn refresh_mcp_startup_expected_servers_from_config(&mut self) {
-        if self
+        let configured_servers = self.config.mcp_servers.get();
+        let is_subagent = self
             .current_displayed_thread_id()
             .zip(self.primary_thread_id)
             .is_some_and(|(thread_id, primary_thread_id)| {
                 self.agent_navigation.is_parent_owned(thread_id)
                     || (thread_id != primary_thread_id
                         && !self.side_threads.contains_key(&thread_id))
-            })
-        {
-            // Subagents can defer cached servers indefinitely, so only servers
-            // that actually report startup should keep their status running.
+            });
+        if is_subagent {
             self.chat_widget
                 .set_mcp_startup_expected_servers(std::iter::empty());
             return;
         }
 
-        let enabled_config_mcp_servers: Vec<String> = self
-            .config
-            .mcp_servers
-            .get()
+        let enabled_servers = configured_servers
             .iter()
-            .filter_map(|(name, server)| server.enabled.then_some(name.clone()))
-            .collect();
-        self.chat_widget
-            .set_mcp_startup_expected_servers(enabled_config_mcp_servers);
+            .filter(|(_, server)| server.enabled);
+        if self
+            .config
+            .features
+            .enabled(xdcode_features::Feature::McpLazyStdioStartup)
+        {
+            self.chat_widget.set_initial_mcp_startup_expected_servers(
+                enabled_servers
+                    .filter(|(_, server)| !server.can_defer_stdio_startup())
+                    .map(|(name, _)| name.clone()),
+            );
+        } else {
+            self.chat_widget
+                .set_mcp_startup_expected_servers(enabled_servers.map(|(name, _)| name.clone()));
+        }
     }
 
     pub(super) async fn handle_app_server_event(
@@ -166,8 +173,18 @@ impl App {
     async fn handle_server_notification_event(
         &mut self,
         app_server_client: &AppServerSession,
-        notification: ServerNotification,
+        mut notification: ServerNotification,
     ) {
+        if let ServerNotification::TurnModerationMetadata(metadata) = &mut notification
+            && (!super::safety_recourse::supports_server(app_server_client)
+                || self
+                    .primary_thread_id
+                    .is_none_or(|id| id.to_string() != metadata.thread_id))
+            && let Some(metadata) = metadata.metadata.as_object_mut()
+        {
+            metadata.remove("safety_block");
+            metadata.remove("safety_recourse");
+        }
         // A picker can leave an old runtime's close notification queued while the same thread
         // is resumed. Thread IDs survive reloads, so confirm that the displayed thread is still
         // unloaded before routing a close that would exit the TUI or switch away from it.
@@ -620,9 +637,9 @@ impl App {
             return;
         }
         if let ServerRequest::DynamicToolCall { request_id, params } = &request {
+            let tui_tool = params.namespace.as_deref() == Some(crate::dynamic_tools::NAMESPACE);
             if self.dynamic_tool_tasks.contains_key(request_id)
-                || (params.namespace.as_deref() != Some(crate::dynamic_tools::NAMESPACE)
-                    && !app_server_client.uses_embedded_app_server())
+                || (!tui_tool && !app_server_client.uses_embedded_app_server())
             {
                 return;
             }
@@ -633,7 +650,7 @@ impl App {
                     app_server_client.thread_tool_transport(),
                     crate::dynamic_tools_mcp::ThreadToolTransport::Mcp(_)
                 );
-            if app_server_client.uses_embedded_app_server()
+            if !tui_tool
                 || requires_mcp
                 || xdcode_protocol::ThreadId::from_string(&params.thread_id)
                     .is_ok_and(|thread_id| self.abandoned_side_threads.contains(&thread_id))
@@ -641,7 +658,7 @@ impl App {
                 let response = crate::dynamic_tools::failure_response(if requires_mcp {
                     "TUI task tools require the approval-gated MCP server"
                 } else {
-                    "TUI dynamic tools require an active external task"
+                    "TUI dynamic tools require an active task in the TUI namespace"
                 });
                 self.app_event_tx.send(AppEvent::DynamicToolCallCompleted {
                     request_id: request_id.clone(),

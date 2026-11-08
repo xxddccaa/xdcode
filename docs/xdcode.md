@@ -21,22 +21,25 @@ The source repository's `upstream.json` is the authority for the product version
 and baseline. Installed packages record that metadata in `build-info.json` under
 `upstream`:
 
-- Product version: `0.165.0`, upstream stable tag `rust-v0.165.0`.
+- Product version: `0.167.0`; actual upstream baseline: `0.165.0`, tag `rust-v0.165.0`.
 - Selected upstream source: `360319d8dee62d87e2d59fc0c21805d79519cfed`.
 - Release branch base: `b559e6a3988489b636e1e79672eff330bf0679dc`.
 
-The 0.165.0 revision preserves the [unified model catalog](model-configuration.md),
+The 0.167.0 maintenance revision preserves the [unified model catalog](model-configuration.md),
 provider switching, project preferences and the bundled configuration skill.
 It fixes Plan-to-implementation transitions and retries temporary rate limits
 until recovery or cancellation. The build ID distinguishes each release. See
-[the upgrade record](../UPSTREAM_0.165.0.md) for scope and validation, and each
+[the selective maintenance record](../UPSTREAM_0.167.0.md) and
+[the baseline upgrade record](../UPSTREAM_0.165.0.md) for scope and validation, and each
 build's receipt for its actual source and artifact identity.
 
 Stable tags can be on a release branch; a nearest-ancestor `git describe` on
 main can return an unrelated old version. Update the metadata deliberately when
-transplanting an upstream baseline. The tooling verifies that `version` agrees
-with `upstream_tag` and the Cargo workspace package version before building; it
-does not invent a separate `0.1.0` product version.
+transplanting an upstream baseline. `version` identifies the xdcode product and
+must agree with Cargo and CLI manifests. `upstream_version` identifies the real
+upstream baseline and must agree with `upstream_tag`; old metadata without this
+field falls back to `version`. Selective backports do not imply a full upstream
+upgrade, even when the product version advances.
 
 A build ID distinguishes personal revisions, for example `personal1` or
 `g<12-character-source-commit>`. IDs accept letters, digits, dots, underscores
@@ -69,7 +72,7 @@ machine with:
 sudo apt-get update
 sudo apt-get install -y --no-install-recommends \
   build-essential clang libclang-dev cmake pkg-config binutils libcap-dev libssl-dev
-rustup target add --toolchain 1.95.0 x86_64-unknown-linux-gnu
+rustup target add --toolchain 1.99.1 x86_64-unknown-linux-gnu
 python3.11 --version
 ```
 
@@ -180,12 +183,12 @@ a trusted channel; a checksum alone does not authenticate the publisher.
 
 ## Install offline and upgrade manually
 
-Finish active tasks, stop xdcode's local daemon using its supported local daemon
+By default, finish active tasks, stop xdcode's local daemon using its supported local daemon
 control, and close any other xdcode process. Keep it stopped during installation.
 The installer refuses any same-user native `xdcode`, `xdcode-app-server`, or
 `xdcode-code-mode-host` process, plus live daemon PID records in the selected
-`XDCODE_HOME`. It checks again before activation, does not send signals, and has
-no force/bypass option. A malformed PID record is a refusal, not a reason to
+`XDCODE_HOME`. It checks again before activation and does not send signals.
+Without `--force`, a malformed PID record is a refusal, not a reason to
 erase daemon state automatically. Both `daemon.pid`/`daemon-updater.pid` and
 legacy `app-server.pid`/`app-server-updater.pid` are checked. Native Linux
 `processIdentity` (or legacy `linuxProcessIdentity`) records are matched against
@@ -196,11 +199,28 @@ cannot prove an extant non-zombie PID stale. The check is an observation of loca
 processes; it cannot prevent an unrelated launcher from starting a process
 concurrently. It does not coordinate other machines sharing a filesystem.
 
+Explicitly pass `--force` to install while existing xdcode processes keep running.
+This skips only active-process and daemon PID checks. Archive and payload checksums,
+path safety, the installation lock, runtime probes and refusal to overwrite an
+existing build all remain enforced. The new build is installed separately and the
+entrypoint is switched atomically; old builds, configuration and runtime data are
+retained. Running processes keep using their current builds and are not restarted
+or upgraded in place. Finish their tasks and restart them safely to use the new
+build. A new CLI and an old daemon may have incompatible protocols; `--force`
+does not resolve protocol or runtime-data compatibility.
+
 Transfer the three output files to the target machine and run:
 
 ```bash
-python3.11 xdcode-0.165.0-personal1-linux-x86_64.install.py \
-  xdcode-0.165.0-personal1-linux-x86_64.tar.gz
+python3.11 xdcode-0.167.0-personal1-linux-x86_64.install.py \
+  xdcode-0.167.0-personal1-linux-x86_64.tar.gz
+```
+
+To allow existing sessions to continue running during installation:
+
+```bash
+python3.11 xdcode-0.167.0-personal1-linux-x86_64.install.py --force \
+  xdcode-0.167.0-personal1-linux-x86_64.tar.gz
 ```
 
 Alternatively use the trusted repository's `scripts/xdcode/install.py`. Supply
@@ -241,7 +261,7 @@ Explicit paths allow isolated installation tests without changing home variables
 ```bash
 xdcode_test_root="$(mktemp -d)"
 python3.11 scripts/xdcode/install.py \
-  target/xdcode-dist/xdcode-0.165.0-personal1-linux-x86_64.tar.gz \
+  target/xdcode-dist/xdcode-0.167.0-personal1-linux-x86_64.tar.gz \
   --install-root "$xdcode_test_root/lib/xdcode" \
   --bin-dir "$xdcode_test_root/bin" \
   --xdcode-home "$xdcode_test_root/runtime"
@@ -358,11 +378,22 @@ that its sandbox, provider, MCP or daemon works.
 `.github/workflows/xdcode.yml` runs focused delivery checks. Its manually enabled
 build job prepares native GNU dependencies, builds/packages with the same scripts,
 installs the real package into an isolated directory, verifies its version, and
-uploads artifacts without publishing a release. The lead must still run the
-real release build, inspect native dependencies, verify the installed version
-and bundled bwrap, and test an independent runtime home, Responses/tool loop,
-MCP/skills/agents/resume/sandbox and outbound-service policy before declaring a
-release usable. Heavy CI builds also need sufficient runner memory/disk.
+uploads artifacts by default. Explicitly enable `publish_release` together with
+both platform builds to publish a GitHub Release only after the native build,
+package integrity, independent runtime, identity, Responses/tool loop, MCP,
+resume and reliability checks pass on Linux and Apple Silicon. Publication
+rechecks both archive digests, source commit, clean-build metadata and the Linux
+installer, uploads all five assets to a draft, then publishes it. Tags use
+`v<version>-g<source-commit-prefix>`. It does not replace an existing release.
+
+```sh
+gh workflow run xdcode.yml --ref main \
+  -f build_package=true -f build_macos=true -f publish_release=true
+```
+
+The lead must still review source, native dependencies and validation coverage
+before declaring a release usable. Heavy CI builds need sufficient runner
+memory/disk. A dispatched workflow is not evidence that a build passed.
 
 Identity acceptance also requires inspecting the complete instructions actually
 sent to the model, including fallback and realtime paths and bundled

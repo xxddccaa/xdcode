@@ -1,6 +1,87 @@
 //! Coverage for cache identity validation and conditional freshness updates.
 
 use super::*;
+
+#[tokio::test]
+async fn initialization_preserves_loaded_and_unsaved_catalogs() {
+    for persistence_fails in [false, true] {
+        let loaded = remote_model("loaded", "Loaded", 0);
+        let replacement = remote_model("replacement", "Replacement", 0);
+        let cache = TestModelsCache::failing(false, persistence_fails);
+        let endpoint =
+            TestModelsEndpoint::without_refresh(vec![vec![loaded.clone()], vec![replacement]]);
+        let manager = ProviderModelsManager::new_with_cache(cache, endpoint.clone(), None)
+            .with_provider_catalog();
+        manager
+            .raw_model_catalog(RefreshStrategy::Online, DEFAULT_HTTP_CLIENT_FACTORY)
+            .await;
+        manager
+            .ensure_initialized(DEFAULT_HTTP_CLIENT_FACTORY)
+            .await;
+        assert_eq!(endpoint.fetch_count(), 1);
+        assert_eq!(manager.remote_models.read().await.models, vec![loaded]);
+    }
+}
+
+#[tokio::test]
+async fn concurrent_initialization_fetches_only_once_even_for_empty_catalogs() {
+    for models in [Vec::new(), vec![remote_model("child", "Child", 0)]] {
+        let endpoint = TestModelsEndpoint::without_refresh(vec![models.clone()]);
+        let manager = Arc::new(
+            ProviderModelsManager::new_without_cache(endpoint.clone(), None)
+                .with_provider_catalog(),
+        );
+        let mut tasks = tokio::task::JoinSet::new();
+        for _ in 0..8 {
+            let manager = Arc::clone(&manager);
+            tasks.spawn(async move {
+                manager
+                    .ensure_initialized(DEFAULT_HTTP_CLIENT_FACTORY)
+                    .await
+            });
+        }
+        while let Some(result) = tasks.join_next().await {
+            result.expect("initialization task");
+        }
+        assert_eq!(endpoint.fetch_count(), 1);
+        assert_eq!(manager.remote_models.read().await.models, models);
+    }
+}
+
+#[tokio::test]
+async fn initialization_reuses_a_valid_cache_without_fetching() {
+    let models = vec![remote_model("cached-child", "Cached child", 0)];
+    let cache = TestModelsCache::with_entry(ModelsCacheEntry {
+        identity: Some("test-provider".into()),
+        fetched_at: Utc::now(),
+        etag: None,
+        client_version: Some(crate::client_version_to_whole()),
+        models: models.clone(),
+    });
+    let endpoint = TestModelsEndpoint::without_refresh(Vec::new());
+    let manager = ProviderModelsManager::new_with_cache(cache, endpoint.clone(), None)
+        .with_provider_catalog();
+    manager
+        .ensure_initialized(DEFAULT_HTTP_CLIENT_FACTORY)
+        .await;
+    assert_eq!(endpoint.fetch_count(), 0);
+    assert_eq!(manager.remote_models.read().await.models, models);
+}
+
+#[tokio::test]
+async fn disabled_discovery_does_not_initialize_an_api_key_provider() {
+    let endpoint =
+        TestModelsEndpoint::without_refresh(vec![vec![remote_model("private", "Private", 0)]]);
+    let auth =
+        AuthManager::from_auth_for_testing(XdcodeAuth::from_api_key("test-initialization-key"));
+    let manager = ProviderModelsManager::new_without_cache(endpoint.clone(), Some(auth))
+        .with_provider_catalog();
+    manager
+        .ensure_initialized(DEFAULT_HTTP_CLIENT_FACTORY)
+        .await;
+    assert_eq!(endpoint.fetch_count(), 0);
+    assert!(!manager.catalog_initialized.load(Ordering::Acquire));
+}
 use pretty_assertions::assert_eq;
 
 #[tokio::test]

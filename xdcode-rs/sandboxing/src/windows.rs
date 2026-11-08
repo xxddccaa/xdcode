@@ -30,6 +30,35 @@ pub struct WindowsSandboxFilesystemOverrides {
     pub additional_deny_write_paths: Vec<AbsolutePathBuf>,
 }
 
+impl WindowsSandboxFilesystemOverrides {
+    /// Resolve filesystem overrides for the selected Windows sandbox using the child's environment.
+    pub fn resolve(
+        sandbox: SandboxType,
+        permission_profile: &PermissionProfile,
+        sandbox_policy_cwd: &AbsolutePathBuf,
+        windows_sandbox_level: WindowsSandboxLevel,
+        workload_env: &HashMap<String, String>,
+    ) -> Result<Option<Self>, String> {
+        let use_elevated = windows_sandbox_uses_elevated_backend(windows_sandbox_level);
+        if use_elevated {
+            resolve_windows_elevated_filesystem_overrides(
+                sandbox,
+                permission_profile,
+                sandbox_policy_cwd,
+                use_elevated,
+                workload_env,
+            )
+        } else {
+            resolve_windows_restricted_token_filesystem_overrides(
+                sandbox,
+                permission_profile,
+                sandbox_policy_cwd,
+                windows_sandbox_level,
+            )
+        }
+    }
+}
+
 pub fn windows_sandbox_uses_elevated_backend(sandbox_level: WindowsSandboxLevel) -> bool {
     matches!(sandbox_level, WindowsSandboxLevel::Elevated)
 }

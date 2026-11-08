@@ -11,6 +11,27 @@ use crate::tui::test_support::make_test_tui;
 use pretty_assertions::assert_eq;
 use xdcode_state::SqliteConfig;
 
+fn configure_default_provider_fixture(path: &std::path::Path) -> Result<()> {
+    let content = std::fs::read_to_string(path)?;
+    let mut document = content.parse::<toml_edit::DocumentMut>()?;
+    if document.get("model_provider").is_none() {
+        document["model_provider"] = toml_edit::value("test-responses");
+    }
+    let mut provider = toml_edit::Table::new();
+    provider["name"] = toml_edit::value("Test Responses provider");
+    provider["base_url"] = toml_edit::value("http://127.0.0.1:9/v1");
+    provider["wire_api"] = toml_edit::value("responses");
+    provider["experimental_bearer_token"] = toml_edit::value("xdcode-local-mock-only");
+    let selected_provider = document["model_provider"]
+        .as_str()
+        .expect("fixture provider ID")
+        .to_owned();
+    document["model_providers"][&selected_provider] = toml_edit::Item::Table(provider.clone());
+    document["model_providers"]["test-responses"] = toml_edit::Item::Table(provider);
+    std::fs::write(path, document.to_string())?;
+    Ok(())
+}
+
 async fn confirm_permission_selection(
     app: &mut App,
     server: &mut AppServerSession,
@@ -237,7 +258,7 @@ async fn command_center_new_reads_server_defaults_for_actual_destination() -> Re
                     "client-model"
                 },
                 if mode == "local-default-provider" {
-                    "model_provider = \"ollama\"\n"
+                    "model_provider = \"server-responses\"\n"
                 } else {
                     ""
                 }
@@ -253,7 +274,7 @@ async fn command_center_new_reads_server_defaults_for_actual_destination() -> Re
                     "model = \"server-model\"\n"
                 },
                 if mode == "local" || mode == "local-cli-provider" || mode == "local-cli-model" {
-                    "model_provider = \"ollama\"\n"
+                    "model_provider = \"server-responses\"\n"
                 } else {
                     ""
                 }
@@ -265,6 +286,9 @@ async fn command_center_new_reads_server_defaults_for_actual_destination() -> Re
             "model = \"destination-model\"\nservice_tier = \"flex\"\n",
         )?;
         for home in [client_home.path(), server_home.path()] {
+            configure_default_provider_fixture(&home.join("config.toml"))?;
+        }
+        for home in [client_home.path(), server_home.path()] {
             crate::legacy_core::config::set_project_trust_level(
                 home,
                 destination.path(),
@@ -275,12 +299,12 @@ async fn command_center_new_reads_server_defaults_for_actual_destination() -> Re
         let mut app = make_test_app_with_channels().await.0;
         trust_launch_folder(&mut app);
         if mode == "local" && explicit_cwd {
-            app.harness_overrides.model_provider = Some("provider".into());
+            app.harness_overrides.model_provider = Some("test-responses".into());
         }
         if mode == "local-cli-provider" {
             app.cli_kv_overrides.push((
                 "model_provider".into(),
-                TomlValue::String("provider".into()),
+                TomlValue::String("test-responses".into()),
             ));
         }
         if mode == "local-cli-model" {
@@ -304,8 +328,12 @@ async fn command_center_new_reads_server_defaults_for_actual_destination() -> Re
                 launch.path().to_path_buf(),
             ));
         trust_launch_folder(&mut app);
-        let mut server_config = app.config.clone();
-        server_config.xdcode_home = server_home.path().to_path_buf().abs();
+        let mut server_config = ConfigBuilder::default()
+            .xdcode_home(server_home.path().to_path_buf())
+            .loader_overrides(app.loader_overrides.clone())
+            .fallback_cwd(Some(launch.path().to_path_buf()))
+            .build()
+            .await?;
         server_config.sqlite = SqliteConfig::new_for_testing(server_home.path().abs());
         let thread_mode = if mode.starts_with("remote") {
             crate::app_server_session::ThreadParamsMode::Remote
@@ -323,7 +351,8 @@ async fn command_center_new_reads_server_defaults_for_actual_destination() -> Re
                 ..LoaderOverrides::default()
             },
         )
-        .await?;
+        .await
+        .map_err(|error| error.wrap_err(format!("recording server for {mode}")))?;
         server.model_provider_override = app.harness_overrides.model_provider.clone();
         if launch_override {
             server = server.with_remote_cwd_override(Some(launch.path().to_path_buf()));
@@ -396,7 +425,7 @@ async fn command_center_new_reads_server_defaults_for_actual_destination() -> Re
                 },
                 &serde_json::json!(expected_model),
                 &if mode == "local-cli-provider" || (mode == "local" && explicit_cwd) {
-                    serde_json::json!("provider")
+                    serde_json::json!("test-responses")
                 } else {
                     serde_json::Value::Null
                 },
@@ -438,6 +467,9 @@ async fn command_center_new_preserves_explicit_choices_and_managed_defaults() ->
             server_home.path().join("config.toml"),
             "model = \"server-model\"\nmodel_reasoning_effort = \"high\"\n",
         )?;
+        for home in [client_home.path(), server_home.path()] {
+            configure_default_provider_fixture(&home.join("config.toml"))?;
+        }
         if choice == "managed" || choice == "profile_managed" || choice.starts_with("cli_") {
             std::fs::write(
                 server_home.path().join("requirements.toml"),
@@ -461,6 +493,7 @@ async fn command_center_new_preserves_explicit_choices_and_managed_defaults() ->
                         "model = \"profile-model\"\n"
                     },
                 )?;
+                configure_default_provider_fixture(&path)?;
                 app.loader_overrides.user_config_path = Some(path.abs());
                 app.loader_overrides.user_config_profile = Some("work".parse()?);
             }
@@ -692,8 +725,9 @@ async fn command_center_new_preserves_only_selected_server_profiles() -> Result<
     let home = tempdir()?;
     std::fs::write(
         home.path().join("config.toml"),
-        "approval_policy = \"never\"\napprovals_reviewer = \"auto_review\"\ndefault_permissions = \":workspace\"\n[permissions.server-only]\nextends = \":read-only\"\n",
+        "approval_policy = \"never\"\napprovals_reviewer = \"user\"\ndefault_permissions = \":workspace\"\n[permissions.server-only]\nextends = \":read-only\"\n",
     )?;
+    configure_default_provider_fixture(&home.path().join("config.toml"))?;
     let server_config = ConfigBuilder::default()
         .xdcode_home(home.path().into())
         .build()
@@ -1071,6 +1105,8 @@ async fn command_center_new_checkout_and_worktree_preserve_source_and_default_br
     use xdcode_worktree::CreateWorktree;
     use xdcode_worktree::WorktreeManager;
     use xdcode_worktree::WorktreeSettings;
+    let _tracing =
+        tracing::subscriber::set_default(tracing_subscriber::fmt().with_test_writer().finish());
     for (remote_only, stale_local) in [(false, false), (true, false), (false, true)] {
         let directory = tempdir()?;
         let source = directory.path().join("project");
@@ -1124,10 +1160,11 @@ async fn command_center_new_checkout_and_worktree_preserve_source_and_default_br
         std::fs::write(
             home.join("config.toml"),
             format!(
-                "approvals_reviewer = \"auto_review\"\nsandbox_mode = \"workspace-write\"\napproval_policy = \"on-request\"\nwindows.sandbox = \"unelevated\"\n[projects.{:?}]\ntrust_level = \"trusted\"\n",
+                "approvals_reviewer = \"user\"\nsandbox_mode = \"workspace-write\"\napproval_policy = \"on-request\"\nwindows.sandbox = \"unelevated\"\n[projects.{:?}]\ntrust_level = \"trusted\"\n",
                 xdcode_config::loader::project_trust_key(&source),
             ),
         )?;
+        configure_default_provider_fixture(&home.join("config.toml"))?;
         let manager =
             WorktreeManager::new(WorktreeSettings::for_cli(&home, /*desktop*/ None).unwrap());
         let selected = manager

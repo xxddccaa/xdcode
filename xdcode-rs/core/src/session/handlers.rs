@@ -27,6 +27,7 @@ use crate::tasks::UserShellCommandTask;
 use crate::tasks::execute_user_shell_command;
 use crate::thread_manager::AgentTreeShutdownFailure;
 use crate::thread_manager::thread_store_error_kind;
+use xdcode_protocol::approvals::ExecApprovalKind;
 use xdcode_protocol::error::XdcodeErr;
 use xdcode_protocol::protocol::ErrorEvent;
 use xdcode_protocol::protocol::Event;
@@ -175,46 +176,57 @@ pub async fn resolve_elicitation(
     }
 }
 
-/// Propagate a user's exec approval decision to the session.
-/// Also optionally applies an execpolicy amendment.
-pub async fn exec_approval(
-    sess: &Arc<Session>,
-    approval_id: String,
-    turn_id: Option<String>,
-    decision: ReviewDecision,
-) {
-    let event_turn_id = turn_id.unwrap_or_else(|| approval_id.clone());
-    if let ReviewDecision::ApprovedExecpolicyAmendment {
-        proposed_execpolicy_amendment,
-    } = &decision
-        && let Err(err) = sess
-            .persist_execpolicy_amendment(proposed_execpolicy_amendment)
+impl Session {
+    /// Claim the prompt before applying a decision that can outlive the requesting execution.
+    pub(crate) async fn resolve_exec_approval(
+        self: &Arc<Self>,
+        approval_id: String,
+        turn_id: Option<String>,
+        decision: ReviewDecision,
+    ) {
+        let Some((pending, active_turn_id)) = self
+            .take_pending_approval(&approval_id, turn_id.as_deref())
             .await
-    {
-        let message = format!("Failed to apply execpolicy amendment: {err}");
-        tracing::warn!("{message}");
-        let warning = EventMsg::Warning(WarningEvent { message });
-        sess.send_event_raw(Event {
-            id: event_turn_id.clone(),
-            msg: warning,
-        })
-        .await;
-    }
-    match decision {
-        ReviewDecision::Abort => {
-            sess.interrupt_task().await;
+        else {
+            return;
+        };
+        let decision = pending.validate(decision);
+        if decision == ReviewDecision::Abort {
+            let turn_id = if pending.kind == ExecApprovalKind::HumanCommand {
+                Some(&pending.turn_id)
+            } else {
+                active_turn_id.as_ref()
+            };
+            if let Some(turn_id) = turn_id {
+                self.abort_turn_if_active(turn_id, TurnAbortReason::Interrupted, None)
+                    .await;
+            }
+        } else if let ReviewDecision::ApprovedExecpolicyAmendment {
+            proposed_execpolicy_amendment,
+        } = &decision
+            && let Err(err) = self
+                .persist_execpolicy_amendment(proposed_execpolicy_amendment)
+                .await
+        {
+            let message = format!("Failed to apply execpolicy amendment: {err}");
+            tracing::warn!("{message}");
+            self.send_event_raw(Event {
+                id: turn_id.unwrap_or(approval_id),
+                msg: EventMsg::Warning(WarningEvent { message }),
+            })
+            .await;
         }
-        other => sess.notify_approval(&approval_id, other).await,
+        let _ = pending.sender.send(decision);
     }
 }
 
-pub async fn patch_approval(sess: &Arc<Session>, id: String, decision: ReviewDecision) {
-    match decision {
-        ReviewDecision::Abort => {
-            sess.interrupt_task().await;
-        }
-        other => sess.notify_approval(&id, other).await,
-    }
+async fn cancel_patch_approval(sess: &Arc<Session>, id: &str, expected_turn_id: Option<&str>) {
+    let Some((pending, _)) = sess.take_pending_approval(id, expected_turn_id).await else {
+        return;
+    };
+    sess.abort_turn_if_active(&pending.turn_id, TurnAbortReason::Interrupted, None)
+        .await;
+    let _ = pending.sender.send(ReviewDecision::Abort);
 }
 
 pub async fn request_user_input_response(
@@ -675,11 +687,23 @@ pub(super) async fn submission_loop(
                     turn_id,
                     decision,
                 } => {
-                    exec_approval(&sess, approval_id, turn_id, decision).await;
+                    sess.resolve_exec_approval(approval_id, turn_id, decision)
+                        .await;
+                    false
+                }
+                Op::CancelPatchApproval { id, turn_id } => {
+                    cancel_patch_approval(&sess, &id, Some(&turn_id)).await;
+                    false
+                }
+                Op::PatchApproval {
+                    id,
+                    decision: ReviewDecision::Abort,
+                } => {
+                    cancel_patch_approval(&sess, &id, None).await;
                     false
                 }
                 Op::PatchApproval { id, decision } => {
-                    patch_approval(&sess, id, decision).await;
+                    sess.notify_approval(&id, decision).await;
                     false
                 }
                 Op::UserInputAnswer { id, response } => {

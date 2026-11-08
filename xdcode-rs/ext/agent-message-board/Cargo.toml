@@ -14,13 +14,19 @@ doctest = false
 workspace = true
 
 [dependencies]
+xdcode-agent-message-board-client = { workspace = true }
+xdcode-config = { workspace = true }
 xdcode-extension-api = { workspace = true }
+xdcode-features = { workspace = true }
+xdcode-http-client = { workspace = true }
 xdcode-message-board = { workspace = true }
+xdcode-message-board-mcp = { workspace = true }
 xdcode-protocol = { workspace = true }
+xdcode-state = { workspace = true }
 xdcode-tools = { workspace = true }
 futures = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
 
 [dev-dependencies]
-xdcode-state = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["fs", "macros", "rt-multi-thread"] }

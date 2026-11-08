@@ -22,6 +22,7 @@ use xdcode_app_server_protocol::ServerNotification;
 use xdcode_app_server_protocol::ServerNotificationEnvelope;
 use xdcode_app_server_protocol::ServerRequest;
 use xdcode_app_server_protocol::ServerRequestPayload;
+use xdcode_app_server_protocol::ServerRequestResolvedNotification;
 use xdcode_app_server_protocol::ServerResponse;
 use xdcode_diagnostics::Gauge;
 use xdcode_diagnostics::GaugeGuard;
@@ -66,6 +67,7 @@ pub(crate) struct RequestContext {
     request_id: ConnectionRequestId,
     pub(crate) cancellation: tokio_util::sync::CancellationToken,
     cancellation_scope: RequestCancellationScope,
+    is_process_request: bool,
     span: Span,
     parent_trace: Option<W3cTraceContext>,
     _diagnostics_guard: Arc<GaugeGuard>,
@@ -88,6 +90,10 @@ impl RequestContext {
         Self {
             request_id,
             cancellation: tokio_util::sync::CancellationToken::new(),
+            is_process_request: matches!(
+                method,
+                "process/spawn" | "process/writeStdin" | "process/resizePty" | "process/kill"
+            ),
             cancellation_scope: match method {
                 "userVerification/status"
                 | "userVerification/enroll"
@@ -133,6 +139,7 @@ pub(crate) struct OutgoingMessageSender {
     verification_connections: Mutex<HashSet<ConnectionId>>,
     next_server_request_id: AtomicI64,
     sender: mpsc::Sender<OutgoingEnvelope>,
+    process_reply_sender: mpsc::Sender<OutgoingEnvelope>,
     request_id_to_callback: Mutex<HashMap<RequestId, PendingCallbackEntry>>,
     /// Incoming requests that are still waiting on a final response or error.
     /// We keep them here because this is where responses, errors, and
@@ -220,6 +227,17 @@ impl ThreadScopedOutgoingMessageSender {
         self.outgoing.send_server_notification(notification).await;
     }
 
+    pub(crate) async fn resolve_server_request(&self, request_id: RequestId) {
+        self.outgoing.cancel_request(&request_id).await;
+        self.send_server_notification(ServerNotification::ServerRequestResolved(
+            ServerRequestResolvedNotification {
+                thread_id: self.thread_id.to_string(),
+                request_id,
+            },
+        ))
+        .await;
+    }
+
     pub(crate) async fn abort_pending_server_requests(&self) {
         self.outgoing
             .cancel_requests_for_thread(
@@ -254,11 +272,20 @@ impl OutgoingMessageSender {
             verification_auth: OnceLock::new(),
             verification_connections: Mutex::new(HashSet::new()),
             next_server_request_id: AtomicI64::new(0),
+            process_reply_sender: sender.clone(),
             sender,
             request_id_to_callback: Mutex::new(HashMap::new()),
             request_contexts: Mutex::new(HashMap::new()),
             analytics_events_client,
         }
+    }
+
+    pub(crate) fn with_process_reply_sender(
+        mut self,
+        sender: mpsc::Sender<OutgoingEnvelope>,
+    ) -> Self {
+        self.process_reply_sender = sender;
+        self
     }
 
     pub(crate) async fn register_request_context(&self, request_context: RequestContext) {
@@ -889,10 +916,23 @@ impl OutgoingMessageSender {
         message: OutgoingMessage,
         message_kind: &'static str,
     ) {
-        let send_fut = self.sender.send(OutgoingEnvelope::ToConnection {
+        // Process requests serialize by handle. A blocked resize reply would also block the next kill.
+        let sender = if request_context
+            .as_ref()
+            .is_some_and(|ctx| ctx.is_process_request)
+        {
+            &self.process_reply_sender
+        } else {
+            &self.sender
+        };
+        // The spawn reply must reach the embedder before the collectors can publish output.
+        let (written_tx, written_rx) = (!sender.same_channel(&self.sender))
+            .then(oneshot::channel)
+            .unzip();
+        let send_fut = sender.send(OutgoingEnvelope::ToConnection {
             connection_id,
             message,
-            write_complete_tx: None,
+            write_complete_tx: written_tx,
         });
         let send_result = if let Some(request_context) = request_context {
             send_fut.instrument(request_context.span()).await
@@ -902,6 +942,8 @@ impl OutgoingMessageSender {
 
         if let Err(err) = send_result {
             warn!("failed to send {message_kind} to client: {err:?}");
+        } else if let Some(written_rx) = written_rx {
+            let _ = written_rx.await;
         }
     }
 }

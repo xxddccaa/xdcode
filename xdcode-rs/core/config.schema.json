@@ -802,6 +802,9 @@
             "agent_message_board": {
               "type": "boolean"
             },
+            "agent_message_board_mcp": {
+              "type": "boolean"
+            },
             "analytics_plan_history": {
               "type": "boolean"
             },
@@ -1094,6 +1097,12 @@
             "mcp_2026_07_28": {
               "type": "boolean"
             },
+            "mcp_connection_sharing": {
+              "type": "boolean"
+            },
+            "mcp_lazy_stdio_startup": {
+              "type": "boolean"
+            },
             "mcp_oauth_refresh_coordination": {
               "type": "boolean"
             },
@@ -1250,6 +1259,9 @@
             "shell_zsh_fork": {
               "type": "boolean"
             },
+            "skill_catalog_deltas": {
+              "type": "boolean"
+            },
             "skill_env_var_dependency_prompt": {
               "type": "boolean"
             },
@@ -1322,7 +1334,7 @@
             "tui_app_server": {
               "type": "boolean"
             },
-            "tui_multi_backend": {
+            "tui_workspace": {
               "type": "boolean"
             },
             "ultrafast_mode": {
@@ -5094,17 +5106,33 @@
             },
             "global": {
               "clear_terminal": null,
+              "close_sidebar_tab": null,
               "copy": null,
+              "equalize_pane_widths": null,
               "find_transcript": null,
               "focus_activity": null,
+              "focus_main_composer": null,
+              "focus_pane_left": null,
+              "focus_pane_right": null,
+              "focus_sidebar_content": null,
+              "focus_sidebar_tabs": null,
+              "hide_pane": null,
               "leader": null,
+              "maximize_pane_width": null,
+              "minimize_pane_width": null,
+              "move_divider_left": null,
+              "move_divider_right": null,
               "open_agents": null,
               "open_external_editor": null,
               "open_transcript": null,
               "queue": null,
+              "resize_panes": null,
               "select_transcript": null,
+              "sidebar_down": null,
+              "sidebar_up": null,
               "submit": null,
               "toggle_fast_mode": null,
+              "toggle_pane_zoom": null,
               "toggle_raw_output": null,
               "toggle_shortcuts": null,
               "toggle_side_conversation": null,
@@ -5344,6 +5372,14 @@
           "default": true,
           "description": "Show startup tooltips in the TUI welcome screen. Defaults to `true`.",
           "type": "boolean"
+        },
+        "sidebar_width_percent": {
+          "default": null,
+          "description": "Preferred docked sidebar width as a percentage of the terminal. Defaults to one third.",
+          "format": "uint8",
+          "maximum": 99.0,
+          "minimum": 1.0,
+          "type": "integer"
         },
         "status_line": {
           "default": null,
@@ -5894,6 +5930,9 @@
           ],
           "description": "Clear the terminal UI."
         },
+        "close_sidebar_tab": {
+          "$ref": "#/definitions/KeybindingsSpec"
+        },
         "copy": {
           "allOf": [
             {
@@ -5901,6 +5940,9 @@
             }
           ],
           "description": "Copy the last agent response to the clipboard."
+        },
+        "equalize_pane_widths": {
+          "$ref": "#/definitions/KeybindingsSpec"
         },
         "find_transcript": {
           "allOf": [
@@ -5918,6 +5960,24 @@
           ],
           "description": "Focus activity groups in the owned transcript to inspect their details."
         },
+        "focus_main_composer": {
+          "$ref": "#/definitions/KeybindingsSpec"
+        },
+        "focus_pane_left": {
+          "$ref": "#/definitions/KeybindingsSpec"
+        },
+        "focus_pane_right": {
+          "$ref": "#/definitions/KeybindingsSpec"
+        },
+        "focus_sidebar_content": {
+          "$ref": "#/definitions/KeybindingsSpec"
+        },
+        "focus_sidebar_tabs": {
+          "$ref": "#/definitions/KeybindingsSpec"
+        },
+        "hide_pane": {
+          "$ref": "#/definitions/KeybindingsSpec"
+        },
         "leader": {
           "allOf": [
             {
@@ -5925,6 +5985,18 @@
             }
           ],
           "description": "Prefix for persistent, context-aware shortcut menus."
+        },
+        "maximize_pane_width": {
+          "$ref": "#/definitions/KeybindingsSpec"
+        },
+        "minimize_pane_width": {
+          "$ref": "#/definitions/KeybindingsSpec"
+        },
+        "move_divider_left": {
+          "$ref": "#/definitions/KeybindingsSpec"
+        },
+        "move_divider_right": {
+          "$ref": "#/definitions/KeybindingsSpec"
         },
         "open_agents": {
           "allOf": [
@@ -5958,6 +6030,9 @@
           ],
           "description": "Queue the current composer draft while a task is running."
         },
+        "resize_panes": {
+          "$ref": "#/definitions/KeybindingsSpec"
+        },
         "select_transcript": {
           "allOf": [
             {
@@ -5965,6 +6040,12 @@
             }
           ],
           "description": "Enter keyboard selection mode for the transcript."
+        },
+        "sidebar_down": {
+          "$ref": "#/definitions/KeybindingsSpec"
+        },
+        "sidebar_up": {
+          "$ref": "#/definitions/KeybindingsSpec"
         },
         "submit": {
           "allOf": [
@@ -5981,6 +6062,9 @@
             }
           ],
           "description": "Toggle Fast mode."
+        },
+        "toggle_pane_zoom": {
+          "$ref": "#/definitions/KeybindingsSpec"
         },
         "toggle_raw_output": {
           "allOf": [
@@ -6127,17 +6211,33 @@
           ],
           "default": {
             "clear_terminal": null,
+            "close_sidebar_tab": null,
             "copy": null,
+            "equalize_pane_widths": null,
             "find_transcript": null,
             "focus_activity": null,
+            "focus_main_composer": null,
+            "focus_pane_left": null,
+            "focus_pane_right": null,
+            "focus_sidebar_content": null,
+            "focus_sidebar_tabs": null,
+            "hide_pane": null,
             "leader": null,
+            "maximize_pane_width": null,
+            "minimize_pane_width": null,
+            "move_divider_left": null,
+            "move_divider_right": null,
             "open_agents": null,
             "open_external_editor": null,
             "open_transcript": null,
             "queue": null,
+            "resize_panes": null,
             "select_transcript": null,
+            "sidebar_down": null,
+            "sidebar_up": null,
             "submit": null,
             "toggle_fast_mode": null,
+            "toggle_pane_zoom": null,
             "toggle_raw_output": null,
             "toggle_shortcuts": null,
             "toggle_side_conversation": null,
@@ -7410,6 +7510,9 @@
         "agent_message_board": {
           "type": "boolean"
         },
+        "agent_message_board_mcp": {
+          "type": "boolean"
+        },
         "analytics_plan_history": {
           "type": "boolean"
         },
@@ -7702,6 +7805,12 @@
         "mcp_2026_07_28": {
           "type": "boolean"
         },
+        "mcp_connection_sharing": {
+          "type": "boolean"
+        },
+        "mcp_lazy_stdio_startup": {
+          "type": "boolean"
+        },
         "mcp_oauth_refresh_coordination": {
           "type": "boolean"
         },
@@ -7858,6 +7967,9 @@
         "shell_zsh_fork": {
           "type": "boolean"
         },
+        "skill_catalog_deltas": {
+          "type": "boolean"
+        },
         "skill_env_var_dependency_prompt": {
           "type": "boolean"
         },
@@ -7930,7 +8042,7 @@
         "tui_app_server": {
           "type": "boolean"
         },
-        "tui_multi_backend": {
+        "tui_workspace": {
           "type": "boolean"
         },
         "ultrafast_mode": {

@@ -187,6 +187,42 @@ fn allows_shared_prefixes_with_distinct_completions() {
     config.global.copy = Some(binding("ctrl-x ctrl-o"));
 
     RuntimeKeymap::from_config(&config).expect("prefix trie can branch on the second stroke");
+
+    let mut config = TuiKeymap::default();
+    config.global.leader = Some(KeybindingsSpec::Many(
+        (1..=16)
+            .map(|number| KeybindingSpec(format!("super-f{number}")))
+            .collect(),
+    ));
+    config.global.open_transcript = Some(KeybindingsSpec::Many(
+        ["", "shift-", "alt-"]
+            .into_iter()
+            .flat_map(|modifier| {
+                (1..=19).map(move |number| KeybindingSpec(format!("leader {modifier}f{number}")))
+            })
+            .take(45)
+            .collect(),
+    ));
+    let runtime = RuntimeKeymap::for_session(&config, /*workspace*/ true).unwrap();
+    assert_eq!(
+        runtime
+            .chords
+            .bindings
+            .iter()
+            .filter(|binding| binding.is_leader())
+            .count(),
+        super::MAX_LEADER_CHORD_BINDINGS
+    );
+    assert_eq!(
+        crate::keymap_setup::active_binding_specs(&runtime, "global", "focus_sidebar_tabs")
+            .unwrap(),
+        ["leader t"]
+    );
+    assert!(
+        runtime
+            .primary_hint(KeymapContext::Global, "sidebar_up")
+            .is_none()
+    );
 }
 
 #[test]

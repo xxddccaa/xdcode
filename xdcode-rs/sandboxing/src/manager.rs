@@ -1,4 +1,7 @@
+use self::launch::PreparedLaunchPolicy;
 use crate::LinuxSandboxPidNamespace;
+#[cfg(windows)]
+use crate::WindowsSandboxFilesystemOverrides;
 #[cfg(target_os = "linux")]
 use crate::bwrap::WSL1_BWRAP_WARNING;
 #[cfg(target_os = "linux")]
@@ -7,14 +10,8 @@ use crate::landlock::XDCODE_LINUX_SANDBOX_ARG0;
 use crate::landlock::create_linux_sandbox_command_args_for_permission_profile;
 use crate::policy_transforms::effective_permission_profile;
 use crate::policy_transforms::should_require_platform_sandbox;
-#[cfg(target_os = "windows")]
-use crate::resolve_windows_elevated_filesystem_overrides;
-#[cfg(target_os = "windows")]
-use crate::resolve_windows_restricted_token_filesystem_overrides;
 #[cfg(target_os = "macos")]
 use crate::seatbelt::MacosSeatbeltProfile;
-#[cfg(target_os = "windows")]
-use crate::windows_sandbox_uses_elevated_backend;
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::io;
@@ -31,6 +28,9 @@ use xdcode_protocol::sandbox::SandboxOverride;
 pub use xdcode_protocol::sandbox::SandboxType;
 use xdcode_utils_absolute_path::AbsolutePathBuf;
 use xdcode_utils_path_uri::PathUri;
+
+#[path = "launch.rs"]
+pub(super) mod launch;
 
 #[cfg(target_os = "windows")]
 const WINDOWS_SANDBOX_WRAPPER_SETUP_ENV_ALLOWLIST: &[&str] = &[
@@ -122,6 +122,8 @@ pub struct SandboxExecRequest {
 pub struct SandboxTransformRequest<'a> {
     pub command: SandboxCommand,
     pub permissions: &'a PermissionProfile,
+    /// Bind symbolic workspace rules to these executor roots. `None` means they are already resolved.
+    pub workspace_roots: Option<&'a [PathUri]>,
     pub sandbox: SandboxType,
     pub enforce_managed_network: bool,
     pub environment_id: Option<&'a str>,
@@ -190,6 +192,7 @@ impl PendingSandboxedExecRequest {
 
 #[derive(Debug)]
 pub enum SandboxTransformError {
+    InvalidPolicy(io::Error),
     InvalidCommandCwd {
         cwd: PathUri,
         source: io::Error,
@@ -214,6 +217,7 @@ pub enum SandboxTransformError {
 impl std::fmt::Display for SandboxTransformError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::InvalidPolicy(err) => err.fmt(f),
             Self::InvalidCommandCwd { cwd, source } => {
                 write!(
                     f,
@@ -243,7 +247,7 @@ impl std::fmt::Display for SandboxTransformError {
             Self::SeatbeltUnavailable => write!(f, "seatbelt sandbox is only available on macOS"),
             #[cfg(target_os = "windows")]
             Self::WindowsSandboxPreparation(err) => {
-                write!(f, "failed to prepare windows sandbox wrapper: {err}")
+                write!(f, "failed to prepare Windows sandbox: {err}")
             }
         }
     }
@@ -252,6 +256,7 @@ impl std::fmt::Display for SandboxTransformError {
 impl std::error::Error for SandboxTransformError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            Self::InvalidPolicy(source) => Some(source),
             Self::InvalidCommandCwd { source, .. }
             | Self::InvalidSandboxPolicyCwd { source, .. } => Some(source),
             Self::MissingLinuxSandboxExecutable => None,
@@ -360,6 +365,7 @@ impl SandboxManager {
         let SandboxTransformRequest {
             mut command,
             permissions,
+            workspace_roots,
             sandbox,
             enforce_managed_network,
             environment_id,
@@ -376,6 +382,13 @@ impl SandboxManager {
             network.and_then(NetworkProxy::managed_mitm_ca_trust_bundle_path);
         let base_effective_permission_profile =
             effective_permission_profile(permissions, additional_permissions.as_ref());
+        let base_effective_permission_profile = PreparedLaunchPolicy::resolve(
+            base_effective_permission_profile,
+            sandbox_policy_cwd,
+            workspace_roots,
+        )
+        .map_err(SandboxTransformError::InvalidPolicy)?
+        .permissions;
         let pending_sandboxed_request = PendingSandboxedExecRequest::new(
             &command.cwd,
             sandbox_policy_cwd,
@@ -655,23 +668,13 @@ fn wrap_windows_sandbox_exec_request_for_direct_spawn(
                 })
         })
         .transpose()?;
-    let use_elevated = windows_sandbox_uses_elevated_backend(request.windows_sandbox_level);
-    let overrides = if use_elevated {
-        resolve_windows_elevated_filesystem_overrides(
-            request.sandbox,
-            &request.permission_profile,
-            &native_sandbox_policy_cwd,
-            use_elevated,
-            &request.env,
-        )
-    } else {
-        resolve_windows_restricted_token_filesystem_overrides(
-            request.sandbox,
-            &request.permission_profile,
-            &native_sandbox_policy_cwd,
-            request.windows_sandbox_level,
-        )
-    }
+    let overrides = WindowsSandboxFilesystemOverrides::resolve(
+        request.sandbox,
+        &request.permission_profile,
+        &native_sandbox_policy_cwd,
+        request.windows_sandbox_level,
+        &request.env,
+    )
     .map_err(SandboxTransformError::WindowsSandboxPreparation)?;
     let empty_paths: &[AbsolutePathBuf] = &[];
     let read_roots_override = overrides

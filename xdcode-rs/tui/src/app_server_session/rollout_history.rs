@@ -57,7 +57,7 @@ impl AppServerSession {
             tracing::warn!("Failed to page read-only thread history; trying summary pages");
             let request_id = self.next_request_id();
             let page: ThreadTurnsListResponse = self
-                .client
+                .request_handle
                 .request_typed(ClientRequest::ThreadTurnsList {
                     request_id,
                     params: ThreadTurnsListParams {
@@ -96,6 +96,7 @@ impl AppServerSession {
         )
         .await
         .map_err(color_eyre::eyre::Report::msg)?;
+        self.freeze_viewed_receipt(thread_id);
         Ok((
             AppServerStartedThread {
                 session,
@@ -108,8 +109,8 @@ impl AppServerSession {
     }
 
     pub(crate) fn with_local_xdcode_home(mut self, xdcode_home: &AbsolutePathBuf) -> Self {
-        self.task_tool_capabilities_dir = (!self.uses_embedded_app_server())
-            .then(|| xdcode_home.join("tui-thread-reference-capabilities"));
+        self.task_tool_capabilities_dir =
+            Some(xdcode_home.join("tui-thread-reference-capabilities"));
         self
     }
 
@@ -207,7 +208,7 @@ impl AppServerSession {
         }
         let request_id = self.next_request_id();
         let resume_response = self
-            .client
+            .request_handle
             .request_typed(ClientRequest::ThreadResume {
                 request_id,
                 params: params.clone(),
@@ -222,7 +223,7 @@ impl AppServerSession {
                 self.history_support = ThreadHistorySupport::LegacyOnly;
                 params.exclude_turns = false;
                 let request_id = self.next_request_id();
-                self.client
+                self.request_handle
                     .request_typed(ClientRequest::ThreadResume { request_id, params })
                     .await
                     .map_err(|err| {

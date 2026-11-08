@@ -98,6 +98,8 @@ use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
 use crossterm::event::KeyModifiers;
+use crossterm::event::MouseButton;
+use crossterm::event::MouseEventKind;
 use ratatui::layout::Rect;
 use ratatui::layout::Size;
 use ratatui::style::Stylize;
@@ -248,11 +250,13 @@ mod clipboard;
 mod footer_selection;
 mod native_history;
 mod owned_transcript;
+mod pane_motion;
 mod pending_interactive_replay;
 mod permission_shortcuts;
 mod pets;
 mod platform_actions;
 mod plugin_mentions;
+pub(crate) mod provider;
 mod rate_limit_refresh;
 mod realtime_delivery;
 mod realtime_settings;
@@ -265,10 +269,16 @@ mod resume_config;
 mod right_click_paste;
 pub(crate) use right_click_paste::PasteEnvironment;
 mod safety_buffering;
+mod safety_recourse;
 mod server_version_notice;
 mod session_lifecycle;
 mod session_picker;
 mod side;
+mod side_companion;
+mod side_focus;
+mod side_pane;
+mod sidebar;
+mod sidebar_close;
 mod startup;
 pub(crate) mod startup_bootstrap;
 mod startup_prompts;
@@ -291,6 +301,7 @@ mod voice_owner;
 #[path = "app/warnings_tests.rs"]
 mod warnings_tests;
 mod working_directory;
+mod workspace_hud;
 
 use self::agent_navigation::AgentNavigationDirection;
 use self::agent_navigation::AgentNavigationState;
@@ -302,6 +313,7 @@ use self::platform_actions::*;
 use self::side::SideParentStatus;
 use self::side::SideParentStatusChange;
 use self::side::SideThreadState;
+use self::side_companion::SideCompanion;
 use self::startup_prompts::*;
 use self::thread_events::*;
 
@@ -496,10 +508,7 @@ pub(crate) enum AppRunControl {
 #[derive(Debug, Clone)]
 pub enum ExitReason {
     UserRequested,
-    Archived(ThreadId),
     TurnInterrupted,
-    /// The current thread was deleted, rather than disconnected.
-    ThreadRemoved,
     Fatal(String),
 }
 
@@ -552,6 +561,10 @@ pub(crate) struct App {
     launch_cwd: PathBuf,
     /// Resume anchor selected by `/cd`; ordinary resumes retain the immutable launch cwd.
     runtime_working_directory_override: Option<PathBuf>,
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "retain the state runtime for the app lifetime")
+    )]
     pub(crate) state_db: Option<StateDbHandle>,
     cli_kv_overrides: Vec<(String, TomlValue)>,
     harness_overrides: ConfigOverrides,
@@ -569,6 +582,7 @@ pub(crate) struct App {
     native_history: native_history::NativeHistory,
     turn_tips: turn_tips::TurnTips,
     pub(crate) transcript_view: crate::transcript_view::TranscriptView,
+    conversation_frame: owned_transcript::ConversationFrame,
     last_rendered_history_tail: Option<history_ui::RenderedHistoryTail>,
     last_thread_usage_status_cell: Option<history_ui::ThreadUsageStatusHistory>,
     pub(crate) pending_thread_usage_history_refresh: bool,
@@ -642,6 +656,15 @@ pub(crate) struct App {
     agent_navigation: AgentNavigationState,
     agents_overview: agents_overview::AgentsOverviewState,
     side_threads: HashMap<ThreadId, SideThreadState>,
+    sidebars: HashMap<Option<ThreadId>, sidebar::SidebarPane>,
+    /// A parked parent view survives child cleanup until its own replay finishes.
+    side_companions: HashMap<ThreadId, SideCompanion>,
+    zoomed_thread: Option<ThreadId>,
+    /// Exact sidebar allocation at the terminal width where the width preset was applied.
+    exact_sidebar_width: Option<(u16, u16)>,
+    divider_drag: Option<side_pane::DividerDrag>,
+    pane_resize: Option<side_pane::PaneResize>,
+    passive_link_drag: Option<(ThreadId, Rect)>,
     abandoned_side_threads: HashSet<ThreadId>,
     active_thread_id: Option<ThreadId>,
     active_thread_rx: Option<mpsc::Receiver<ThreadBufferedEvent>>,
@@ -767,49 +790,6 @@ impl RuntimePermissionProfileOverride {
     }
 }
 
-fn active_turn_not_steerable_turn_error(error: &TypedRequestError) -> Option<AppServerTurnError> {
-    let TypedRequestError::Server { source, .. } = error else {
-        return None;
-    };
-    let turn_error: AppServerTurnError = serde_json::from_value(source.data.clone()?).ok()?;
-    matches!(
-        turn_error.xdcode_error_info,
-        Some(AppServerXdcodeErrorInfo::ActiveTurnNotSteerable { .. })
-    )
-    .then_some(turn_error)
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum ActiveTurnSteerRace {
-    Missing,
-    ExpectedTurnMismatch { actual_turn_id: String },
-}
-
-fn active_turn_steer_race(error: &TypedRequestError) -> Option<ActiveTurnSteerRace> {
-    let TypedRequestError::Server { method, source } = error else {
-        return None;
-    };
-    if method != "turn/steer" {
-        return None;
-    }
-    if source.message == "no active turn to steer" {
-        return Some(ActiveTurnSteerRace::Missing);
-    }
-
-    // App-server steer mismatches mean our cached active turn id is stale, but the response
-    // includes the server's current active turn so we can resynchronize and retry once.
-    let mismatch_prefix = "expected active turn id `";
-    let mismatch_separator = "` but found `";
-    let actual_turn_id = source
-        .message
-        .strip_prefix(mismatch_prefix)?
-        .split_once(mismatch_separator)?
-        .1
-        .strip_suffix('`')?
-        .to_string();
-    Some(ActiveTurnSteerRace::ExpectedTurnMismatch { actual_turn_id })
-}
-
 fn active_turn_interrupt_race(error: &TypedRequestError) -> Option<String> {
     let TypedRequestError::Server { method, source } = error else {
         return None;
@@ -868,7 +848,56 @@ impl App {
     ) -> Result<AppRunControl> {
         self.transcript_view
             .sync_patch_approval(self.chat_widget.current_patch_approval());
+        if (self.conversation_frame.chooser_area().is_some()
+            || self.sidebar().is_some_and(|pane| pane.close.is_some()))
+            && self.chat_widget.has_active_modal()
+            && matches!(
+                &event,
+                TuiEvent::Key(_) | TuiEvent::Mouse(_) | TuiEvent::Paste(_)
+            )
+        {
+            if let TuiEvent::Key(key) = &event
+                && key.kind != KeyEventKind::Release
+            {
+                self.chat_widget.suppress_current_view_key_until_release(
+                    KeyBinding::from_event(*key),
+                    Instant::now(),
+                    crate::activation_key_guard::ActivationKeySuppression::ViewTransition,
+                );
+            }
+            tui.frame_requester().schedule_frame();
+            return Ok(AppRunControl::Continue);
+        }
+        let previous = tui.link_hover.position();
         tui.link_hover.observe(&event);
+        let current = tui.link_hover.position();
+        if previous != current
+            && self.hovered_sidebar_tab(previous) != self.hovered_sidebar_tab(current)
+        {
+            tui.frame_requester().schedule_frame();
+        }
+        if Box::pin(sidebar_close::handle(self, tui, app_server, &event)).await {
+            return Ok(AppRunControl::Continue);
+        }
+        if self.handle_pane_resize(tui, &event).await {
+            return Ok(AppRunControl::Continue);
+        }
+        if let TuiEvent::Mouse(mouse) = &event
+            && (self.key_chord_matcher.workspace_leader().is_some()
+                || self.chat_widget.quick_dial_menu_open())
+            && !matches!(
+                mouse.kind,
+                MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+            )
+            && self.conversation_frame.hud_contains(*mouse)
+        {
+            if matches!(mouse.kind, crossterm::event::MouseEventKind::Down(_)) {
+                self.cancel_pending_key_chord();
+                tui.frame_requester().schedule_frame();
+            }
+            self.refresh_link_hover(tui)?;
+            return Ok(AppRunControl::Continue);
+        }
         self.refresh_link_hover(tui)?;
         self.invalidate_right_click_paste(&event);
         self.finish_clipboard(tui, &event);
@@ -908,7 +937,10 @@ impl App {
             }
             self.backtrack.select_exit_key = None;
         }
-        if self.handle_rendered_selection_event(tui, &event)? {
+        if self.continue_passive_link_drag(tui, &event)?
+            || self.handle_divider_event(tui, &event).await?
+            || self.handle_rendered_selection_event(tui, &event)?
+        {
             return Ok(AppRunControl::Continue);
         }
         if matches!(&event, TuiEvent::Key(_))
@@ -936,6 +968,19 @@ impl App {
             }
             _ => false,
         };
+        if let TuiEvent::Key(key) = &event
+            && crate::text_selection::is_copy_key(*key)
+            && !transcript_owns_input
+            && self.conversation_focus_available(tui)
+            && let Some(painted) = self.conversation_frame.side_pane()
+            && let Some(current) =
+                side_pane::layout(self, tui, tui.terminal.last_known_screen_size.into())
+            && current.passive_thread == painted.passive_thread
+            && self.handle_passive_transcript_event(tui, current.passive_thread, &event)
+        {
+            self.cancel_pending_key_chord();
+            return Ok(AppRunControl::Continue);
+        }
         if self.reconnect.offline
             && !transcript_owns_input
             && !self.chat_widget.keymap_contexts().is_warnings()
@@ -958,13 +1003,22 @@ impl App {
             &event,
             TuiEvent::Key(_) | TuiEvent::Mouse(_) | TuiEvent::Paste(_) | TuiEvent::FocusLost
         ) {
-            self.expire_pending_key_chord();
+            self.expire_pending_key_chord(tui);
             self.handle_draw_pre_render(tui, screen_size)?;
         }
 
-        if matches!(&event, TuiEvent::Paste(_) | TuiEvent::FocusLost)
-            || matches!(&event, TuiEvent::Mouse(mouse) if mouse.kind != crossterm::event::MouseEventKind::Moved)
-        {
+        let dismiss_chord = match &event {
+            TuiEvent::Paste(_) | TuiEvent::FocusLost => true,
+            TuiEvent::Mouse(mouse) => match mouse.kind {
+                MouseEventKind::Moved => false,
+                MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                    self.key_chord_matcher.workspace_leader().is_none()
+                }
+                _ => true,
+            },
+            _ => false,
+        };
+        if dismiss_chord {
             self.cancel_pending_key_chord();
         }
         if matches!(&event, TuiEvent::FocusLost)
@@ -984,7 +1038,7 @@ impl App {
 
         let mut event = if let TuiEvent::Key(mut key_event) = event {
             let escape = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
-            if self.should_recover_vim_insert_escape(key_event)
+            if self.should_recover_vim_insert_escape(tui, key_event)
                 && !(tui.is_owned_screen()
                     && crate::transcript_view::JumpTarget::from_key(key_event).is_some())
             {
@@ -1003,6 +1057,62 @@ impl App {
             event
         };
 
+        if let TuiEvent::Key(key) = &event
+            && self.handle_side_focus_key(tui, app_server, *key).await
+        {
+            return Ok(AppRunControl::Continue);
+        }
+        if Box::pin(self.handle_sidebar_input(tui, app_server, &event)).await {
+            return Ok(AppRunControl::Continue);
+        }
+        if let TuiEvent::Mouse(press) = &event
+            && press.kind == MouseEventKind::Down(MouseButton::Left)
+            && self.conversation_focus_available(tui)
+            && let Some(painted) = self.conversation_frame.side_pane()
+            && painted.passive.contains((press.column, press.row).into())
+        {
+            let size = tui.prepare_draw_size()?;
+            if let Some(current) = side_pane::layout(self, tui, size.into())
+                && current.passive_thread == painted.passive_thread
+                && let Some(peer) = self.current_displayed_thread_id()
+                && painted.passive.union(painted.focused) == Rect::from(size)
+            {
+                let painted_area = painted.passive;
+                if let Some(url) = self.transcript_link_at(*press) {
+                    if press.modifiers.is_empty() {
+                        self.passive_link_drag = Some((current.passive_thread, painted.passive));
+                        self.handle_passive_transcript_event(tui, current.passive_thread, &event);
+                    } else {
+                        self.open_url_in_browser(url);
+                    }
+                    return Ok(AppRunControl::Continue);
+                }
+                if self.reconnect.offline {
+                    return Ok(AppRunControl::Continue);
+                }
+                let draft_cursor = self
+                    .side_companions
+                    .get_mut(&current.passive_thread)
+                    .and_then(|pane| {
+                        let draft = &mut pane.display.draft;
+                        draft
+                            .handle_mouse(*press, Default::default())
+                            .then(|| draft.cursor())
+                    });
+                if let Err(err) = self.toggle_side_conversation(tui, app_server).await {
+                    self.chat_widget.add_error_message(err.to_string());
+                } else if self.current_displayed_thread_id() == Some(current.passive_thread) {
+                    self.app_event_tx.send(AppEvent::SidePanePressAfterReplay {
+                        peer,
+                        draft_cursor,
+                        thread_id: current.passive_thread,
+                        area: painted_area,
+                        press: *press,
+                    });
+                }
+            }
+            return Ok(AppRunControl::Continue);
+        }
         self.cancel_primed_browsing_for_event(&event);
         let voice_toggle = |app: &Self, key: KeyEvent| {
             key.kind == KeyEventKind::Press
@@ -1114,6 +1224,7 @@ impl App {
 
         match &event {
             TuiEvent::FocusLost => {
+                app_server.focused_conversation = None;
                 self.chat_widget
                     .set_sparkle_terminal_focus(/*focused*/ false);
                 let now = Instant::now();
@@ -1131,6 +1242,10 @@ impl App {
             _ => {}
         }
 
+        let draws_history = matches!(
+            event,
+            TuiEvent::Draw | TuiEvent::Resume | TuiEvent::Resize(_) | TuiEvent::FocusGained
+        );
         if self.overlay.is_some() {
             let _ = self
                 .handle_backtrack_overlay_event(tui, app_server, event)
@@ -1203,12 +1318,7 @@ impl App {
                         self.discard_startup_modal_input(tui)?;
                     }
                     if self.chat_widget.ambient_pet_image_enabled() {
-                        let ambient_pet_area = Rect::new(
-                            /*x*/ 0,
-                            /*y*/ 0,
-                            screen_size.width,
-                            screen_size.height,
-                        );
+                        let ambient_pet_area = self.conversation_area(screen_size.into());
                         if let Err(err) = tui.draw_ambient_pet_image(
                             self.chat_widget
                                 .ambient_pet_draw(ambient_pet_area, rendered_area.bottom()),
@@ -1235,6 +1345,44 @@ impl App {
                 TuiEvent::FocusLost => {}
             }
         }
+        if draws_history {
+            let frozen = self.chat_widget.is_external_writer_view();
+            let visible = self.current_displayed_thread_id().filter(|&id| {
+                tui.is_terminal_focused()
+                    && !self.conversation_frame.chooser_covers_transcript()
+                    && matches!(self.overlay, None | Some(Overlay::Transcript(_)))
+                    && self.chat_widget.no_modal_or_popup_active()
+                    && self.initial_history_replay_buffer.is_none()
+                    && (!self.thread_unavailable(id) || frozen)
+            });
+            let previous = std::mem::replace(&mut app_server.focused_conversation, visible);
+            if previous != visible {
+                app_server.attempted_revision = None;
+            }
+            if let Some(id) = visible
+                && (previous != visible || !self.chat_widget.is_agent_turn_running())
+                && let Some(revision) = app_server.viewed_revision(id, frozen)
+            {
+                let refresh = frozen.then(|| {
+                    (
+                        self.app_event_tx.clone(),
+                        AppEvent::RefreshViewedThread {
+                            backend_id: app_server.backend_id(),
+                            thread_id: id,
+                            revision: revision.clone(),
+                        },
+                    )
+                });
+                let update = app_server.acknowledge_read(id, revision);
+                tokio::spawn(async move {
+                    if let Err(error) = update.await {
+                        tracing::warn!(%id, %error, "Could not acknowledge viewed conversation");
+                    } else if let Some((tx, event)) = refresh {
+                        tx.send(event);
+                    }
+                });
+            }
+        }
         // Both transcript owners must consume completions before automatic work advances.
         if idle_draw {
             tui.clipboard.advance(tui.frame_requester());
@@ -1252,8 +1400,14 @@ impl App {
         Ok(())
     }
 
-    fn prepare_frame_images(&mut self) -> Option<crate::pets::ImageProtocol> {
-        let protocol = self.chat_widget.pet_image_support().protocol().filter(|_| {
+    fn prepare_frame_images(&mut self, tui: &tui::Tui) -> Option<crate::pets::ImageProtocol> {
+        let tmux_kitty = tui.is_owned_screen() && tui.terminal.tmux_kitty_image_base.is_some();
+        let protocol = self
+            .chat_widget
+            .pet_image_support()
+            .protocol()
+            .or(tmux_kitty.then_some(crate::pets::ImageProtocol::Kitty));
+        let protocol = protocol.filter(|_| {
             !self.app_server_target.uses_remote_workspace()
                 && crate::projectless::has_only_local_environments(&self.environment_manager)
         });
@@ -1267,7 +1421,7 @@ impl App {
         if tui.is_owned_screen() {
             return self.render_owned_transcript(tui, screen_size);
         }
-        self.prepare_frame_images();
+        self.prepare_frame_images(tui);
         self.chat_widget
             .empty_state_animation
             .borrow_mut()

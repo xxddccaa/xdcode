@@ -296,11 +296,25 @@ async fn queued_input_and_unique_event_ids_round_trip() -> anyhow::Result<()> {
     let (queue, _home) = test_queue().await?;
     let sink = Arc::new(RecordingEventSink::default());
     let event_sink: Arc<dyn ExtensionEventSink> = sink.clone();
-    let service = QueuedItemService::new(queue, Weak::new(), event_sink);
+    let service = QueuedItemService::new(Arc::clone(&queue), Weak::new(), event_sink);
     let thread_id = ThreadId::new();
     let input = structured_user_input("structured message");
 
-    let first = service.enqueue(thread_id, input.clone()).await?;
+    let first = service
+        .enqueue_with_metadata(
+            thread_id,
+            input.clone(),
+            Some(HashMap::from([(
+                "client_type".to_string(),
+                "ios_app".to_string(),
+            )])),
+        )
+        .await?;
+    let records = queue.list_page(thread_id, 0, 1).await?;
+    assert_eq!(
+        input,
+        serde_json::from_str::<TurnInput>(&records[0].payload)?
+    );
     let second = service.enqueue(thread_id, user_input("next")).await?;
     let TurnInput::UserInput {
         client_id: Some(generated_client_id),
@@ -342,7 +356,14 @@ async fn editing_reordering_and_deleting_preserve_queue_identity() -> anyhow::Re
     let service = QueuedItemService::new(queue, Weak::new(), Arc::new(NoopExtensionEventSink));
     let thread_id = ThreadId::new();
     let first = service
-        .enqueue(thread_id, structured_user_input("first"))
+        .enqueue_with_metadata(
+            thread_id,
+            structured_user_input("first"),
+            Some(HashMap::from([(
+                "client_type".to_string(),
+                "desktop_app".to_string(),
+            )])),
+        )
         .await?;
     let second = service.enqueue(thread_id, user_input("second")).await?;
     let edited = service
@@ -354,6 +375,21 @@ async fn editing_reordering_and_deleting_preserve_queue_identity() -> anyhow::Re
         anyhow::bail!("edited queue item does not contain user input");
     };
     assert_eq!(Some("stable-client-message"), client_id.as_deref());
+    assert_eq!(
+        first.responsesapi_client_metadata,
+        edited.responsesapi_client_metadata
+    );
+    let mobile_metadata = HashMap::from([("client_type".to_string(), "ios_app".to_string())]);
+    let edited = service
+        .update_with_metadata(
+            thread_id,
+            first.id.clone(),
+            user_input("edited on phone"),
+            Some(mobile_metadata.clone()),
+        )
+        .await?
+        .context("queued item missing")?;
+    assert_eq!(Some(mobile_metadata), edited.responsesapi_client_metadata);
     assert!(matches!(
         service.reorder(thread_id, vec![first.id.clone()]).await,
         Err(QueueServiceError::Storage(
@@ -383,7 +419,14 @@ async fn starting_a_selected_item_preserves_the_remaining_queue() -> anyhow::Res
     let service = QueuedItemService::new(queue, Weak::new(), Arc::new(NoopExtensionEventSink));
     let first = service.enqueue(thread_id, user_input("first")).await?;
     let second = service
-        .enqueue(thread_id, structured_user_input("second"))
+        .enqueue_with_metadata(
+            thread_id,
+            structured_user_input("second"),
+            Some(HashMap::from([(
+                "client_type".to_string(),
+                "ios_app".to_string(),
+            )])),
+        )
         .await?;
 
     let submission = service
@@ -412,6 +455,13 @@ async fn starting_a_selected_item_preserves_the_remaining_queue() -> anyhow::Res
             .last()
             .map(String::as_str)
     );
+    let body = response.single_request().body_json();
+    let metadata: serde_json::Value = serde_json::from_str(
+        body["client_metadata"]["x-xdcode-turn-metadata"]
+            .as_str()
+            .context("missing turn metadata")?,
+    )?;
+    assert_eq!(metadata["client_type"], "ios_app");
     Ok(())
 }
 
@@ -1096,7 +1146,14 @@ async fn resumed_idle_dispatches_input_without_a_loaded_manager() -> anyhow::Res
         Weak::new(),
         Arc::new(NoopExtensionEventSink),
     )
-    .enqueue(thread_id, user_input("queued while unloaded"))
+    .enqueue_with_metadata(
+        thread_id,
+        user_input("queued while unloaded"),
+        Some(HashMap::from([(
+            "client_type".to_string(),
+            "ios_app".to_string(),
+        )])),
+    )
     .await?;
     let service = QueuedItemService::new(
         queue,
@@ -1105,5 +1162,17 @@ async fn resumed_idle_dispatches_input_without_a_loaded_manager() -> anyhow::Res
     );
     emit_idle(&service, thread_id).await;
     assert!(service.list(thread_id).await?.is_empty());
+    wait_for_event_match(test.xdcode.as_ref(), |event| match event {
+        EventMsg::TurnComplete(_) => Some(()),
+        _ => None,
+    })
+    .await;
+    let body = response.single_request().body_json();
+    let metadata: serde_json::Value = serde_json::from_str(
+        body["client_metadata"]["x-xdcode-turn-metadata"]
+            .as_str()
+            .context("missing turn metadata")?,
+    )?;
+    assert_eq!(metadata["client_type"], "ios_app");
     Ok(())
 }

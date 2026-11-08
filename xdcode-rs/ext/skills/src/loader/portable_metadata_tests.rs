@@ -1,5 +1,4 @@
 use std::fs;
-use std::sync::Arc;
 
 use pretty_assertions::assert_eq;
 use tempfile::TempDir;
@@ -51,11 +50,7 @@ fn fixture(native: bool) -> TempDir {
 }
 
 fn document(server: &str, implicit: bool) -> String {
-    let product = if implicit {
-        "xdcode"
-    } else {
-        super::metadata::PORTABLE_METADATA_PRODUCT
-    };
+    let product = if implicit { "xdcode" } else { "codex" };
     format!(
         "dependencies:\n  tools:\n    - type: mcp\n      value: {server}\n      transport: stdio\n      command: local-tool\npolicy:\n  allow_implicit_invocation: {implicit}\n  products: [{product}]\n"
     )
@@ -87,12 +82,13 @@ fn assert_metadata(
 
 #[tokio::test]
 async fn host_scan_preserves_portable_policy_and_native_priority() {
+    let access = FileSystemEnvironmentAccessor::unrestricted(&LOCAL_FS);
     for native in [false, true] {
         let root = fixture(native);
         let snapshot = load_host_skill_root(HostSkillRoot::host(
             AbsolutePathBuf::from_absolute_path(root.path()).expect("root path"),
             SkillScope::User,
-            Arc::clone(&LOCAL_FS),
+            &access,
         ))
         .await;
         assert!(snapshot.errors.is_empty());
@@ -116,7 +112,7 @@ async fn host_scan_preserves_portable_policy_and_native_priority() {
                 plugin_root,
                 discovery_mode: SkillDiscoveryMode::DirectChildren,
             },
-            Arc::clone(&LOCAL_FS),
+            &access,
         ))
         .await;
         assert!(snapshot.errors.is_empty());
@@ -132,6 +128,7 @@ async fn host_scan_preserves_portable_policy_and_native_priority() {
 #[cfg(unix)]
 #[tokio::test]
 async fn canonical_host_remap_keeps_portable_metadata() {
+    let access = FileSystemEnvironmentAccessor::unrestricted(&LOCAL_FS);
     for native in [false, true] {
         let target = fixture(native);
         let root = TempDir::new().expect("alias root");
@@ -140,7 +137,7 @@ async fn canonical_host_remap_keeps_portable_metadata() {
         let snapshot = load_host_skill_root(HostSkillRoot::host(
             AbsolutePathBuf::from_absolute_path(root.path()).expect("alias root path"),
             SkillScope::User,
-            Arc::clone(&LOCAL_FS),
+            &access,
         ))
         .await;
         assert!(snapshot.errors.is_empty());
@@ -215,6 +212,7 @@ async fn bundled_and_direct_environment_metadata_match() {
 
 #[tokio::test]
 async fn invalid_native_metadata_keeps_existing_error_behavior() {
+    let access = FileSystemEnvironmentAccessor::unrestricted(&LOCAL_FS);
     let root = fixture(true);
     fs::write(
         root.path()
@@ -236,7 +234,7 @@ async fn invalid_native_metadata_keeps_existing_error_behavior() {
     let host = load_host_skill_root(HostSkillRoot::host(
         AbsolutePathBuf::from_absolute_path(root.path()).expect("root path"),
         SkillScope::User,
-        Arc::clone(&LOCAL_FS),
+        &access,
     ))
     .await;
     assert_eq!(host.skills.len(), 1);

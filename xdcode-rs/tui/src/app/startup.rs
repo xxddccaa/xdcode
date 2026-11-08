@@ -160,6 +160,25 @@ impl App {
         }
     }
 
+    pub(super) fn awaiting_side_replay(&self, tui: &tui::Tui) -> bool {
+        self.pending_thread_switch_resets != 0 && self.side_retention_enabled(tui)
+    }
+
+    /// Drain a side pair's queued prompts and transcript updates before a key can switch focus.
+    pub(super) fn can_read_terminal_after_thread_switch(
+        &self,
+        tui: &tui::Tui,
+        app_event_rx: &mpsc::UnboundedReceiver<AppEvent>,
+    ) -> bool {
+        self.pending_thread_switch_resets == 0
+            && (app_event_rx.is_empty()
+                || (!self.side_retention_enabled(tui)
+                    && self
+                        .current_displayed_thread_id()
+                        .and_then(|id| self.side_pair_key(id))
+                        .is_none()))
+    }
+
     /// Keep the provisional loading frame until queued history reaches the owned transcript.
     /// Visible startup decisions and the agent overview must still render immediately.
     pub(super) fn render_startup_frame(
@@ -167,7 +186,10 @@ impl App {
         tui: &mut tui::Tui,
         app_event_rx: &mpsc::UnboundedReceiver<AppEvent>,
     ) -> Result<()> {
-        if tui.is_owned_screen() && !app_event_rx.is_empty() && !self.chat_widget.has_active_view()
+        if self.awaiting_side_replay(tui)
+            || (tui.is_owned_screen()
+                && !app_event_rx.is_empty()
+                && !self.chat_widget.has_active_view())
         {
             return Ok(());
         }
@@ -694,7 +716,6 @@ impl App {
                             config: &config,
                             local_settings: &local_settings,
                         },
-                        &app_server_target,
                         &target_session,
                         action,
                         resumed,
@@ -799,7 +820,6 @@ impl App {
                         config: &config,
                         local_settings: &local_settings,
                     },
-                    &app_server_target,
                     &target_session,
                     action,
                     forked,
@@ -947,6 +967,7 @@ See the Xdcode keymap documentation for supported actions and examples."
             native_history: Default::default(),
             turn_tips: Default::default(),
             transcript_view: Default::default(),
+            conversation_frame: Default::default(),
             last_rendered_history_tail: None,
             last_thread_usage_status_cell: None,
             pending_thread_usage_history_refresh: false,
@@ -997,6 +1018,13 @@ See the Xdcode keymap documentation for supported actions and examples."
             agent_navigation: AgentNavigationState::default(),
             agents_overview,
             side_threads: HashMap::new(),
+            sidebars: HashMap::new(),
+            side_companions: HashMap::new(),
+            zoomed_thread: None,
+            exact_sidebar_width: None,
+            divider_drag: None,
+            pane_resize: None,
+            passive_link_drag: None,
             abandoned_side_threads: HashSet::new(),
             active_thread_id: None,
             active_thread_rx: None,
@@ -1059,7 +1087,7 @@ See the Xdcode keymap documentation for supported actions and examples."
         }
         if start_in_agents_overview {
             app.open_agents_overview(&app_server);
-        } else if !matches!(app.app_server_target, AppServerTarget::Embedded) {
+        } else {
             app.refresh_agents_overview_threads(&app_server);
         }
         if let Some(entry) = startup_hooks_browser {
@@ -1254,9 +1282,11 @@ See the Xdcode keymap documentation for supported actions and examples."
                 }
                 if app.pending_open_resume_picker {
                     app.pending_open_resume_picker = false;
-                    match Box::pin(
-                        app.open_resume_picker(tui, backends.session_at_mut(displayed_session)),
-                    )
+                    match Box::pin(app.open_resume_picker_for_backends(
+                        tui,
+                        &mut backends,
+                        displayed_session,
+                    ))
                     .await
                     {
                         Ok(AppRunControl::Continue) => {}
@@ -1434,7 +1464,7 @@ See the Xdcode keymap documentation for supported actions and examples."
                         }
                         AppRunControl::Continue
                     }
-                    event = tui_events.next(), if app.pending_thread_switch_resets == 0
+                    event = tui_events.next(), if app.can_read_terminal_after_thread_switch(tui, &app_event_rx)
                         && (app.reconnect.offline || !block_terminal_input_for_pending_startup_events) => {
                         if let Some(event) = event {
                             if (matches!(

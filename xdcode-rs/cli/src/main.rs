@@ -85,7 +85,6 @@ use xdcode_features::Stage;
 use xdcode_features::is_known_feature_key;
 use xdcode_home::XdcodeHomeUserInstructionsProvider;
 use xdcode_login::AuthManager;
-use xdcode_login::is_workload_identity_selected;
 use xdcode_memories_write::clear_memory_roots_contents;
 use xdcode_models_manager::bundled_models_response;
 use xdcode_models_manager::manager::RefreshStrategy;
@@ -283,6 +282,11 @@ struct ReviewCommand {
     #[arg(long = "strict-config", default_value_t = false)]
     strict_config: bool,
 
+    /// Save trust for this project and future chats, including MCP commands outside the sandbox.
+    /// Persists even with --ephemeral. Does not override an explicitly untrusted project.
+    #[arg(long)]
+    trust: bool,
+
     #[clap(flatten)]
     args: ReviewArgs,
 }
@@ -300,8 +304,8 @@ struct DebugTraceReduceCommand {
 
 #[derive(Debug, Parser)]
 struct AgentsCommand {
-    /// The agents overview requires a shared server; this option is rejected.
-    #[arg(long, hide = true)]
+    /// Run the agents overview with an embedded app server.
+    #[arg(long)]
     no_daemon: bool,
     #[clap(flatten)]
     remote: InteractiveRemoteOptions,
@@ -626,10 +630,7 @@ fn handle_app_exit(
             eprintln!("ERROR: {message}");
             true
         }
-        ExitReason::UserRequested
-        | ExitReason::Archived(_)
-        | ExitReason::TurnInterrupted
-        | ExitReason::ThreadRemoved => false,
+        ExitReason::UserRequested | ExitReason::TurnInterrupted => false,
     };
 
     let color_enabled = supports_color::on(Stream::Stdout).is_some();
@@ -887,11 +888,6 @@ async fn dispatch_cli(
                         "`xdcode agents` cannot apply local provider or additional-directory overrides to a remote server"
                     );
                 }
-                if is_workload_identity_selected() {
-                    anyhow::bail!(
-                        "`xdcode agents` is unavailable while workload identity is active"
-                    );
-                }
                 if root_remote.is_none() {
                     resolve_remote_endpoint(
                         /*remote*/ None,
@@ -926,10 +922,11 @@ async fn dispatch_cli(
                 &mut exec_cli.config_overrides,
                 root_config_overrides.clone(),
             );
-            xdcode_exec::run_main(exec_cli, arg0_paths.clone()).await?;
+            Box::pin(xdcode_exec::run_main(exec_cli, arg0_paths.clone())).await?;
         }
         Some(Subcommand::Review(ReviewCommand {
             strict_config,
+            trust,
             args: review_args,
         })) => {
             reject_remote_mode_for_subcommand(
@@ -942,12 +939,13 @@ async fn dispatch_cli(
                 .shared
                 .inherit_exec_root_options(&interactive.shared);
             exec_cli.command = Some(ExecCommand::Review(review_args));
+            exec_cli.trust = trust;
             exec_cli.strict_config = strict_config || root_strict_config;
             prepend_config_flags(
                 &mut exec_cli.config_overrides,
                 root_config_overrides.clone(),
             );
-            xdcode_exec::run_main(exec_cli, arg0_paths.clone()).await?;
+            Box::pin(xdcode_exec::run_main(exec_cli, arg0_paths.clone())).await?;
         }
         Some(Subcommand::Mcp(mut mcp_cli)) => {
             reject_remote_mode_for_subcommand(
@@ -1721,6 +1719,9 @@ async fn run_debug_prompt_input_command(
     xdcode_skills_extension::install(&mut extensions, |config: &Config| {
         xdcode_skills_extension::SkillsExtensionConfig {
             include_instructions: config.include_skill_instructions,
+            catalog_deltas_enabled: config
+                .features
+                .enabled(xdcode_features::Feature::SkillCatalogDeltas),
             max_context_tokens: config.skill_max_context_tokens,
             bundled_skills_enabled: config.bundled_skills_enabled(),
             cloud_skill_enabled: config.cloud_skill_enabled,
@@ -2021,17 +2022,10 @@ async fn run_interactive_tui(
     remote_auth_token_env: Option<String>,
     arg0_paths: Arg0DispatchPaths,
 ) -> std::io::Result<AppExitInfo> {
-    if interactive.no_daemon {
-        if interactive.agents_overview {
-            return Ok(AppExitInfo::fatal(
-                "--no-daemon cannot be used with xdcode agents. The agents overview requires a shared server. Use xdcode --no-daemon to work without it.",
-            ));
-        }
-        if remote.is_some() {
-            return Ok(AppExitInfo::fatal(
-                "--no-daemon cannot be used with --remote.",
-            ));
-        }
+    if interactive.no_daemon && remote.is_some() {
+        return Ok(AppExitInfo::fatal(
+            "--no-daemon cannot be used with --remote.",
+        ));
     }
     if let Some(prompt) = interactive.prompt.take() {
         // Normalize CRLF/CR to LF so CLI-provided text can't leak `\r` into TUI state.
@@ -2056,25 +2050,6 @@ async fn run_interactive_tui(
         }
     }
 
-    #[cfg(any(unix, windows))]
-    if interactive.agents_overview && remote.is_none() {
-        if !std::io::stdin().is_terminal() {
-            return Ok(AppExitInfo::fatal("stdin is not a terminal"));
-        }
-        if !std::io::stdout().is_terminal() {
-            return Ok(AppExitInfo::fatal("stdout is not a terminal"));
-        }
-        cloud_config::load_config(&interactive.config_overrides, LoaderOverrides::default())
-            .await
-            .map_err(std::io::Error::other)?;
-        let output = xdcode_app_server_daemon::run(AppServerLifecycleCommand::Start)
-            .await
-            .map_err(|err| std::io::Error::other(format!(
-                "{err:#}\nThe agents overview requires a shared server. Use xdcode --no-daemon to work without it."
-            )))?;
-        interactive.managed_daemon = output.backend.is_some();
-    }
-
     let remote_endpoint = match resolve_remote_endpoint(remote, remote_auth_token_env.clone()) {
         Ok(remote_endpoint) => remote_endpoint,
         Err(err) if is_remote_auth_usage_error(&err) => {
@@ -2082,6 +2057,14 @@ async fn run_interactive_tui(
         }
         Err(err) => return Err(err),
     };
+    if interactive.agents_overview && remote_endpoint.is_none() {
+        if !std::io::stdin().is_terminal() {
+            return Ok(AppExitInfo::fatal("stdin is not a terminal"));
+        }
+        if !std::io::stdout().is_terminal() {
+            return Ok(AppExitInfo::fatal("stdout is not a terminal"));
+        }
+    }
     let start_tui = || {
         xdcode_tui::run_main(
             interactive.clone(),
@@ -3312,20 +3295,6 @@ mod tests {
     }
 
     #[test]
-    fn format_exit_messages_confirms_archive() {
-        let mut exit_info = sample_exit_info(
-            Some("123e4567-e89b-12d3-a456-426614174000"),
-            /*thread_name*/ None,
-        );
-        exit_info.exit_reason = ExitReason::Archived(exit_info.thread_id.unwrap());
-        let lines = exit_info.format_exit_messages(/*color_enabled*/ false);
-        insta::assert_snapshot!(lines.join("\n"), @"
-        Token usage: total=2 input=0 output=2
-        Session archived: 123e4567-e89b-12d3-a456-426614174000
-        ");
-    }
-
-    #[test]
     fn format_exit_messages_includes_session_id_for_fatal_exit_without_resume_hint() {
         let exit_info = AppExitInfo {
             token_usage: TokenUsage::default(),
@@ -3718,12 +3687,18 @@ mod tests {
         let cli = MultitoolCli::try_parse_from(["xdcode", "--strict-config"]).expect("parse");
         assert!(cli.interactive.strict_config);
 
-        let cli =
-            MultitoolCli::try_parse_from(["xdcode", "review", "--strict-config", "--uncommitted"])
-                .expect("parse");
+        let cli = MultitoolCli::try_parse_from([
+            "xdcode",
+            "review",
+            "--strict-config",
+            "--trust",
+            "--uncommitted",
+        ])
+        .expect("parse");
         assert_matches!(
             cli.subcommand,
             Some(Subcommand::Review(ReviewCommand {
+                trust: true,
                 strict_config: true,
                 ..
             }))

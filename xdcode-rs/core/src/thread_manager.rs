@@ -1,4 +1,5 @@
 mod managed;
+pub(crate) mod model_catalog;
 mod shared_instructions;
 mod shutdown;
 
@@ -54,7 +55,6 @@ use tracing::instrument;
 use tracing::warn;
 use xdcode_agent_graph_store::AgentGraphStore;
 use xdcode_agent_graph_store::LocalAgentGraphStore;
-use xdcode_agent_message_board_extension::local_board_options;
 use xdcode_analytics::AnalyticsEventsClient;
 use xdcode_app_server_protocol::ThreadHistoryBuilder;
 use xdcode_app_server_protocol::TurnStatus;
@@ -81,7 +81,6 @@ use xdcode_login::AuthManager;
 use xdcode_login::XdcodeAuth;
 use xdcode_login::default_client::XDCODE_INTERNAL_ORIGINATOR_OVERRIDE_ENV_VAR;
 use xdcode_login::default_client::originator;
-use xdcode_message_board::LocalAgentMessageBoard;
 use xdcode_model_provider::create_model_provider;
 use xdcode_model_provider_info::ModelProviderInfo;
 use xdcode_model_provider_info::PROVIDER_PROVIDER_ID;
@@ -191,6 +190,13 @@ pub struct NewThread {
     pub session_configured: SessionConfiguredEvent,
 }
 
+/// Describes whether a captured runtime is still registered under its thread ID.
+pub enum ThreadRegistration {
+    Current,
+    Absent,
+    Replaced,
+}
+
 // TODO(ccunningham): Add an explicit non-interrupting live-turn snapshot once
 // core can represent sampling boundaries directly instead of relying on
 // whichever items happened to be persisted mid-turn.
@@ -263,6 +269,7 @@ pub struct ThreadManager {
 pub struct InternalSessionParent {
     pub(crate) thread_id: ThreadId,
     pub(crate) auth_manager: Arc<AuthManager>,
+    pub(crate) model_catalog: model_catalog::ThreadModelCatalog,
     pub(crate) agent_control: AgentControlInit,
     pub(crate) originator: String,
     pub(crate) inherited_instructions: Option<SessionInstructions>,
@@ -362,6 +369,7 @@ struct ThreadSpawnRequest {
     agent_control: AgentControlInit,
     parent_thread_id: Option<ThreadId>,
     parent_originator: Option<String>,
+    parent_catalog: Option<model_catalog::ThreadModelCatalog>,
     forked_from_thread_id: Option<ThreadId>,
     fork_persistence: ForkPersistence,
     inherited_environments: Option<TurnEnvironmentSnapshot>,
@@ -383,6 +391,7 @@ impl ThreadSpawnRequest {
             agent_control: agent_control.into(),
             parent_thread_id: None,
             parent_originator: None,
+            parent_catalog: None,
             forked_from_thread_id: None,
             fork_persistence: ForkPersistence::Copied,
             inherited_environments: None,
@@ -449,6 +458,7 @@ pub(crate) struct ThreadManagerState {
     agent_control_factory: Option<AgentControlFactory>,
     auth_manager: Arc<AuthManager>,
     models_manager: SharedModelsManager,
+    model_catalog: model_catalog::ThreadModelCatalog,
     git_root_discovery: Arc<GitRootDiscovery>,
     environment_manager: Arc<EnvironmentManager>,
     starting_mcp_runtimes: std::sync::Mutex<Vec<std::sync::Weak<AtomicBool>>>,
@@ -489,6 +499,17 @@ pub fn thread_store_from_config(
     config: &Config,
     state_db: Option<StateDbHandle>,
 ) -> Arc<dyn ThreadStore> {
+    thread_store_from_config_with_cleanup(config, state_db, |_| Box::pin(async { Ok(()) }))
+}
+
+pub fn thread_store_from_config_with_cleanup(
+    config: &Config,
+    state_db: Option<StateDbHandle>,
+    cleanup: impl Fn(Vec<ThreadId>) -> xdcode_thread_store::ThreadStoreFuture<'static, ()>
+    + Send
+    + Sync
+    + 'static,
+) -> Arc<dyn ThreadStore> {
     match &config.experimental_thread_store {
         ThreadStoreConfig::Local => {
             let compression_enabled = config
@@ -498,28 +519,9 @@ pub fn thread_store_from_config(
                 .features
                 .enabled(Feature::BackgroundPaginatedRolloutMigration);
             let has_state_db = state_db.is_some();
-            let sqlite = config.sqlite_config().clone();
             let store = Arc::new(
                 LocalThreadStore::new(LocalThreadStoreConfig::from_config(config), state_db)
-                    .with_thread_data_cleanup(move |thread_ids| {
-                        let sqlite = sqlite.clone();
-                        Box::pin(async move {
-                            let boards = thread_ids.into_iter().map(Into::into).collect::<Vec<_>>();
-                            LocalAgentMessageBoard::delete_boards(
-                                &sqlite,
-                                &local_board_options(),
-                                &boards,
-                            )
-                            .await
-                            .map_err(|err| {
-                                ThreadStoreError::Internal {
-                                    message: format!(
-                                        "failed to delete agent message boards: {err}"
-                                    ),
-                                }
-                            })
-                        })
-                    }),
+                    .with_thread_data_cleanup(cleanup),
             );
             if has_state_db && background_migration_enabled {
                 let startup_store = Arc::clone(&store);
@@ -619,6 +621,11 @@ impl ThreadManager {
                 thread_created_tx,
                 thread_id_generator: default_thread_id_generator(),
                 agent_control_factory: None,
+                model_catalog: model_catalog::ThreadModelCatalog::new(
+                    config,
+                    Arc::clone(&auth_manager),
+                    Arc::clone(&models_manager),
+                ),
                 models_manager,
                 git_root_discovery: Arc::default(),
                 environment_manager,
@@ -800,6 +807,8 @@ impl ThreadManager {
             state_db.clone(),
         ));
         let agent_graph_store = local_agent_graph_store_from_state_db(state_db.as_ref());
+        let models_manager = create_model_provider(provider.clone(), Some(auth_manager.clone()))
+            .models_manager(xdcode_home.clone(), None);
         Self {
             state: Arc::new(ThreadManagerState {
                 threads: Arc::new(RwLock::new(HashMap::new())),
@@ -807,8 +816,15 @@ impl ThreadManager {
                 thread_created_tx,
                 thread_id_generator: default_thread_id_generator(),
                 agent_control_factory: None,
-                models_manager: create_model_provider(provider, Some(auth_manager.clone()))
-                    .models_manager(xdcode_home, /*config_model_catalog*/ None),
+                model_catalog: model_catalog::ThreadModelCatalog::with_settings(
+                    provider,
+                    None,
+                    xdcode_home,
+                    false,
+                    Arc::clone(&auth_manager),
+                    Arc::clone(&models_manager),
+                ),
+                models_manager,
                 git_root_discovery: Arc::default(),
                 environment_manager,
                 starting_mcp_runtimes: std::sync::Mutex::new(Vec::new()),
@@ -979,25 +995,37 @@ impl ThreadManager {
         self.state.get_thread(thread_id).await
     }
 
-    /// Board hosts may reach internal runtimes only through a matching explicit connection.
-    pub(crate) async fn get_thread_for_board(
+    /// Checks the full registry without exposing any replacement runtime.
+    pub async fn thread_registration(
         &self,
         thread_id: ThreadId,
-        connection: &xdcode_message_board::LocalBoardConnection,
+        expected: &Arc<XdcodeThread>,
+    ) -> ThreadRegistration {
+        match self.state.threads.read().await.get(&thread_id) {
+            Some(current) if Arc::ptr_eq(current, expected) => ThreadRegistration::Current,
+            Some(_) => ThreadRegistration::Replaced,
+            None => ThreadRegistration::Absent,
+        }
+    }
+
+    /// Finds a registered runtime whose host-owned extension data matches the supplied scope.
+    /// Unlike `get_thread`, this can return internal runtimes, but only after validating their
+    /// explicit extension attachment. It never loads a missing runtime.
+    pub async fn get_thread_with_extension<T: Send + Sync + 'static>(
+        &self,
+        thread_id: ThreadId,
+        matches: impl FnOnce(&T) -> bool,
     ) -> XdcodeResult<Arc<XdcodeThread>> {
-        self.state
-            .threads
-            .read()
-            .await
+        let threads = self.state.threads.read().await;
+        let thread = threads
             .get(&thread_id)
-            .filter(|thread| {
-                thread
-                    .thread_extension_data()
-                    .get::<xdcode_message_board::LocalBoardConnection>()
-                    .is_some_and(|other| connection.same_board(&other))
-            })
-            .cloned()
-            .ok_or(XdcodeErr::ThreadNotFound(thread_id))
+            .ok_or(XdcodeErr::ThreadNotFound(thread_id))?;
+        let extension = thread.thread_extension_data().get::<T>();
+        if extension.as_deref().is_some_and(matches) {
+            Ok(Arc::clone(thread))
+        } else {
+            Err(XdcodeErr::ThreadNotFound(thread_id))
+        }
     }
 
     /// Updates metadata for loaded and cold threads through one entrypoint.
@@ -1127,6 +1155,69 @@ impl ThreadManager {
         .await
     }
 
+    pub async fn resolve_startup_model(
+        &self,
+        options: &StartThreadOptions,
+    ) -> XdcodeResult<Arc<xdcode_protocol::model_types::ModelInfo>> {
+        let mut config = options.config.clone();
+        crate::session::restore_catalog_model_from_history(&mut config, &options.initial_history);
+        let source = options
+            .session_source
+            .as_ref()
+            .unwrap_or(&self.state.session_source);
+        let parent = options.internal_parent.as_ref();
+        let auth = parent
+            .map(|parent| Arc::clone(&parent.auth_manager))
+            .unwrap_or_else(|| Arc::clone(&self.state.auth_manager));
+        let originator = self
+            .state
+            .effective_originator(
+                &options.initial_history,
+                options.metrics_service_name.as_deref(),
+                source,
+                parent.map(|parent| parent.thread_id),
+                options.initial_history.forked_from_id(),
+                parent.map(|parent| parent.originator.clone()),
+            )
+            .await;
+        let catalog = parent
+            .map(|parent| &parent.model_catalog)
+            .unwrap_or(&self.state.model_catalog);
+        let manager = catalog.for_thread(&config, auth, &originator, source).await;
+        let strategy = if source.is_non_root_agent() {
+            RefreshStrategy::Offline
+        } else {
+            RefreshStrategy::OnlineIfUncached
+        };
+        let model = if config.model_catalog_id.is_some() {
+            config.model.clone().unwrap_or_default()
+        } else {
+            manager
+                .get_default_model(
+                    &config.model,
+                    options.allow_provider_model_fallback,
+                    strategy,
+                    config.http_client_factory(),
+                )
+                .await
+        };
+        if model.trim().is_empty() {
+            return Err(XdcodeErr::InvalidRequest("No models are available. Set `model` explicitly or check your model catalog configuration.".to_string()));
+        }
+        if let Some(info) = crate::session::configured_catalog_model_info(
+            &config,
+            &model,
+            &config.to_models_manager_config(),
+        ) {
+            return Ok(Arc::new(info));
+        }
+        Ok(Arc::new(
+            manager
+                .get_model_info(&model, &config.to_models_manager_config())
+                .await,
+        ))
+    }
+
     /// Starts a fresh internal session associated with an existing parent thread.
     pub async fn spawn_internal_session(
         &self,
@@ -1178,6 +1269,7 @@ impl ThreadManager {
         options.internal_parent = Some(InternalSessionParent {
             thread_id: parent_thread_id,
             auth_manager: Arc::clone(&parent.session.services.auth_manager),
+            model_catalog: parent.session.services.model_catalog.clone(),
             agent_control: AgentControlInit::Provided {
                 control: Arc::clone(&parent.session.services.agent_control),
                 runtime: parent.session.services.local_agent_runtime.clone(),
@@ -1224,6 +1316,7 @@ impl ThreadManager {
                 ThreadSpawnRequest::new(options, parent.auth_manager, parent.agent_control);
             request.parent_thread_id = Some(parent.thread_id);
             request.parent_originator = Some(parent.originator);
+            request.parent_catalog = Some(parent.model_catalog);
             request.inherited_instructions = parent.inherited_instructions;
             request.forked_from_thread_id = request.options.initial_history.forked_from_id();
             request
@@ -1840,7 +1933,7 @@ impl ThreadManagerState {
                 .session
                 .services
                 .local_agent_runtime
-                .pin_v2_residency(self, &thread)
+                .pin_v2_residency(&thread)
                 .await?
         } else {
             None
@@ -2145,6 +2238,7 @@ impl ThreadManagerState {
             agent_control,
             parent_thread_id,
             parent_originator,
+            parent_catalog,
             forked_from_thread_id,
             fork_persistence,
             inherited_environments,
@@ -2381,6 +2475,31 @@ impl ThreadManagerState {
                 parent_originator,
             )
             .await;
+        crate::session::restore_catalog_model_from_history(&mut config, &initial_history);
+        let inherited_catalog = if let Some(catalog) = parent_catalog {
+            Some(catalog)
+        } else if session_source.is_non_root_agent() {
+            match parent_thread_id {
+                Some(parent) => self
+                    .get_thread(parent)
+                    .await
+                    .ok()
+                    .map(|thread| thread.session.services.model_catalog.clone()),
+                None => None,
+            }
+        } else {
+            None
+        };
+        let models_manager = inherited_catalog
+            .as_ref()
+            .unwrap_or(&self.model_catalog)
+            .for_thread(
+                &config,
+                Arc::clone(&auth_manager),
+                &originator,
+                &session_source,
+            )
+            .await;
         let source_changed_during_startup = Arc::new(AtomicBool::new(false));
         {
             let mut starting = self
@@ -2409,10 +2528,7 @@ impl ThreadManagerState {
             instructions,
             installation_id: self.installation_id.clone(),
             auth_manager,
-            models_manager: self
-                .models_manager
-                .for_originator(&originator)
-                .unwrap_or_else(|| Arc::clone(&self.models_manager)),
+            models_manager,
             git_root_discovery: Arc::clone(&self.git_root_discovery),
             environment_manager: Arc::clone(&self.environment_manager),
             skills_service: Arc::clone(&self.skills_service),

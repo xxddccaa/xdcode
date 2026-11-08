@@ -209,6 +209,10 @@ pub(crate) fn lines_with_sources_eq(left: &[HyperlinkLine], right: &[HyperlinkLi
             .eq(right.iter().map(|line| &line.source))
 }
 
+pub(crate) fn source_span_width(span: &Span<'_>) -> usize {
+    span.content.graphemes(true).map(display_width).sum()
+}
+
 impl HyperlinkLine {
     pub(crate) fn new(line: Line<'static>) -> Self {
         Self {
@@ -223,13 +227,25 @@ impl HyperlinkLine {
     }
 
     pub(crate) fn push_span(&mut self, span: Span<'static>, destination: Option<&str>) {
+        if let Some(destination) = destination.and_then(web_destination) {
+            let start = self.line.spans.iter().map(source_span_width).sum();
+            self.push_linked_span(span, start, destination);
+        } else {
+            self.source = None;
+            self.line.push_span(span);
+        }
+    }
+
+    pub(crate) fn push_linked_span(
+        &mut self,
+        span: Span<'static>,
+        start: usize,
+        destination: String,
+    ) {
         self.source = None;
-        let start = self.width();
-        let end = start + display_width(span.content.as_ref());
+        let end = start + source_span_width(&span);
         self.line.push_span(span);
-        if end > start
-            && let Some(destination) = destination.and_then(web_destination)
-        {
+        if end > start {
             self.hyperlinks
                 .push(TerminalHyperlink::web(start..end, destination));
         }
