@@ -375,18 +375,20 @@ with C compilation substituted and checks resolved-directory header tracking;
 it does not invoke Cargo or rebuild the full runtime. These tests do not establish that the real Rust runtime builds or
 that its sandbox, provider, MCP or daemon works.
 
-`.github/workflows/xdcode.yml` runs focused delivery checks. Its manually enabled
-build job prepares native GNU dependencies, builds/packages with the same scripts,
-installs the real package into an isolated directory, verifies its version, and
-uploads artifacts by default. Explicitly enable `publish_release` together with
-all three platform builds, or with only Windows, to publish a GitHub Release
-after every selected platform passes its native build, package integrity,
-independent runtime, identity, Responses/tool loop, MCP, resume and reliability checks.
-Each platform also smoke-tests the online install entrypoint against its real
-local artifact in an isolated home. Publication rechecks all archive digests,
-source commit, clean-build metadata, tag-bound build IDs and the Linux
-installer when Linux is included, uploads the selected assets to a draft, then
-publishes it. A full release includes seven assets. Tags use
+`.github/workflows/xdcode.yml` runs focused delivery checks. `delivery-checks`
+runs the shared unit tests and static checks. Each manually enabled platform
+uses a separate `*-build` job and `*-verify` job: build jobs compile and upload
+the platform artifact, while verify jobs download it and test the real package
+in an isolated directory, including version, runtime, identity,
+Responses/tool loop, MCP, resume and reliability checks. Each platform also
+smoke-tests the online install entrypoint against its real local artifact. A
+failed verification can be rerun without rebuilding. Explicitly enable
+`publish_release` together with all three platform builds, or with only
+Windows, to publish a GitHub Release after every selected platform's verify
+job succeeds. Publication rechecks all archive digests, source commit,
+clean-build metadata, tag-bound build IDs and the Linux installer when Linux is
+included, uploads the selected assets to a draft, then publishes it. A full
+release includes seven assets. Tags use
 `v<version>-g<source-commit-prefix>`. It does not replace an existing release.
 
 ```sh

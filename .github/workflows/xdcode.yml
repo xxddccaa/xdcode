@@ -56,9 +56,9 @@ permissions:
   contents: read
 
 jobs:
-  macos-arm64-package:
+  macos-arm64-build:
     if: github.event_name == 'workflow_dispatch' && inputs.build_macos
-    needs: delivery-tests
+    needs: delivery-checks
     runs-on: macos-15
     timeout-minutes: 360
     env:
@@ -84,21 +84,43 @@ jobs:
           python3.11 -m unittest discover -s scripts/xdcode/tests -p 'test_bootstrap.py'
       - name: Build, sign locally, and validate native package
         run: python3.11 scripts/xdcode/macos.py
-      - name: Verify the universal installer with the real native package
-        env:
-          XDCODE_TEST_PACKAGE_DIR: target/xdcode-dist
-        run: python3.11 -m unittest discover -s scripts/xdcode/tests -p 'test_bootstrap.py' -v
-      - name: Verify agent tools, MCP, identity, state isolation, and resume
-        run: python3.11 scripts/verify_xdcode_runtime.py target/xdcode-macos-package/bin/xdcode
-      - name: Verify Plan exit, rate-limit recovery, and cancellation
-        run: python3.11 scripts/verify_xdcode_reliability.py target/xdcode-macos-package/bin/xdcode
       - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: xdcode-macos-arm64
           path: target/xdcode-dist/xdcode-*-macos-arm64.tar.gz*
           if-no-files-found: error
 
-  delivery-tests:
+  macos-arm64-verify:
+    if: github.event_name == 'workflow_dispatch' && inputs.build_macos
+    needs: macos-arm64-build
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: '3.11'
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: xdcode-macos-arm64
+          path: target/xdcode-dist
+      - name: Verify the universal installer with the real native package
+        env:
+          XDCODE_TEST_PACKAGE_DIR: target/xdcode-dist
+        run: python3.11 -m unittest discover -s scripts/xdcode/tests -p 'test_bootstrap.py' -v
+      - name: Extract the verified macOS archive
+        run: |
+          set -euo pipefail
+          archives=(target/xdcode-dist/xdcode-*-macos-arm64.tar.gz)
+          [[ ${#archives[@]} -eq 1 ]]
+          mkdir -p target/xdcode-verify-package
+          tar -xzf "${archives[0]}" -C target/xdcode-verify-package
+      - name: Verify agent tools, MCP, identity, state isolation, and resume
+        run: python3.11 scripts/verify_xdcode_runtime.py target/xdcode-verify-package/bin/xdcode
+      - name: Verify Plan exit, rate-limit recovery, and cancellation
+        run: python3.11 scripts/verify_xdcode_reliability.py target/xdcode-verify-package/bin/xdcode
+
+  delivery-checks:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -132,9 +154,9 @@ jobs:
           bash -n install.sh
           git diff --check
 
-  linux-gnu-package:
+  linux-gnu-build:
     if: github.event_name == 'workflow_dispatch' && inputs.build_package
-    needs: delivery-tests
+    needs: delivery-checks
     # Preserve compatibility with glibc 2.35 hosts.
     runs-on: ubuntu-22.04
     timeout-minutes: 360
@@ -171,6 +193,26 @@ jobs:
           fi
           python3.11 scripts/xdcode/build.py --output-dir "$GITHUB_WORKSPACE/target/xdcode-ci-build" "${build_args[@]}"
           python3.11 scripts/xdcode/package.py --build-dir "$GITHUB_WORKSPACE/target/xdcode-ci-build"
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: xdcode-linux-x86_64-gnu
+          path: target/xdcode-dist/xdcode-*
+          if-no-files-found: error
+
+  linux-gnu-verify:
+    if: github.event_name == 'workflow_dispatch' && inputs.build_package
+    needs: linux-gnu-build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: '3.11'
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: xdcode-linux-x86_64-gnu
+          path: target/xdcode-dist
       - name: Verify the universal installer with the real native package
         env:
           XDCODE_TEST_PACKAGE_DIR: target/xdcode-dist
@@ -198,15 +240,10 @@ jobs:
         env:
           XDCODE_CI_BINARY: ${{ steps.install_smoke.outputs.binary }}
         run: python3.11 scripts/verify_xdcode_reliability.py "$XDCODE_CI_BINARY"
-      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
-        with:
-          name: xdcode-linux-x86_64-gnu
-          path: target/xdcode-dist/xdcode-*
-          if-no-files-found: error
 
-  windows-x86_64-package:
+  windows-x86_64-build:
     if: github.event_name == 'workflow_dispatch' && inputs.build_windows
-    needs: delivery-tests
+    needs: delivery-checks
     runs-on: windows-2025
     timeout-minutes: 360
     env:
@@ -238,27 +275,56 @@ jobs:
           Enter-VsDevShell -VsInstallPath $installation -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
           python scripts/xdcode/windows.py
           if ($LASTEXITCODE -ne 0) { throw 'Native Windows build failed' }
-      - name: Verify the PowerShell installer with the real native package
-        env:
-          XDCODE_TEST_PACKAGE_DIR: target/xdcode-dist
-        run: python -m unittest discover -s scripts/xdcode/tests -p 'test_windows.py' -v
-      - name: Verify agent tools, MCP, identity, state isolation, and resume
-        run: python scripts/verify_xdcode_runtime.py target/xdcode-windows-package/bin/xdcode.exe
-      - name: Verify Plan exit, rate-limit recovery, and cancellation
-        run: python scripts/verify_xdcode_reliability.py target/xdcode-windows-package/bin/xdcode.exe
       - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
         with:
           name: xdcode-windows-x86_64
           path: target/xdcode-dist/xdcode-*-windows-x86_64.zip*
           if-no-files-found: error
 
+  windows-x86_64-verify:
+    if: github.event_name == 'workflow_dispatch' && inputs.build_windows
+    needs: windows-x86_64-build
+    runs-on: windows-2025
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        with:
+          python-version: '3.11'
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: xdcode-windows-x86_64
+          path: target/xdcode-dist
+      - name: Verify the PowerShell installer with the real native package
+        env:
+          XDCODE_TEST_PACKAGE_DIR: target/xdcode-dist
+        run: python -m unittest discover -s scripts/xdcode/tests -p 'test_windows.py' -v
+      - name: Extract the verified Windows archive
+        shell: pwsh
+        run: |
+          $archives = @(Get-ChildItem -LiteralPath target/xdcode-dist -Filter 'xdcode-*-windows-x86_64.zip')
+          if ($archives.Count -ne 1) { throw 'Expected exactly one Windows archive' }
+          New-Item -ItemType Directory -Force target/xdcode-verify-package | Out-Null
+          Expand-Archive -LiteralPath $archives[0].FullName -DestinationPath target/xdcode-verify-package
+      - name: Verify agent tools, MCP, identity, state isolation, and resume
+        run: python scripts/verify_xdcode_runtime.py target/xdcode-verify-package/bin/xdcode.exe
+      - name: Verify Plan exit, rate-limit recovery, and cancellation
+        run: python scripts/verify_xdcode_reliability.py target/xdcode-verify-package/bin/xdcode.exe
+
   publish-release:
     if: >-
       ${{ always() && !cancelled() && github.event_name == 'workflow_dispatch' && inputs.publish_release &&
-          needs.delivery-tests.result == 'success' && needs.windows-x86_64-package.result == 'success' &&
+          needs.delivery-checks.result == 'success' && needs.windows-x86_64-verify.result == 'success' &&
           ((!inputs.build_package && !inputs.build_macos) ||
-           (needs.linux-gnu-package.result == 'success' && needs.macos-arm64-package.result == 'success')) }}
-    needs: [delivery-tests, linux-gnu-package, macos-arm64-package, windows-x86_64-package]
+           (needs.linux-gnu-verify.result == 'success' && needs.macos-arm64-verify.result == 'success')) }}
+    needs:
+      - delivery-checks
+      - linux-gnu-build
+      - linux-gnu-verify
+      - macos-arm64-build
+      - macos-arm64-verify
+      - windows-x86_64-build
+      - windows-x86_64-verify
     runs-on: ubuntu-24.04
     permissions:
       contents: write
