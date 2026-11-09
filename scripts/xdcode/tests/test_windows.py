@@ -261,6 +261,22 @@ class PowerShellInstallerTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("verified", result.stdout)
 
+    def test_current_selection_updates_on_reinstall_without_leaving_temporaries(self):
+        bin_directory = self.root / "selection-bin"
+        bin_directory.mkdir()
+        for identity in (self.identity, "0.168.0-gbbbbbbbbbbbb"):
+            result = self.run_powershell(
+                "Set-CurrentSelection $env:BIN_PATH $env:SELECTION_IDENTITY",
+                BIN_PATH=str(bin_directory),
+                SELECTION_IDENTITY=identity,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual((bin_directory / "current.txt").read_text(), identity)
+        self.assertEqual(
+            sorted(path.name for path in bin_directory.iterdir()),
+            ["current.txt"],
+        )
+
     def release_fixture(self, identity=None, **changes):
         identity = identity or self.identity
         archive = f"xdcode-{identity}-windows-x86_64.zip"

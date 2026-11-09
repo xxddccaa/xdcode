@@ -191,6 +191,26 @@ function Assert-ManagedEntry([string]$BinDirectory, [string]$BuildRoot) {
     }
 }
 
+function Set-CurrentSelection([string]$BinDirectory, [string]$Identity) {
+    $selection = Join-Path $BinDirectory 'current.txt'
+    $entryTemporary = Join-Path $BinDirectory ".current-$([Guid]::NewGuid().ToString('N')).txt"
+    [IO.File]::WriteAllText($entryTemporary, $Identity, [Text.UTF8Encoding]::new($false))
+    try {
+        if ([IO.File]::Exists($selection)) {
+            $backup = Join-Path $BinDirectory ".current-backup-$([Guid]::NewGuid().ToString('N')).txt"
+            try {
+                [IO.File]::Replace($entryTemporary, $selection, $backup)
+            } finally {
+                if ([IO.File]::Exists($backup)) { [IO.File]::Delete($backup) }
+            }
+        } else {
+            [IO.File]::Move($entryTemporary, $selection)
+        }
+    } finally {
+        if ([IO.File]::Exists($entryTemporary)) { [IO.File]::Delete($entryTemporary) }
+    }
+}
+
 function Find-LatestWindowsRelease([hashtable]$Request, [string]$Repository) {
     $selected = $null
     for ($page = 1; $page -le 20; $page++) {
@@ -258,7 +278,6 @@ function Install-Xdcode {
     [void][IO.Directory]::CreateDirectory($temporary)
     $staging = $null
     $lock = $null
-    $entryTemporary = $null
     $freshLauncher = $false
     try {
         Write-Host "Installing $Release for Windows x86_64"
@@ -326,15 +345,7 @@ function Install-Xdcode {
             $receipt = @{schema_version=1; source_identity=$identity; sha256=(Get-FileHash -LiteralPath $entry -Algorithm SHA256).Hash.ToLowerInvariant()}
             [IO.File]::WriteAllText((Join-Path $binDirectory 'launcher.json'), ($receipt | ConvertTo-Json), [Text.UTF8Encoding]::new($false))
         }
-        $selection = Join-Path $binDirectory 'current.txt'
-        $entryTemporary = Join-Path $binDirectory ".current-$([Guid]::NewGuid().ToString('N')).txt"
-        [IO.File]::WriteAllText($entryTemporary, $identity, [Text.UTF8Encoding]::new($false))
-        if ([IO.File]::Exists($selection)) {
-            [IO.File]::Replace($entryTemporary, $selection, $null)
-        } else {
-            [IO.File]::Move($entryTemporary, $selection)
-        }
-        $entryTemporary = $null
+        Set-CurrentSelection $binDirectory $identity
         $freshLauncher = $false
         if (-not $NoPathUpdate) {
             $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
@@ -351,7 +362,6 @@ function Install-Xdcode {
             [IO.File]::Delete((Join-Path $binDirectory 'xdcode.exe'))
             [IO.File]::Delete((Join-Path $binDirectory 'launcher.json'))
         }
-        if ($entryTemporary -and [IO.File]::Exists($entryTemporary)) { [IO.File]::Delete($entryTemporary) }
         if ($staging -and [IO.Directory]::Exists($staging)) { [IO.Directory]::Delete($staging, $true) }
         if ($lock) { $lock.Dispose() }
         if ([IO.Directory]::Exists($temporary)) { [IO.Directory]::Delete($temporary, $true) }
