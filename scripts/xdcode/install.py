@@ -10,7 +10,6 @@ if sys.version_info < (3, 11):
 
 import argparse
 import contextlib
-import fcntl
 import hashlib
 import json
 import os
@@ -433,6 +432,8 @@ def unpack_verified(archive: tarfile.TarFile, stage: Path) -> dict:
 
 @contextlib.contextmanager
 def install_lock(root: Path):
+    import fcntl
+
     descriptor = os.open(root / ".install.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     try:
         metadata = os.fstat(descriptor)

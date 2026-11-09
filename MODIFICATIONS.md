@@ -22,11 +22,24 @@ recorded separately when a release selectively backports fixes.
 The GNU/Linux offline installer accepts an explicit `--force` to install while
 existing xdcode processes continue running. Only the active-process gate is
 skipped; integrity checks, safe paths, install locking and old builds remain.
-The manual GitHub delivery workflow can publish both Linux x86_64 and Apple
-Silicon artifacts after their native build and runtime checks pass. It verifies
+The manually invoked root `install.sh` follows the latest published release,
+detects Linux x86_64/macOS ARM64 and preserves the offline installer's integrity
+and process protections. macOS uses system tools rather than requiring Python.
+The root `install.ps1` supports native Windows x86_64 with checksum/path/PE checks,
+an exclusive lock and a fixed native launcher. The launcher forwards arguments
+without a command shell and reads only a local atomic build selection, so force
+upgrades do not overwrite an executable used by existing sessions.
+The manual GitHub delivery workflow can publish Linux x86_64, Apple Silicon and
+Windows x86_64 artifacts after their native build and runtime checks pass. It verifies
 matching clean source receipts and uploads all assets to a draft before making
-the release public. Neither operation adds an application updater or stops
-existing sessions.
+the release public. Windows can also be published on its own under a new
+source-derived tag, without rebuilding Linux/macOS or replacing their latest
+release. Its installer selects the most recently published stable release with
+Windows assets. The documented Windows command uses the local `10826` proxy for
+both script and package downloads. These operations do not add an application updater or stop
+existing sessions. Windows publication is newly configured; native success must
+be established by CI rather than inferred from local structural/unit checks.
+Windows verification does not provision elevated sandbox accounts.
 
 Third-party protocol/model identifiers, pinned external build sources and
 license notices intentionally retain their original spellings. Those names

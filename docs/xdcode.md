@@ -379,21 +379,54 @@ that its sandbox, provider, MCP or daemon works.
 build job prepares native GNU dependencies, builds/packages with the same scripts,
 installs the real package into an isolated directory, verifies its version, and
 uploads artifacts by default. Explicitly enable `publish_release` together with
-both platform builds to publish a GitHub Release only after the native build,
-package integrity, independent runtime, identity, Responses/tool loop, MCP,
-resume and reliability checks pass on Linux and Apple Silicon. Publication
-rechecks both archive digests, source commit, clean-build metadata and the Linux
-installer, uploads all five assets to a draft, then publishes it. Tags use
+all three platform builds, or with only Windows, to publish a GitHub Release
+after every selected platform passes its native build, package integrity,
+independent runtime, identity, Responses/tool loop, MCP, resume and reliability checks.
+Each platform also smoke-tests the online install entrypoint against its real
+local artifact in an isolated home. Publication rechecks all archive digests,
+source commit, clean-build metadata, tag-bound build IDs and the Linux
+installer when Linux is included, uploads the selected assets to a draft, then
+publishes it. A full release includes seven assets. Tags use
 `v<version>-g<source-commit-prefix>`. It does not replace an existing release.
 
 ```sh
 gh workflow run xdcode.yml --ref main \
-  -f build_package=true -f build_macos=true -f publish_release=true
+  -f build_package=true -f build_macos=true -f build_windows=true -f publish_release=true
 ```
+
+To supplement the existing Linux/macOS release with Windows only:
+
+```sh
+gh workflow run xdcode.yml --ref main \
+  -f build_package=false -f build_macos=false -f build_windows=true -f publish_release=true
+```
+
+Windows-only publication uploads its ZIP and checksum under a new source-derived
+tag. It does not rebuild Linux/macOS, modify old releases or replace GitHub's
+latest release. The Windows installer finds the most recently published stable
+release with Windows assets independently of that latest marker. Source receipts
+remain truthful; artifacts from different commits are not mixed under one tag.
+Other partial platform combinations are rejected before expensive builds.
 
 The lead must still review source, native dependencies and validation coverage
 before declaring a release usable. Heavy CI builds need sufficient runner
 memory/disk. A dispatched workflow is not evidence that a build passed.
+
+The repository-root `install.sh` is a manually downloaded latest-release
+bootstrapper, separate from the runtime and the offline Linux installer. It
+detects Linux x86_64/macOS ARM64 and can pin a release with `--release`.
+`XDCODE_INSTALL_PROXY` configures its downloads without changing global settings.
+On Linux it executes only the offline installer extracted from the verified
+archive; the Python 3.11+ prerequisite and same-build overwrite refusal remain.
+macOS installation uses system tools and an atomic managed symlink, with no
+Python prerequisite. Windows uses root `install.ps1` and a native immutable
+launcher; see [the Windows delivery guide](xdcode-windows.md). Unsupported
+architectures are explicit failures, not fallback downloads from another product.
+Existing published two-platform releases remain installable on Linux/macOS,
+but have no Windows asset. No script changes a daemon's version in place.
+Personal build-ID overrides are for offline builds; publication requires the
+commit-derived `g<commit-prefix>` identity so all installer filenames bind to
+the release tag.
 
 Identity acceptance also requires inspecting the complete instructions actually
 sent to the model, including fallback and realtime paths and bundled

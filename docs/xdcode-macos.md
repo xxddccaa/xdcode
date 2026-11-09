@@ -5,6 +5,24 @@ The release is tested on macOS 15. Intel Macs are not supported by this archive.
 It includes xdcode, the code-mode helper and ripgrep. Keep the complete directory
 together: moving only `bin/xdcode` loses its manifest and helper programs.
 
+## One-command installation and upgrades
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/xxddccaa/xdcode/main/install.sh | bash -s -- --force
+```
+
+This explicitly invoked script detects Apple Silicon, selects the latest
+published release, verifies the archive and every payload checksum, validates
+clean-source metadata and probes all executables. It holds an installation lock,
+stages a new immutable version directory and atomically switches only a managed
+xdcode symlink. Old builds, configuration and sessions are retained. It uses
+macOS system tools, not Python or Homebrew. Add `--release v<version>-g<commit>`
+to pin a build, and use `XDCODE_INSTALL_PROXY` when the installer needs a proxy.
+Omit `--force` to require idle xdcode processes. Existing daemons keep their old
+builds even with force; restart them safely only after their tasks finish.
+
+## Offline installation
+
 Download the `macos-arm64.tar.gz` archive and its adjacent `.sha256` from your
 xdcode GitHub release. In the download directory, verify the named checksum:
 

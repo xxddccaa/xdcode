@@ -61,12 +61,14 @@ class ModelServer(BaseHTTPRequestHandler):
             }})
         elif not call_results and self.tools_called == 0:
             self.__class__.tools_called += 1
+            command = "Write-Output xdcode-tool-ok" if os.name == "nt" else "printf xdcode-tool-ok"
             if "exec_command" in tools:
-                name, arguments = "exec_command", {"cmd": "printf xdcode-tool-ok", "max_output_tokens": 100}
+                name, arguments = "exec_command", {"cmd": command, "max_output_tokens": 100}
             elif "shell_command" in tools:
-                name, arguments = "shell_command", {"command": "printf xdcode-tool-ok"}
+                name, arguments = "shell_command", {"command": command}
             elif "shell" in tools:
-                name, arguments = "shell", {"command": ["/bin/sh", "-c", "printf xdcode-tool-ok"]}
+                shell = ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command"] if os.name == "nt" else ["/bin/sh", "-c"]
+                name, arguments = "shell", {"command": [*shell, command]}
             elif "exec" in tools:
                 name, arguments = "exec", None
             else:
@@ -77,7 +79,7 @@ class ModelServer(BaseHTTPRequestHandler):
             }
             if name == "exec":
                 item = {"type": "custom_tool_call", "call_id": "call_xdcode_smoke", "name": "exec",
-                        "input": 'text(JSON.stringify(await tools.exec_command({cmd:"printf xdcode-tool-ok",max_output_tokens:100})));'}
+                        "input": f'text(JSON.stringify(await tools.exec_command({{cmd:{json.dumps(command)},max_output_tokens:100}})));'}
             if tools[name]:
                 item["namespace"] = tools[name]
             events.append({"type": "response.output_item.done", "item": item})
@@ -173,7 +175,7 @@ def main():
         config = f'''model_provider = "local_test"
 model = "gpt-5.6-sol"
 approval_policy = "never"
-sandbox_mode = "workspace-write"
+sandbox_mode = {json.dumps("danger-full-access" if os.name == "nt" else "workspace-write")}
 [model_providers.local_test]
 name = "Local verification"
 base_url = "http://127.0.0.1:{server.server_port}/v1"

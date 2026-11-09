@@ -59,20 +59,45 @@ produces `target/xdcode-dist/xdcode-0.167.0-personal1-linux-x86_64.tar.gz`, its
 snapshot requires the explicit `--allow-dirty` option and records its content
 digest. No product version override is accepted.
 
-## Install from GitHub (Linux x86_64)
+## One-command installation and upgrades
 
-After release `v0.167.0-ge8036a95a605` is published, install it with one command.
-Requires Bash, `curl`, Python 3.11 or newer available as `python3`, and a local
-proxy listening at `http://127.0.0.1:10826`:
+The same command selects the latest published release every time and detects
+Linux x86_64 or Apple Silicon macOS automatically:
 
 ```bash
-bash -c 'set -e; package=xdcode-0.167.0-ge8036a95a605-linux-x86_64; cd "$(mktemp -d)"; for suffix in tar.gz tar.gz.sha256 install.py; do curl -fL -x http://127.0.0.1:10826 -O "https://github.com/xxddccaa/xdcode/releases/download/v0.167.0-ge8036a95a605/$package.$suffix"; done; python3 "$package.install.py" --force "$package.tar.gz"'
+curl -fsSL https://raw.githubusercontent.com/xxddccaa/xdcode/main/install.sh | bash -s -- --force
 ```
 
-This command is not for macOS. `--force` skips only active-process checks;
-integrity verification and install locking remain enabled. Old builds and runtime
-data are retained. Existing sessions keep using their old build; restart the
-local daemon safely after active tasks finish to use the new build.
+Linux requires Python 3.11+; macOS uses its built-in system tools and needs no
+Python, Rust or Homebrew installation. Intel Macs and Linux ARM64 are not
+supported by the current release packages. To pin a release, append
+`--release v0.167.0-ge8036a95a605` instead of following the latest release.
+
+If both downloads need the local `10826` proxy, use:
+
+```bash
+curl -fsSL -x http://127.0.0.1:10826 https://raw.githubusercontent.com/xxddccaa/xdcode/main/install.sh | XDCODE_INSTALL_PROXY=http://127.0.0.1:10826 bash -s -- --force
+```
+
+Native Windows x86_64 uses PowerShell instead of Bash:
+
+```powershell
+& ([scriptblock]::Create((Invoke-RestMethod -Uri 'https://raw.githubusercontent.com/xxddccaa/xdcode/main/install.ps1' -Proxy 'http://127.0.0.1:10826'))) -Force -Proxy 'http://127.0.0.1:10826'
+```
+
+This Windows command uses the local `10826` proxy for both the script and package
+downloads. Remove both `-Proxy` arguments for direct access. The installer selects
+the most recently published stable release containing a Windows archive and checksum.
+Windows can be published separately without rebuilding Linux/macOS or changing
+their latest release. See [the Windows guide](docs/xdcode-windows.md) for
+prerequisites, PATH behavior and verification limits.
+
+Omit `--force` / `-Force` to require stopped xdcode processes. Force skips only
+the active-process gate; checksums, path checks, install locks and old builds
+remain. Existing sessions and runtime data are retained. Restart the local daemon
+safely after its tasks finish. These are explicitly invoked installers, not a
+background updater, and never select an unfinished GitHub Actions build.
+Put `~/.local/bin` on PATH for Linux/macOS; Windows adds its own user bin directory.
 
 ## Offline installation
 

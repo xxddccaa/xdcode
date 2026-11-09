@@ -3,18 +3,28 @@ name: xdcode delivery
 on:
   push:
     paths:
+      - install.sh
+      - install.ps1
       - scripts/xdcode/**
       - scripts/xdcode_package/**
+      - scripts/verify_xdcode_runtime.py
+      - scripts/verify_xdcode_reliability.py
       - xdcode-rs/bwrap/**
       - xdcode-rs/vendor/bubblewrap/**
       - upstream.json
       - README.md
       - docs/xdcode.md
+      - docs/xdcode-macos.md
+      - docs/xdcode-windows.md
       - .github/workflows/xdcode.yml
   pull_request:
     paths:
+      - install.sh
+      - install.ps1
       - scripts/xdcode/**
       - scripts/xdcode_package/**
+      - scripts/verify_xdcode_runtime.py
+      - scripts/verify_xdcode_reliability.py
       - xdcode-rs/bwrap/**
       - xdcode-rs/vendor/bubblewrap/**
       - upstream.json
@@ -29,8 +39,12 @@ on:
         description: Build and verify the Apple Silicon macOS package
         type: boolean
         default: false
+      build_windows:
+        description: Build and verify the native Windows x86_64 package
+        type: boolean
+        default: false
       publish_release:
-        description: Publish a GitHub Release after both platform builds pass
+        description: Publish verified builds (all three platforms, or Windows only)
         type: boolean
         default: false
       build_id:
@@ -67,8 +81,13 @@ jobs:
         run: |
           python3.11 -m unittest discover -s scripts/xdcode_package -p 'test_*.py'
           python3.11 -m unittest discover -s scripts/xdcode/tests -p 'test_macos.py'
+          python3.11 -m unittest discover -s scripts/xdcode/tests -p 'test_bootstrap.py'
       - name: Build, sign locally, and validate native package
         run: python3.11 scripts/xdcode/macos.py
+      - name: Verify the universal installer with the real native package
+        env:
+          XDCODE_TEST_PACKAGE_DIR: target/xdcode-dist
+        run: python3.11 -m unittest discover -s scripts/xdcode/tests -p 'test_bootstrap.py' -v
       - name: Verify agent tools, MCP, identity, state isolation, and resume
         run: python3.11 scripts/verify_xdcode_runtime.py target/xdcode-macos-package/bin/xdcode
       - name: Verify Plan exit, rate-limit recovery, and cancellation
@@ -91,7 +110,17 @@ jobs:
         env:
           BUILD_LINUX: ${{ inputs.build_package }}
           BUILD_MACOS: ${{ inputs.build_macos }}
-        run: test "$BUILD_LINUX" = true && test "$BUILD_MACOS" = true
+          BUILD_WINDOWS: ${{ inputs.build_windows }}
+          BUILD_ID: ${{ inputs.build_id }}
+        run: |
+          if [[ "$BUILD_WINDOWS" != true || "$BUILD_LINUX" != "$BUILD_MACOS" ]]; then
+            printf 'Publication requires all three platforms, or Windows only.\n' >&2
+            exit 1
+          fi
+          if [[ -n "$BUILD_ID" ]]; then
+            printf 'Published builds must use the commit-derived build ID.\n' >&2
+            exit 1
+          fi
       - name: Test package and offline installer
         # Hosted runner helpers can deny /proc/<pid>/exe to the runner uid.
         # Keep the installer's fail-closed process gate and give its real-process
@@ -100,6 +129,7 @@ jobs:
       - name: Check Python and whitespace
         run: |
           python3.11 -m py_compile scripts/xdcode/build.py scripts/xdcode/macos.py scripts/xdcode/package.py scripts/xdcode/install.py scripts/verify_xdcode_reliability.py scripts/xdcode/tests/test_delivery.py scripts/xdcode/tests/test_review_fixes.py
+          bash -n install.sh
           git diff --check
 
   linux-gnu-package:
@@ -141,6 +171,10 @@ jobs:
           fi
           python3.11 scripts/xdcode/build.py --output-dir "$GITHUB_WORKSPACE/target/xdcode-ci-build" "${build_args[@]}"
           python3.11 scripts/xdcode/package.py --build-dir "$GITHUB_WORKSPACE/target/xdcode-ci-build"
+      - name: Verify the universal installer with the real native package
+        env:
+          XDCODE_TEST_PACKAGE_DIR: target/xdcode-dist
+        run: python3.11 -m unittest discover -s scripts/xdcode/tests -p 'test_bootstrap.py' -v
       - name: Install and load the real package in an isolated directory
         id: install_smoke
         run: |
@@ -170,9 +204,61 @@ jobs:
           path: target/xdcode-dist/xdcode-*
           if-no-files-found: error
 
+  windows-x86_64-package:
+    if: github.event_name == 'workflow_dispatch' && inputs.build_windows
+    needs: delivery-tests
+    runs-on: windows-2025
+    timeout-minutes: 360
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
+      RUST_MIN_STACK: '8388608'
+      XDCODE_REPO_ROOT: ${{ github.workspace }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        with:
+          python-version: '3.11'
+      - name: Check native Windows runner and install pinned Rust
+        shell: pwsh
+        run: |
+          if ([Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne 'X64') { throw 'Native x86_64 runner required' }
+          $toolchain = python -c 'import tomllib; print(tomllib.load(open("xdcode-rs/rust-toolchain.toml", "rb"))["toolchain"]["channel"])'
+          rustup toolchain install $toolchain --profile minimal --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { throw 'Rust toolchain installation failed' }
+      - name: Test Windows packaging and PowerShell installer safety
+        run: python -m unittest discover -s scripts/xdcode/tests -p 'test_windows.py' -v
+      - name: Build and validate the native Windows package
+        shell: pwsh
+        run: |
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+          $installation = & $vswhere -latest -products '*' -property installationPath
+          if (-not $installation) { throw 'Visual Studio installation not found' }
+          Import-Module (Join-Path $installation 'Common7/Tools/Microsoft.VisualStudio.DevShell.dll')
+          Enter-VsDevShell -VsInstallPath $installation -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
+          python scripts/xdcode/windows.py
+          if ($LASTEXITCODE -ne 0) { throw 'Native Windows build failed' }
+      - name: Verify the PowerShell installer with the real native package
+        env:
+          XDCODE_TEST_PACKAGE_DIR: target/xdcode-dist
+        run: python -m unittest discover -s scripts/xdcode/tests -p 'test_windows.py' -v
+      - name: Verify agent tools, MCP, identity, state isolation, and resume
+        run: python scripts/verify_xdcode_runtime.py target/xdcode-windows-package/bin/xdcode.exe
+      - name: Verify Plan exit, rate-limit recovery, and cancellation
+        run: python scripts/verify_xdcode_reliability.py target/xdcode-windows-package/bin/xdcode.exe
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
+        with:
+          name: xdcode-windows-x86_64
+          path: target/xdcode-dist/xdcode-*-windows-x86_64.zip*
+          if-no-files-found: error
+
   publish-release:
-    if: github.event_name == 'workflow_dispatch' && inputs.publish_release
-    needs: [linux-gnu-package, macos-arm64-package]
+    if: >-
+      ${{ always() && !cancelled() && github.event_name == 'workflow_dispatch' && inputs.publish_release &&
+          needs.delivery-tests.result == 'success' && needs.windows-x86_64-package.result == 'success' &&
+          ((!inputs.build_package && !inputs.build_macos) ||
+           (needs.linux-gnu-package.result == 'success' && needs.macos-arm64-package.result == 'success')) }}
+    needs: [delivery-tests, linux-gnu-package, macos-arm64-package, windows-x86_64-package]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -182,20 +268,31 @@ jobs:
         with:
           python-version: '3.11'
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        if: inputs.build_package
         with:
           name: xdcode-linux-x86_64-gnu
           path: target/xdcode-release/linux
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        if: inputs.build_macos
         with:
           name: xdcode-macos-arm64
           path: target/xdcode-release/macos
-      - name: Verify both artifacts, upload a draft, then publish
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: xdcode-windows-x86_64
+          path: target/xdcode-release/windows
+      - name: Verify selected artifacts, upload a draft, then publish
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_REPOSITORY: ${{ github.repository }}
           RELEASE_COMMIT: ${{ github.sha }}
+          WINDOWS_ONLY: ${{ !inputs.build_package && !inputs.build_macos }}
         run: |
+          release_args=()
+          if [[ "$WINDOWS_ONLY" = true ]]; then
+            release_args+=(--windows-only)
+          fi
           python3.11 scripts/xdcode/release.py \
             --assets-dir target/xdcode-release \
             --source-commit "$RELEASE_COMMIT" \
-            --repo "$RELEASE_REPOSITORY"
+            --repo "$RELEASE_REPOSITORY" "${release_args[@]}"

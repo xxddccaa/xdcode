@@ -69,12 +69,15 @@ class Responses(BaseHTTPRequestHandler):
             self.respond("Implementation complete.")
             return
         command = "printf 'XDCODE_IMPLEMENTED\\n' >> implementation.txt"
+        if os.name == "nt":
+            command = "Add-Content -LiteralPath implementation.txt -Value XDCODE_IMPLEMENTED -Encoding ascii"
         if "exec_command" in tools:
             name, arguments = "exec_command", {"cmd": command, "max_output_tokens": 100}
         elif "shell_command" in tools:
             name, arguments = "shell_command", {"command": command}
         elif "shell" in tools:
-            name, arguments = "shell", {"command": ["/bin/sh", "-c", command]}
+            shell = ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command"] if os.name == "nt" else ["/bin/sh", "-c"]
+            name, arguments = "shell", {"command": [*shell, command]}
         else:
             raise AssertionError(f"No shell tool offered: {list(tools)}")
         item = {"type": "function_call", "call_id": "implementation-tool",
