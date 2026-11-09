@@ -84,7 +84,7 @@ jobs:
           python3.11 -m unittest discover -s scripts/xdcode/tests -p 'test_bootstrap.py'
       - name: Build, sign locally, and validate native package
         run: python3.11 scripts/xdcode/macos.py
-      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: xdcode-macos-arm64
           path: target/xdcode-dist/xdcode-*-macos-arm64.tar.gz*
@@ -193,7 +193,7 @@ jobs:
           fi
           python3.11 scripts/xdcode/build.py --output-dir "$GITHUB_WORKSPACE/target/xdcode-ci-build" "${build_args[@]}"
           python3.11 scripts/xdcode/package.py --build-dir "$GITHUB_WORKSPACE/target/xdcode-ci-build"
-      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: xdcode-linux-x86_64-gnu
           path: target/xdcode-dist/xdcode-*
@@ -275,7 +275,7 @@ jobs:
           Enter-VsDevShell -VsInstallPath $installation -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
           python scripts/xdcode/windows.py
           if ($LASTEXITCODE -ne 0) { throw 'Native Windows build failed' }
-      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: xdcode-windows-x86_64
           path: target/xdcode-dist/xdcode-*-windows-x86_64.zip*
