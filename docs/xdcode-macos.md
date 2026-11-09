@@ -8,7 +8,7 @@ together: moving only `bin/xdcode` loses its manifest and helper programs.
 ## One-command installation and upgrades
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/xxddccaa/xdcode/main/install.sh | bash -s -- --force
+curl -fsSL https://raw.githubusercontent.com/xxddccaa/xdcode/main/install.sh | bash
 ```
 
 This explicitly invoked script detects Apple Silicon, selects the latest
@@ -18,8 +18,9 @@ stages a new immutable version directory and atomically switches only a managed
 xdcode symlink. Old builds, configuration and sessions are retained. It uses
 macOS system tools, not Python or Homebrew. Add `--release v<version>-g<commit>`
 to pin a build, and use `XDCODE_INSTALL_PROXY` when the installer needs a proxy.
-Omit `--force` to require idle xdcode processes. Existing daemons keep their old
-builds even with force; restart them safely only after their tasks finish.
+The command requires idle xdcode processes. Add `--force` only when you
+explicitly need to install while they run; existing daemons keep their old
+builds even with force. Restart them safely only after their tasks finish.
 
 ## Offline installation
 

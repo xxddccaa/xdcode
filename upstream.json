@@ -5,7 +5,7 @@
   "upstream_commit": "360319d8dee62d87e2d59fc0c21805d79519cfed",
   "upstream_release_commit": "360319d8dee62d87e2d59fc0c21805d79519cfed",
   "release_branch_base": "b559e6a3988489b636e1e79672eff330bf0679dc",
-  "version_selection": "xdcode product version is independent of the recorded upstream baseline. Version 0.167.0 selectively backports fixes onto Codex 0.165.0; it is not a full Codex 0.167.0 synchronization.",
+  "version_selection": "xdcode product version follows the target Codex version. Version 0.167.0 targets Codex 0.167.0; its recorded source baseline is 0.165.0 with selective backports, so it is not a full Codex 0.167.0 synchronization.",
   "previous_baseline": {
     "version": "0.163.0",
     "upstream_commit": "83086188ae0614bd882818ff1aa23f3194962012"

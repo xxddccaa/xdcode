@@ -11,17 +11,18 @@ Windows-only or three-platform publication succeed.
 Run from PowerShell 5.1 or newer (PowerShell 7 is recommended):
 
 ```powershell
-& ([scriptblock]::Create((Invoke-RestMethod -Uri 'https://raw.githubusercontent.com/xxddccaa/xdcode/main/install.ps1' -Proxy 'http://127.0.0.1:10826'))) -Force -Proxy 'http://127.0.0.1:10826'
+& ([scriptblock]::Create((Invoke-RestMethod -Uri 'https://raw.githubusercontent.com/xxddccaa/xdcode/main/install.ps1')))
 ```
 
-The documented command uses the local `10826` proxy for both the initial script
-and subsequent package downloads. Remove both `-Proxy` arguments for direct
-access, or replace the address with another proxy. `XDCODE_INSTALL_PROXY` can
-also configure the installer's downloads without changing global settings.
+If a proxy is required, add `-Proxy '<proxy-url>'` to `Invoke-RestMethod` and
+pass `-Proxy '<proxy-url>'` to the installer. `XDCODE_INSTALL_PROXY` can also
+configure the installer's downloads without changing global settings. Do not
+commit a machine-specific proxy address.
 The installer selects the most recently published stable release containing
 both the Windows ZIP and its checksum, even when it is a supplemental release
 not marked as GitHub's latest. Drafts, prereleases and other platforms are ignored.
-Omit `-Force` to require stopped xdcode processes. To pin a build, add
+The command requires stopped xdcode processes; add `-Force` only when you
+explicitly need to install while they run. To pin a build, add
 `-Release v<version>-g<source-commit-prefix>`.
 
 The script verifies the external archive digest and filename, ZIP paths and file

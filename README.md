@@ -1,48 +1,114 @@
 # xdcode
 
-xdcode is an independently maintained personal coding agent for Linux x86_64 and
-macOS Apple Silicon.
-Upstream attribution and licensing are
-preserved in [LICENSE](LICENSE) and [NOTICE](NOTICE); both travel with each package,
-along with the derivative change notices in [MODIFICATIONS.md](MODIFICATIONS.md).
+xdcode 是基于 [OpenAI Codex](https://github.com/openai/codex) 源码的个人维护版本，
+面向终端里的日常编码工作。版本号跟随目标 Codex 版本：目标上游是 Codex 0.167.0，
+就发布 xdcode 0.167.0。每个版本会在对应上游源码的基础上删除不需要的功能，并加入
+个人使用需要的增强，因此 xdcode 不是 Codex 的完整发行版。
 
-The product version is **xdcode 0.167.0**. The actual upstream baseline recorded in
-[upstream.json](upstream.json) remains **0.165.0**
-(`rust-v0.165.0`), with upstream source commit
-`360319d8dee62d87e2d59fc0c21805d79519cfed`. A separate build ID identifies personal
-revisions. Release tags can live on upstream release branches, so `git describe`
-on the source snapshot is not the product version authority.
+支持平台：
 
-This is a selective maintenance release, not a full synchronization with Codex
-0.167.0. `version` identifies the product; `upstream_version` identifies the baseline.
-See [the 0.167.0 maintenance record](UPSTREAM_0.167.0.md),
-[the baseline migration record](UPSTREAM_0.165.0.md) and
-[the selective backports](MODIFICATIONS.md#2026-10-31-selective-backports) for
-adopted changes, preserved behavior and validation scope. The current personal
-revision adds provider-grouped model selection, bounded model delegation, richer
-transcript and image interaction, queue resumption and focused network diagnostics.
-It also preserves pending agent messages during compaction, improves paginated
-history and SQLite reliability, and fixes input and file-search edge cases.
-`/new` inherits the current confirmed provider, exact catalog entry, model,
-reasoning effort and mode only after the new session acknowledges them. `/model`
-opens at the first selectable entry. Plan-mode transitions and temporary rate-limit
-recovery remain intact.
-The fixed-main development pass selectively adopts applicable repairs and opt-in
-local features from Codex `c9b4267c370a755da12ec1c8648c2451163212b7`.
-See [its source ledger, experimental entry points and verification limits](UPSTREAM_MAIN_C9B4267C.md).
-Source upgrades take effect after building and installing a new package.
+- Linux x86_64（GNU libc；安装器需要 Python 3.11+）
+- Apple Silicon macOS（使用系统自带工具，不需要 Python、Rust 或 Homebrew）
+- Windows x86_64（PowerShell 安装器）
 
-xdcode uses its own `xdcode` command, `XDCODE_*` environment variables and
-`~/.xdcode` runtime directory. Configure a user-owned Responses provider using
-`XDCODE_API_KEY`. Runtime does not depend on another CLI installation,
-hosted account login, or a hosted binary download service.
-Local tools, approvals, sandboxing, MCP, skills, threads and the local app-server
-are part of the derivative's delivery contract.
+Intel Mac 和 Linux ARM64 暂不支持。
 
-## Build and package
+## 核心特点
 
-Use Python 3.11 or newer. Build prerequisites and the V8 dependency setup
-are described in [docs/xdcode.md](docs/xdcode.md).
+- **本地终端编码 agent**：工具调用、审批、沙箱、MCP、skills、Plan、会话恢复和
+  多 agent 都在本地运行。
+- **模型自己配置**：连接你自己的 Responses-compatible provider；支持多厂家、多模型，
+  在会话中用 `/model` 切换。
+- **个人增强**：统一模型目录、项目和模式记忆、跨厂家共享历史、限流重试、受控的
+  小模型委派。
+- **不依赖托管服务**：不需要托管登录、云任务、遥测上传或自动更新；凭据通过你自己的
+  环境变量提供。
+
+## 快速开始
+
+### Linux / macOS
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/xxddccaa/xdcode/main/install.sh | bash
+xdcode --version
+xdcode
+```
+
+安装器会选择最新发布版本，并自动识别 Linux x86_64 或 Apple Silicon macOS。默认要求
+xdcode 进程已停止；如果确实需要在进程运行时安装，再显式加 `--force`。固定版本用
+`--release v<version>-g<commit>`。
+
+### Windows
+
+在 PowerShell 5.1 或更高版本中运行：
+
+```powershell
+& ([scriptblock]::Create((Invoke-RestMethod -Uri 'https://raw.githubusercontent.com/xxddccaa/xdcode/main/install.ps1')))
+xdcode --version
+```
+
+Windows 的前置条件、PATH 行为和验证范围见 [Windows 安装说明](docs/xdcode-windows.md)。
+
+## 配置模型
+
+把配置写到 `~/.xdcode/config.toml`，或者设置 `XDCODE_HOME` 后写到
+`$XDCODE_HOME/config.toml`。最小配置如下：
+
+```toml
+model = "your-model"
+model_provider = "your-provider"
+
+[model_providers.your-provider]
+name = "Your provider"
+base_url = "https://your-provider.example/v1"
+env_key = "XDCODE_API_KEY"
+wire_api = "responses"
+requires_hosted_auth = false
+```
+
+把 `base_url` 和 `model` 换成你的服务实际使用的值，并通过环境变量或密钥管理器提供
+`XDCODE_API_KEY`：
+
+```bash
+export XDCODE_API_KEY="..."
+xdcode
+```
+
+需要配置多个厂家、模型目录、思考等级或自动发现时，见
+[模型配置说明](docs/model-configuration.md)。示例中的 URL、模型名和 provider ID 都只是
+占位，不是服务可用性声明。
+
+## 常用操作
+
+- `/model`：重新读取模型目录，按厂家分组选择模型；切换在服务端确认后生效。
+- `/new`：新建会话；继承当前已确认的厂家、模型、思考等级和模式。
+- `/resume`：恢复历史会话；同一 `XDCODE_HOME` 下跨厂家和 profile 共享历史。
+- `xdcode exec "..."`：非交互执行一次任务，适合脚本和自动化。
+- `xdcode models list` / `check` / `refresh`：查看和维护模型目录。
+
+更完整的命令和配置说明见 [交付指南](docs/xdcode.md) 和
+[配置说明](docs/config.md)。
+
+## 安装细节
+
+- 升级时默认要求 xdcode 进程已停止。`--force` 只跳过活跃进程检查，不会跳过校验和、
+  安装锁或旧版本保留，也不会结束已有会话。
+- 固定发布版本：`--release v<version>-g<commit>`。
+- 需要代理时，通过 `XDCODE_INSTALL_PROXY=<proxy-url>` 传给安装器；Windows 安装器
+  使用 `-Proxy <proxy-url>`。不要把本机代理地址写进仓库。
+- 离线安装：把 `.tar.gz`、`.sha256` 和 `.install.py` 放在同一目录，然后运行：
+
+  ```bash
+  python3.11 xdcode-<version>-<build-id>-linux-x86_64.install.py \
+    xdcode-<version>-<build-id>-linux-x86_64.tar.gz
+  ```
+
+安装器会校验完整性，把新版本放到独立目录，并只切换受管理的 `xdcode` 入口；旧版本和
+运行数据保留。
+
+## 从源码构建
+
+维护者使用 Python 3.11+：
 
 ```bash
 xdcode_upstream_commit="$(python3.11 -c 'import json; print(json.load(open("upstream.json"))["upstream_commit"])')"
@@ -53,85 +119,37 @@ python3.11 scripts/xdcode/build.py --build-id personal1
 python3.11 scripts/xdcode/package.py --build-dir target/xdcode-builds/personal1
 ```
 
-This builds `x86_64-unknown-linux-gnu`, uses `target/` and `.build-cache/`, and
-produces `target/xdcode-dist/xdcode-0.167.0-personal1-linux-x86_64.tar.gz`, its
-`.sha256` sidecar, and a matching `.install.py` offline installer. A development
-snapshot requires the explicit `--allow-dirty` option and records its content
-digest. No product version override is accepted.
+构建产物在 `target/xdcode-dist/`，包含压缩包、`.sha256` 和离线安装器。开发快照需要
+显式加 `--allow-dirty`；正式发布必须使用干净提交。构建前置依赖、测试路径和发布校验见
+[交付指南](docs/xdcode.md)。
 
-## One-command installation and upgrades
+## 文档
 
-The same command selects the latest published release every time and detects
-Linux x86_64 or Apple Silicon macOS automatically:
+- [交付指南](docs/xdcode.md)：构建、测试、校验和、安装与发布流程。
+- [配置说明](docs/config.md)：`config.toml`、MCP 和生命周期钩子。
+- [模型配置](docs/model-configuration.md)：多厂家模型目录、思考等级和 `/model`。
+- [macOS 安装](docs/xdcode-macos.md)
+- [Windows 安装](docs/xdcode-windows.md)
+- [上游迁移说明](UPSTREAM_UPGRADE.md)
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/xxddccaa/xdcode/main/install.sh | bash -s -- --force
-```
+## 版本与上游
 
-Linux requires Python 3.11+; macOS uses its built-in system tools and needs no
-Python, Rust or Homebrew installation. Intel Macs and Linux ARM64 are not
-supported by the current release packages. To pin a release, append
-`--release v0.167.0-ge8036a95a605` instead of following the latest release.
+xdcode 不维护独立于上游的产品版本号；版本号跟随目标 Codex 版本。每个版本在对应上游
+源码的基础上删除不需要的功能，加入个人增强，因此功能集不等同于 Codex，也不应把
+xdcode 描述成 Codex 的完整发行版。
 
-If both downloads need the local `10826` proxy, use:
+当前源码实际采用的上游提交、已移植内容和未覆盖范围，以 [upstream.json](upstream.json)、
+[0.167.0 维护记录](UPSTREAM_0.167.0.md) 和 [改动记录](MODIFICATIONS.md) 为准。源码更新
+不等于已安装程序更新；只有构建并安装新包后才会生效。
 
-```bash
-curl -fsSL -x http://127.0.0.1:10826 https://raw.githubusercontent.com/xxddccaa/xdcode/main/install.sh | XDCODE_INSTALL_PROXY=http://127.0.0.1:10826 bash -s -- --force
-```
+## 许可证与归属
 
-Native Windows x86_64 uses PowerShell instead of Bash:
+xdcode 以 Apache-2.0 许可证发布，保留 OpenAI Codex 的原始版权和归属。许可证与归属声明见
+[LICENSE](LICENSE) 和 [NOTICE](NOTICE)，派生改动见 [MODIFICATIONS.md](MODIFICATIONS.md)。
+上游作者不对本派生版本背书。
 
-```powershell
-& ([scriptblock]::Create((Invoke-RestMethod -Uri 'https://raw.githubusercontent.com/xxddccaa/xdcode/main/install.ps1' -Proxy 'http://127.0.0.1:10826'))) -Force -Proxy 'http://127.0.0.1:10826'
-```
+## 维护者
 
-This Windows command uses the local `10826` proxy for both the script and package
-downloads. Remove both `-Proxy` arguments for direct access. The installer selects
-the most recently published stable release containing a Windows archive and checksum.
-Windows can be published separately without rebuilding Linux/macOS or changing
-their latest release. See [the Windows guide](docs/xdcode-windows.md) for
-prerequisites, PATH behavior and verification limits.
-
-Omit `--force` / `-Force` to require stopped xdcode processes. Force skips only
-the active-process gate; checksums, path checks, install locks and old builds
-remain. Existing sessions and runtime data are retained. Restart the local daemon
-safely after its tasks finish. These are explicitly invoked installers, not a
-background updater, and never select an unfinished GitHub Actions build.
-Put `~/.local/bin` on PATH for Linux/macOS; Windows adds its own user bin directory.
-
-## Offline installation
-
-Transfer the archive, checksum and installer together from a trusted build:
-
-```bash
-python3.11 xdcode-0.167.0-personal1-linux-x86_64.install.py \
-  xdcode-0.167.0-personal1-linux-x86_64.tar.gz
-```
-
-The installer checks integrity and installs into
-`~/.local/lib/xdcode/0.167.0-personal1`, then points `~/.local/bin/xdcode` at that
-build. Put `~/.local/bin` on your PATH. It does not download anything, replace
-other CLI installations, or write your provider configuration. Finish active xdcode tasks
-and stop its local daemon before installing; keep xdcode stopped until the
-installer exits. Old builds and runtime data are retained. Keeping an older
-binary does not guarantee that it can read data written by a newer build.
-
-## Configure your provider
-
-Use [config.example.toml](scripts/xdcode/config.example.toml) as the starting point
-for your own `~/.xdcode/config.toml`. Its `https://example.invalid/v1` URL is a
-placeholder; replace it with your Responses provider's base URL. Provide
-`XDCODE_API_KEY` through your shell or secret manager. The example model is `gpt-5.6-sol`; change it to a model your
-provider serves. Never put a real key into this repository or package.
-
-[The delivery guide](docs/xdcode.md) covers explicit test paths, checksums,
-build provenance, GNU libc requirements, local daemon upgrades, and the manual
-upstream transplant workflow. Use that guide and the [local configuration
-guide](docs/config.md) for supported xdcode setup and operation.
-
-## Instructions for future AI-assisted upgrades
-
-Read [UPSTREAM_UPGRADE.md](UPSTREAM_UPGRADE.md) before comparing upstream releases
-or transplanting features. It defines required inputs, application invariants,
-change selection, dependency analysis, identity checks, tests, and delivery.
-[AGENTS.md](AGENTS.md) makes this workflow discoverable to future coding agents.
+调整上游基线或移植功能前，先读 [AGENTS.md](AGENTS.md) 和
+[UPSTREAM_UPGRADE.md](UPSTREAM_UPGRADE.md)。发布流程、验证分级和安装保护规则见
+[docs/xdcode.md](docs/xdcode.md)。
