@@ -183,10 +183,10 @@ code_mode = false
                 and not key.endswith(("_HOME", "_API_KEY", "_TOKEN", "_SECRET"))}
         env.update(XDCODE_HOME=str(home), XDCODE_API_KEY="reliability-test-key",
                    NO_PROXY="127.0.0.1,localhost", no_proxy="127.0.0.1,localhost")
-        with (root / "stderr.log").open("w+") as stderr:
+        with (root / "stderr.log").open("w+", encoding="utf-8", errors="replace") as stderr:
             process = subprocess.Popen([binary, "app-server"], cwd=project, env=env,
                                        stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                       stderr=stderr, text=True)
+                                       stderr=stderr, encoding="utf-8")
             client = Client(process)
             try:
                 client.request("initialize", {"clientInfo": {"name": "reliability_test", "version": "1"},

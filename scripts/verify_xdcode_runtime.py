@@ -121,7 +121,7 @@ class ModelServer(BaseHTTPRequestHandler):
 
 
 def checked(command, env, cwd, expected=0):
-    result = subprocess.run(command, env=env, cwd=cwd, stdin=subprocess.DEVNULL, text=True, capture_output=True, timeout=120)
+    result = subprocess.run(command, env=env, cwd=cwd, stdin=subprocess.DEVNULL, encoding="utf-8", capture_output=True, timeout=120)
     if result.returncode != expected:
         raise AssertionError(f"{command[:3]} exited {result.returncode}:\n{result.stdout[-6000:]}\n{result.stderr[-6000:]}")
     return result
