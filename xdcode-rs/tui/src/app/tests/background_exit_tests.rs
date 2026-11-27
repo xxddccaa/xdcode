@@ -61,7 +61,7 @@ async fn embedded_quit_confirms_stopping_a_running_side_conversation() -> Result
     );
     insta::assert_snapshot!(
         "embedded_exit_running_sessions",
-        render_bottom_popup(&app.chat_widget, 90)
+        render_bottom_popup(&app.chat_widget, /*width*/ 90)
     );
     app.chat_widget.handle_key_event(KeyCode::Down.into());
     app.chat_widget.handle_key_event(KeyCode::Enter.into());
@@ -191,11 +191,6 @@ async fn external_writer_view_respects_remapped_left() -> Result<()> {
         app.app_server_target = AppServerTarget::Remote {
             endpoint: crate::resolve_remote_addr("ws://127.0.0.1:4500")?,
         };
-        app.chat_widget.remote_connection =
-            crate::status::remote_connection::remote_connection_status_value(
-                &app.app_server_target,
-                /*server_version*/ None,
-            );
         app.chat_widget.apply_keymap_update(config.clone(), &keymap);
         app.keymap = keymap.clone();
         if vim {
@@ -228,6 +223,19 @@ async fn daemon_disconnect_exit_summary_includes_reconnect_and_stop_instructions
     let thread_id = prepare_running_local_daemon(&mut app)?;
     app.keymap.agents.stop = vec![crate::key_hint::plain(KeyCode::F(10))];
     let mut exit_info = app.exit_info(ExitReason::UserRequested);
+    let (rejected, outcome) = tokio::sync::oneshot::channel();
+    app.agents_overview
+        .pending_archives
+        .insert(thread_id, outcome);
+    rejected.send(Err("permission denied".to_string())).unwrap();
+    let pending_id = ThreadId::new();
+    let (_pending, outcome) = tokio::sync::oneshot::channel();
+    app.agents_overview
+        .pending_archives
+        .insert(pending_id, outcome);
+    exit_info.archive_warnings = app
+        .finish_pending_archives(tokio::time::Instant::now())
+        .await;
     exit_info.token_usage = TokenUsage {
         input_tokens: 10,
         output_tokens: 2,
@@ -237,7 +245,8 @@ async fn daemon_disconnect_exit_summary_includes_reconnect_and_stop_instructions
     let output = exit_info
         .format_exit_messages(/*color_enabled*/ false)
         .join("\n")
-        .replace(&thread_id.to_string(), "THREAD_ID");
+        .replace(&thread_id.to_string(), "THREAD_ID")
+        .replace(&pending_id.to_string(), "PENDING_ID");
     assert_snapshot!("daemon_disconnect_exit", output);
     Ok(())
 }
@@ -745,10 +754,9 @@ async fn daemon_ctrl_c_during_paste_burst_does_not_show_exit_menu() -> Result<()
 async fn daemon_ctrl_c_during_mcp_startup_does_not_show_background_exit_menu() -> Result<()> {
     let (mut app, mut app_event_rx, mut op_rx) = make_test_app_with_channels().await;
     let thread_id = prepare_local_daemon_thread(&mut app)?;
-    app.chat_widget
-        .set_mcp_startup_expected_servers(["slow".to_string()]);
     app.chat_widget.handle_server_notification(
         ServerNotification::McpServerStatusUpdated(McpServerStatusUpdatedNotification {
+            environment_id: None,
             thread_id: Some(thread_id.to_string()),
             name: "slow".to_string(),
             status: McpServerStartupState::Starting,

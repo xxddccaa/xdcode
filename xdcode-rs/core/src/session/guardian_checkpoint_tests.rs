@@ -7,9 +7,9 @@ use serde_json::json;
 use test_case::test_case;
 use xdcode_history::InitialHistory;
 use xdcode_protocol::models::ResponseItem;
-use xdcode_protocol::protocol::SessionSource;
 use xdcode_protocol::protocol::ThreadHistoryMode;
 use xdcode_protocol::protocol::TokenUsage;
+use xdcode_protocol_test_support::uuid_v7_item_id_generator_for_test;
 
 #[test_case(GuardianContextMode::Legacy, ThreadHistoryMode::Legacy; "legacy_context_legacy_storage")]
 #[test_case(GuardianContextMode::ThreadOwned, ThreadHistoryMode::Legacy; "thread_owned_context_legacy_storage")]
@@ -36,8 +36,10 @@ async fn guardian_checkpoint_preserves_live_context_without_storage(
     {
         let mut state = session.state.lock().await;
         state.history = ContextManager::for_session(
-            &SessionSource::default(),
+            /*root_capabilities_restricted*/ false,
             &crate::config::ManagedFeatures::from(xdcode_features::Features::with_defaults()),
+            xdcode_guardian_context::ContextBudgeting::Fixed,
+            uuid_v7_item_id_generator_for_test(),
         );
         state
             .history
@@ -79,7 +81,7 @@ async fn guardian_checkpoint_preserves_live_context_without_storage(
             },
             Some(32_000),
             /*includes_reasoning*/ true,
-            0,
+            /*input_item_count*/ 0,
         );
     }
     let expected = session.clone_history().await;
@@ -107,8 +109,10 @@ async fn guardian_checkpoint_preserves_live_context_without_storage(
     let (fork, _) = make_session_and_context().await;
     fork.state.lock().await.session_configuration.history_mode = history_mode;
     fork.state.lock().await.history = ContextManager::for_session(
-        &SessionSource::default(),
+        /*root_capabilities_restricted*/ false,
         &crate::config::ManagedFeatures::from(xdcode_features::Features::with_defaults()),
+        xdcode_guardian_context::ContextBudgeting::Fixed,
+        uuid_v7_item_id_generator_for_test(),
     );
     fork.record_initial_history(InitialHistory::Forked(items))
         .await;

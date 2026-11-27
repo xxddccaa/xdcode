@@ -10,14 +10,14 @@ use crate::history_cell::FinalMessageSeparator;
 use crate::history_cell::HistoryCell;
 use crate::transcript_view::TranscriptView;
 use chrono::Local;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 use xdcode_app_server_protocol::ServerNotification;
-use xdcode_app_server_protocol::ThreadItem;
+use xdcode_app_server_protocol::ThreadItemPayload;
 use xdcode_app_server_protocol::TurnStatus;
 use xdcode_protocol::items::AsyncUserInputQuestion;
-use xdcode_utils_absolute_path::AbsolutePathBuf;
 
 pub(super) struct SideCompanion {
     pub(super) display: CapturedSideDisplay,
@@ -50,14 +50,24 @@ impl SideAnswer {
 }
 
 impl SideCompanion {
-    pub(super) fn empty(cwd: AbsolutePathBuf) -> Self {
+    pub(super) fn can_scroll_without_refresh(&self) -> bool {
+        self.answer
+            .as_ref()
+            .is_none_or(|answer| answer.pending.is_empty())
+            && self
+                .view
+                .can_scroll_without_refresh(&self.cells, /*live_key*/ None)
+    }
+
+    pub(super) fn empty(cwd: PathBuf) -> Self {
         Self {
             display: CapturedSideDisplay {
                 rendered_completion_turn_ids: Default::default(),
+                generated_images: Default::default(),
                 active: None,
                 auxiliary: Vec::new(),
                 draft: Box::default(),
-                status: None,
+                status_line: None,
                 work: None,
                 last_completed_agent_message: None,
                 cwd,
@@ -110,7 +120,7 @@ impl SideCompanion {
                 answer.pending.push_str(&delta.delta);
             }
             ServerNotification::ItemCompleted(event) => {
-                let item = &event.item;
+                let item = &event.item.payload;
                 if store.is_realtime_delegated_turn(&event.turn_id)
                     && crate::chatwidget::is_private_realtime_agent_item(item)
                 {
@@ -123,8 +133,8 @@ impl SideCompanion {
             {
                 let turn = &event.turn;
                 if self.display.active.is_some() {
-                    for item in &turn.items {
-                        if matches!(item, ThreadItem::CommandExecution { .. }) {
+                    for item in turn.item_payloads() {
+                        if matches!(item, ThreadItemPayload::CommandExecution { .. }) {
                             self.finish_item(&turn.id, item);
                         }
                     }
@@ -150,6 +160,13 @@ impl SideCompanion {
                     self.flush_answer();
                     self.answer = None;
                 }
+                self.cells.extend(
+                    self.display
+                        .generated_images
+                        .take(&turn.id)
+                        .into_iter()
+                        .map(|image| Arc::new(image) as Arc<dyn HistoryCell>),
+                );
                 let work = self.display.work.take_if(|work| work.turn_id == turn.id);
                 if turn.status == TurnStatus::Completed
                     && (work.is_some() || store.active_turn_id() == Some(turn.id.as_str()))
@@ -189,9 +206,9 @@ impl SideCompanion {
         self.cells.splice(range, cells);
     }
 
-    fn finish_item(&mut self, turn: &str, item: &ThreadItem) -> bool {
+    fn finish_item(&mut self, turn: &str, item: &ThreadItemPayload) -> bool {
         match item {
-            ThreadItem::AgentMessage {
+            ThreadItemPayload::AgentMessage {
                 id,
                 text,
                 questions,
@@ -215,7 +232,18 @@ impl SideCompanion {
                 }
                 self.display.last_completed_agent_message = Some((turn.to_owned(), id.clone()));
             }
-            ThreadItem::CommandExecution {
+            ThreadItemPayload::ImageGeneration(item)
+                if item.status == "completed" && item.saved_path.is_some() =>
+            {
+                let image = crate::history_cell::new_image_generation_call(
+                    item.id.clone(),
+                    &item.status,
+                    item.revised_prompt.clone(),
+                    item.saved_path.clone(),
+                );
+                self.display.generated_images.record(turn.to_owned(), image);
+            }
+            ThreadItemPayload::CommandExecution {
                 id,
                 status,
                 exit_code,
@@ -248,6 +276,7 @@ impl SideCompanion {
                 if !cell.is_active()
                     && let Some(active) = self.display.active.take()
                 {
+                    // Later answer deltas may already have appended a cell after the parked command.
                     self.cells.insert(self.parked_tail, Arc::from(active));
                     if let Some(answer) = &mut self.answer
                         && answer.index >= self.parked_tail
@@ -301,3 +330,7 @@ impl SideCompanion {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "side_companion_tests.rs"]
+mod tests;

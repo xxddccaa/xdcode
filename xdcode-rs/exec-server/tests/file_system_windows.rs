@@ -38,7 +38,6 @@ use xdcode_protocol::permissions::FileSystemSandboxEntry;
 use xdcode_protocol::permissions::FileSystemSandboxPolicy;
 use xdcode_protocol::permissions::FileSystemSpecialPath;
 use xdcode_protocol::permissions::NetworkSandboxPolicy;
-use xdcode_protocol::protocol::SandboxPolicy;
 use xdcode_sandboxing::SandboxType;
 use xdcode_utils_path_uri::PathUri;
 use xdcode_windows_sandbox_test_support::WindowsSandboxAccountTestGuard;
@@ -103,6 +102,9 @@ async fn file_system_operations_can_reject_junctions_in_any_path_component(
     std::fs::write(&removable, "keep")?;
     let directory_junction = tmp.path().join("directory-junction");
     create_directory_junction(&real, &directory_junction)?;
+    assert!(
+        xdcode_exec_server::BoundOutput::open(&directory_junction.join("existing.txt")).is_err()
+    );
 
     let no_follow_read = ReadFileOptions {
         follow_symlinks: false,
@@ -743,8 +745,8 @@ fn process_private_desktops() -> Result<BTreeSet<String>> {
 }
 
 fn read_only_sandbox_for_cwd(cwd: std::path::PathBuf) -> Result<FileSystemSandboxContext> {
-    Ok(FileSystemSandboxContext::from_legacy_sandbox_policy(
-        SandboxPolicy::new_read_only_policy(),
+    Ok(FileSystemSandboxContext::from_permission_profile(
+        PermissionProfile::read_only(),
         PathUri::from_host_native_path(cwd)?,
-    )?)
+    ))
 }

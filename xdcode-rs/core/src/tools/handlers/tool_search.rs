@@ -21,7 +21,6 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::Weak;
 use tracing::instrument;
-use xdcode_features::Feature;
 use xdcode_prompts::ResolvedModelMessages;
 use xdcode_tools::IndirectNamespacePrefixes;
 use xdcode_tools::JsonToolOutput;
@@ -260,11 +259,6 @@ impl ToolSearchHandler {
                     .config
                     .code_mode
                     .tool_input_schema_max_bytes,
-                step_context
-                    .turn
-                    .config
-                    .features
-                    .enabled(Feature::CodeModeToolDescriptionFirst),
                 &indirect_prefixes,
             );
             return Ok(boxed_tool_output(JsonToolOutput::new(serde_json::json!({
@@ -292,7 +286,6 @@ impl ToolSearchHandler {
         limit: usize,
         router: &ToolRouter,
         code_mode_input_schema_max_bytes: Option<usize>,
-        tool_description_first: bool,
         indirect_prefixes: &IndirectNamespacePrefixes<'_>,
     ) -> Vec<CodeModeSearchResult> {
         let mut tools = Vec::new();
@@ -320,7 +313,6 @@ impl ToolSearchHandler {
                     tool.cached_runtime().map(Arc::as_ref),
                     || Cow::Owned(Arc::unwrap_or_clone(tool.spec())),
                     code_mode_input_schema_max_bytes,
-                    tool_description_first,
                 );
                 let Some(definition) = definitions.iter().find(|definition| {
                     definition.tool_name.clone().with_default_namespace() == candidate_name
@@ -596,7 +588,7 @@ mod tests {
 
     fn tool_info(server_name: &str, tool_name: &str, description_prefix: &str) -> ToolInfo {
         ToolInfo {
-            server_name: server_name.to_string(),
+            server_key: xdcode_mcp::McpServerKey::unscoped(server_name),
             supports_parallel_tool_calls: false,
             server_origin: None,
             callable_name: tool_name.to_string(),

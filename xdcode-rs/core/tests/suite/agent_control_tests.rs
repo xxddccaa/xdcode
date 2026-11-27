@@ -3,38 +3,71 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+use std::time::Duration;
 
+use core_test_support::ThreadIdle;
 use core_test_support::responses;
 use core_test_support::skip_if_no_network;
+use core_test_support::submit_thread_settings;
 use core_test_support::test_xdcode::TestXdcode;
 use core_test_support::test_xdcode::test_xdcode;
 use core_test_support::wait_for_event;
+use core_test_support::wait_for_event_match;
 use futures::future::BoxFuture;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use test_case::test_case;
+use tokio::sync::Notify;
+use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 use wiremock::MockServer;
 use xdcode_core::AgentConfigUpdate;
 use xdcode_core::AgentControl;
 use xdcode_core::AgentExecutionGuard;
 use xdcode_core::AgentInfo;
+use xdcode_core::AgentRef;
 use xdcode_core::AgentTarget;
 use xdcode_core::AgentTurnOutcome;
+use xdcode_core::AgentTurnOutcomeReporter;
 use xdcode_core::DeliveryReceipt;
 use xdcode_core::ForkSnapshot;
 use xdcode_core::GuardianRootSnapshot;
+use xdcode_core::InheritedSessionId;
 use xdcode_core::LiveAgent;
 use xdcode_core::PendingAgentMessage;
+use xdcode_core::RestrictRootCapabilities;
 use xdcode_core::RolloutBudgetReminder;
 use xdcode_core::SendRequest;
 use xdcode_core::SpawnRequest;
 use xdcode_core::StartThreadOptions;
 use xdcode_core::ThreadConfigSnapshot;
+use xdcode_core::TurnInput;
 use xdcode_core::TurnInputRequest;
+use xdcode_core::TurnInputSubmission;
+use xdcode_core::TurnStartOptions;
+use xdcode_core::compact::content_items_to_text;
+use xdcode_core::config::Config;
+use xdcode_extension_api::ExtensionFuture;
+use xdcode_extension_api::ExtensionRegistryBuilder;
+use xdcode_extension_api::ThreadLifecycleContributor;
+use xdcode_extension_api::ThreadStartInput;
+use xdcode_extension_api::ThreadStopInput;
+use xdcode_extension_api::TurnLifecycleContributor;
+use xdcode_extension_api::TurnStopInput;
 use xdcode_features::Feature;
 use xdcode_history::InitialHistory;
+use xdcode_history::ResponseItemEnvelope;
 use xdcode_history::ResumedHistory;
+use xdcode_history::RetainedContextEntry;
+use xdcode_history::RetainedContextEvent;
+use xdcode_history::RetainedContextOrder;
 use xdcode_history::RolloutItem;
+use xdcode_history::SenderUserMessages;
+use xdcode_history::VerifiedAnswer;
+use xdcode_history::VerifiedQuestionAnswer;
+use xdcode_history::XdcodeHarnessMetadata;
 use xdcode_message_board::PostMetadata;
 use xdcode_protocol::AgentPath;
 use xdcode_protocol::SessionId;
@@ -42,16 +75,88 @@ use xdcode_protocol::ThreadId;
 use xdcode_protocol::error::Result as XdcodeResult;
 use xdcode_protocol::error::XdcodeErr;
 use xdcode_protocol::error::XdcodeErrorDetails;
+use xdcode_protocol::models::ResponseItem;
+use xdcode_protocol::protocol::AgentStatus;
 use xdcode_protocol::protocol::InterAgentCommunication;
 use xdcode_protocol::protocol::MultiAgentVersion;
 use xdcode_protocol::protocol::Op;
 use xdcode_protocol::protocol::SessionSource;
 use xdcode_protocol::protocol::SubAgentSource;
+use xdcode_protocol::protocol::ThreadHistoryMode;
+use xdcode_protocol::protocol::ThreadSettingsOverrides;
+use xdcode_protocol::protocol::ThreadSource;
 use xdcode_protocol::protocol::TokenUsage;
 use xdcode_protocol::user_input::UserInput;
 use xdcode_rollout_trace::ThreadTraceContext;
+use xdcode_thread_store::ForkBoundary;
+use xdcode_thread_store::LoadThreadHistoryParams;
+use xdcode_thread_store::PrepareForkParams;
 
-struct TestAgentControl {
+pub(super) struct HostRuntime;
+
+impl xdcode_core::AgentTurnAdmission for HostRuntime {
+    fn admit_turn(
+        &self,
+        _: xdcode_core::AgentTurnAdmissionRequest,
+    ) -> BoxFuture<'_, XdcodeResult<AgentExecutionGuard>> {
+        Box::pin(async { Ok(AgentExecutionGuard::new(())) })
+    }
+}
+
+pub(super) struct HostSessionReader {
+    root: ThreadId,
+    pub(super) children: Mutex<Option<Vec<AgentRef>>>,
+    pub(super) children_reads: AtomicUsize,
+}
+
+impl xdcode_core::AgentSessionReader for HostSessionReader {
+    fn root(&self) -> BoxFuture<'_, XdcodeResult<AgentRef>> {
+        Box::pin(async {
+            Ok(AgentRef {
+                thread_id: self.root,
+                path: AgentPath::root(),
+            })
+        })
+    }
+
+    fn parent(&self) -> BoxFuture<'_, XdcodeResult<Option<AgentRef>>> {
+        Box::pin(async { Ok(None) })
+    }
+
+    fn children(&self) -> BoxFuture<'_, XdcodeResult<Vec<AgentRef>>> {
+        Box::pin(async {
+            self.children_reads.fetch_add(1, Ordering::Relaxed);
+            self.children
+                .lock()
+                .expect("host roster")
+                .clone()
+                .ok_or_else(|| XdcodeErr::InvalidRequest("host agent session unavailable".into()))
+        })
+    }
+}
+
+pub(super) fn install_host_runtime(data: &xdcode_extension_api::ExtensionData) {
+    data.insert(xdcode_core::AgentRuntimeOwnership::Host);
+    let reader = data.get_or_init(|| HostSessionReader {
+        root: ThreadId::from_string(data.level_id()).expect("test thread identity"),
+        children: Mutex::new(Some(Vec::new())),
+        children_reads: AtomicUsize::new(0),
+    });
+    data.get_or_init(|| reader as Arc<dyn xdcode_core::AgentSessionReader>);
+    data.get_or_init(|| Arc::new(HostRuntime) as Arc<dyn xdcode_core::AgentTurnAdmission>);
+}
+
+impl xdcode_extension_api::ThreadLifecycleContributor<xdcode_core::config::Config> for HostRuntime {
+    fn on_thread_start<'a>(
+        &'a self,
+        input: xdcode_extension_api::ThreadStartInput<'a, xdcode_core::config::Config>,
+    ) -> xdcode_extension_api::ExtensionFuture<'a, ()> {
+        install_host_runtime(input.thread_store);
+        Box::pin(async {})
+    }
+}
+
+pub(super) struct TestAgentControl {
     thread_id: ThreadId,
     service_tier: Mutex<Option<String>>,
     mail: Mutex<Vec<PendingAgentMessage>>,
@@ -60,7 +165,7 @@ struct TestAgentControl {
 }
 
 impl TestAgentControl {
-    fn new(thread_id: ThreadId) -> Self {
+    pub(super) fn new(thread_id: ThreadId) -> Self {
         Self {
             thread_id,
             service_tier: Mutex::default(),
@@ -172,7 +277,11 @@ impl AgentControl for TestAgentControl {
         None
     }
 
-    fn record_usage(&self, _usage: TokenUsage) -> BoxFuture<'_, XdcodeResult<()>> {
+    fn record_usage(
+        &self,
+        _usage: Option<TokenUsage>,
+        _hook_charge: xdcode_core::HookCharge,
+    ) -> BoxFuture<'_, XdcodeResult<()>> {
         Box::pin(async { Ok(()) })
     }
 
@@ -434,6 +543,7 @@ async fn host_factory_follows_thread_lifecycle() -> anyhow::Result<()> {
         .build_with_auto_env(&server)
         .await?;
     let root_id = test.session_configured.thread_id;
+    let root_tree_id = test.xdcode.agent_tree_id();
     let manager = &test.thread_manager;
     let options = || StartThreadOptions {
         environments: Some(vec![test.executor_environment().request()]),
@@ -452,6 +562,7 @@ async fn host_factory_follows_thread_lifecycle() -> anyhow::Result<()> {
         internal.session_configured.session_id,
         test.session_configured.session_id
     );
+    assert_eq!(internal.thread.agent_tree_id(), root_tree_id);
     test.xdcode.ensure_rollout_materialized().await;
     test.xdcode.flush_rollout().await?;
     let saved = test.xdcode.load_history(/*include_archived*/ false).await?;
@@ -461,6 +572,20 @@ async fn host_factory_follows_thread_lifecycle() -> anyhow::Result<()> {
         history: Arc::new(saved.items),
         rollout_path: test.xdcode.rollout_path(),
     });
+    let mut copied_child_options = options();
+    copied_child_options
+        .thread_extension_init
+        .insert(InheritedSessionId(test.session_configured.session_id));
+    assert!(matches!(
+        manager
+            .fork_thread_from_history(
+                ForkSnapshot::Interrupted,
+                copied_child_options,
+                history.clone(),
+            )
+            .await,
+        Err(error) if matches!(error.details(), XdcodeErrorDetails::InvalidRequest(_))
+    ));
     let fork = manager
         .fork_thread_from_history(ForkSnapshot::Interrupted, options(), history.clone())
         .await?;
@@ -468,6 +593,7 @@ async fn host_factory_follows_thread_lifecycle() -> anyhow::Result<()> {
         fork.session_configured.session_id,
         SessionId::from(fork.thread_id)
     );
+    assert_ne!(fork.thread.agent_tree_id(), root_tree_id);
     let warm = manager
         .start_thread(StartThreadOptions {
             initial_history: history.clone(),
@@ -475,6 +601,7 @@ async fn host_factory_follows_thread_lifecycle() -> anyhow::Result<()> {
         })
         .await?;
     assert!(Arc::ptr_eq(&warm.thread, &test.xdcode));
+    assert_eq!(warm.thread.agent_tree_id(), root_tree_id);
     assert_eq!(
         *calls.lock().expect("factory calls lock"),
         vec![root_id, fork.thread_id]
@@ -488,6 +615,7 @@ async fn host_factory_follows_thread_lifecycle() -> anyhow::Result<()> {
         })
         .await?;
     assert!(!Arc::ptr_eq(&cold.thread, &test.xdcode));
+    assert_ne!(cold.thread.agent_tree_id(), root_tree_id);
     assert_eq!(cold.thread_id, root_id);
     assert_eq!(
         *calls.lock().expect("factory calls lock"),
@@ -495,6 +623,481 @@ async fn host_factory_follows_thread_lifecycle() -> anyhow::Result<()> {
     );
     cold.thread.shutdown_and_wait().await?;
     fork.thread.shutdown_and_wait().await?;
+    Ok(())
+}
+
+enum HostedChildHistory {
+    Fresh,
+    PreparedFork,
+}
+
+#[test_case(ThreadHistoryMode::Legacy, HostedChildHistory::Fresh; "fresh_legacy")]
+#[test_case(ThreadHistoryMode::Paginated, HostedChildHistory::Fresh; "fresh_paginated")]
+#[test_case(ThreadHistoryMode::Paginated, HostedChildHistory::PreparedFork; "prepared_fork")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hosted_child_persists_inherited_session_id(
+    history_mode: ThreadHistoryMode,
+    child_history: HostedChildHistory,
+) -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+    let server = responses::start_mock_server().await;
+    let root = test_xdcode()
+        .with_history_mode(history_mode)
+        .build_with_auto_env(&server)
+        .await?;
+    let root_session_id = root.session_configured.session_id;
+    let manager = &root.thread_manager;
+    let options = || StartThreadOptions {
+        history_mode: Some(history_mode),
+        session_source: Some(SessionSource::Custom("host".to_string())),
+        environments: Some(vec![root.executor_environment().request()]),
+        ..StartThreadOptions::new(root.config.clone())
+    };
+    let mut native_options = options();
+    native_options.session_source = Some(SessionSource::SubAgent(SubAgentSource::Review));
+    native_options
+        .thread_extension_init
+        .insert(InheritedSessionId(root_session_id));
+    let Err(error) = manager.start_thread(native_options).await else {
+        anyhow::bail!("native children must use their controller's session ID");
+    };
+    assert!(matches!(
+        error.details(),
+        XdcodeErrorDetails::InvalidRequest(_)
+    ));
+    let mut child_options = options();
+    let prepared_fork = matches!(child_history, HostedChildHistory::PreparedFork);
+    let selected_plugins = vec!["slack@provider".to_string()];
+    child_options
+        .thread_extension_init
+        .insert(InheritedSessionId(root_session_id));
+    if prepared_fork {
+        child_options
+            .thread_extension_init
+            .insert(RestrictRootCapabilities);
+    }
+    let child = match child_history {
+        HostedChildHistory::Fresh => manager.start_thread(child_options).await?,
+        HostedChildHistory::PreparedFork => {
+            responses::mount_sse_once(&server, responses::sse_completed("done")).await;
+            root.submit_text_turn("record the current plugin selection")
+                .await?;
+            submit_thread_settings(
+                &root.xdcode,
+                ThreadSettingsOverrides {
+                    disabled_plugin_ids: Some(selected_plugins.clone()),
+                    ..Default::default()
+                },
+            )
+            .await?;
+            root.xdcode.ensure_rollout_materialized().await;
+            root.xdcode
+                .append_rollout_items(&[
+                    RolloutItem::ResponseItem(ResponseItemEnvelope {
+                        item: responses::user_message_item("ancestor instructions"),
+                        metadata: Some(XdcodeHarnessMetadata {
+                            user_input_order: Some(42),
+                            sender_user_messages: Some(Box::new(SenderUserMessages {
+                                receiver_turn_id: "ancestor-turn".into(),
+                                receiver_message_id: "ancestor-message".into(),
+                                text: "ancestor sender evidence".into(),
+                            })),
+                            ..Default::default()
+                        }),
+                    }),
+                    RolloutItem::RetainedContext(RetainedContextEvent::VerifiedAnswer {
+                        answer: VerifiedAnswer {
+                            turn_id: "ancestor-turn".into(),
+                            call_id: "ancestor-question".into(),
+                            questions: vec![VerifiedQuestionAnswer {
+                                question: "Publish?".into(),
+                                answer: "Yes".into(),
+                            }],
+                        },
+                        acceptance_order: Some(43),
+                    }),
+                ])
+                .await?;
+            root.xdcode.flush_rollout().await?;
+            let prepared = root
+                .thread_store
+                .prepare_fork(PrepareForkParams {
+                    thread_id: root.session_configured.thread_id,
+                    boundary: ForkBoundary::Latest,
+                })
+                .await?;
+            manager
+                .fork_prepared_thread(child_options, prepared)
+                .await?
+        }
+    };
+    assert_ne!(SessionId::from(child.thread_id), root_session_id);
+    assert_eq!(
+        (
+            child.session_configured.session_id,
+            child.session_configured.parent_thread_id
+        ),
+        (root_session_id, None)
+    );
+    let mut expected_retained = None;
+    if prepared_fork {
+        assert_eq!(
+            child
+                .thread
+                .thread_settings_snapshot()
+                .await
+                .disabled_plugin_ids,
+            selected_plugins
+        );
+        let snapshot = child.thread.conversation_history_snapshot().await;
+        assert!(snapshot.items().any(|item| matches!(
+            item, ResponseItem::Message { role, content, .. }
+                if role == "user" && content_items_to_text(content).as_deref() == Some("ancestor instructions")
+        )));
+        let retained = snapshot.retained_context().expect("child authorization");
+        assert_eq!(retained.ordered_entries().count(), 0);
+        assert!(retained.sender_user_messages().is_none());
+        child
+            .thread
+            .inject_response_items(vec![responses::user_message_item(
+                "child-local instructions",
+            )])
+            .await?;
+        let snapshot = child.thread.conversation_history_snapshot().await;
+        let retained = snapshot.retained_context().expect("local authorization");
+        assert!(matches!(
+            retained.ordered_entries().next(),
+            Some((RetainedContextOrder::Local(0), RetainedContextEntry::UserMessage(message)))
+                if message.text == "child-local instructions"
+        ));
+        expected_retained = Some(retained.clone());
+    }
+    child.thread.ensure_rollout_materialized().await;
+    child.thread.flush_rollout().await?;
+    let history = root
+        .thread_store
+        .load_latest_model_context(LoadThreadHistoryParams {
+            thread_id: child.thread_id,
+            include_archived: false,
+        })
+        .await?;
+    let Some(RolloutItem::SessionMeta(meta)) = history.items.first() else {
+        anyhow::bail!("expected child metadata as the first rollout item");
+    };
+    assert_eq!(
+        (meta.meta.id, meta.meta.session_id, meta.meta.history_mode),
+        (child.thread_id, root_session_id, history_mode)
+    );
+    child.thread.shutdown_and_wait().await?;
+    let resumed_history = InitialHistory::Resumed(ResumedHistory {
+        history_revision: history.revision,
+        conversation_id: child.thread_id,
+        history: Arc::new(history.items),
+        rollout_path: child.thread.rollout_path(),
+    });
+    let mut invalid_resume = StartThreadOptions {
+        initial_history: resumed_history.clone(),
+        ..options()
+    };
+    invalid_resume
+        .thread_extension_init
+        .insert(InheritedSessionId(root_session_id));
+    let Err(error) = manager.start_thread(invalid_resume).await else {
+        anyhow::bail!("resuming must use the persisted session ID");
+    };
+    assert!(matches!(
+        error.details(),
+        XdcodeErrorDetails::InvalidRequest(_)
+    ));
+    let mut resume_options = StartThreadOptions {
+        initial_history: resumed_history,
+        ..options()
+    };
+    if prepared_fork {
+        resume_options
+            .thread_extension_init
+            .insert(RestrictRootCapabilities);
+    }
+    let resumed = manager.start_thread(resume_options).await?;
+    assert!(!Arc::ptr_eq(&resumed.thread, &child.thread));
+    assert_eq!(
+        (
+            resumed.thread_id,
+            resumed.session_configured.session_id,
+            resumed.session_configured.parent_thread_id
+        ),
+        (child.thread_id, root_session_id, None)
+    );
+    if let Some(expected_retained) = expected_retained {
+        assert_eq!(
+            resumed
+                .thread
+                .thread_settings_snapshot()
+                .await
+                .disabled_plugin_ids,
+            selected_plugins
+        );
+        let snapshot = resumed.thread.conversation_history_snapshot().await;
+        assert!(snapshot.items().any(|item| matches!(
+            item, ResponseItem::Message { role, content, .. }
+                if role == "user" && content_items_to_text(content).as_deref() == Some("ancestor instructions")
+        )));
+        assert_eq!(snapshot.retained_context(), Some(&expected_retained));
+    }
+    resumed.thread.shutdown_and_wait().await?;
+    root.xdcode.shutdown_and_wait().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hosted_child_reports_terminal_turn_outcomes() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    const ANSWER: &str = "The patch looks good.";
+    const FAILURE: &str = "The request was rejected.";
+    const FOLLOWUP: &str = "Try again with the smaller patch.";
+    const ASSIGNING_TURN: &str = "assigner-turn";
+
+    struct Reporter {
+        outcomes: mpsc::UnboundedSender<AgentTurnOutcome>,
+        gate: Mutex<Option<oneshot::Receiver<()>>>,
+    }
+
+    impl AgentTurnOutcomeReporter for Reporter {
+        fn report(&self, outcome: AgentTurnOutcome) -> BoxFuture<'_, ()> {
+            Box::pin(async move {
+                let failed = matches!(outcome.status, AgentStatus::Errored(_));
+                self.outcomes.send(outcome).expect("report receiver");
+                if failed {
+                    let gate = self.gate.lock().expect("report gate").take();
+                    gate.expect("one failure report")
+                        .await
+                        .expect("release failure report");
+                }
+            })
+        }
+    }
+
+    let server = responses::start_mock_server().await;
+    let mut extensions = ExtensionRegistryBuilder::new();
+    extensions.thread_lifecycle_contributor(Arc::new(ThreadIdle));
+    let root = test_xdcode()
+        .with_extensions(Arc::new(extensions.build()))
+        .build_with_auto_env(&server)
+        .await?;
+    let session_id = root.session_configured.session_id;
+    let (release_report, report_gate) = oneshot::channel();
+    let (outcomes, mut reports) = mpsc::unbounded_channel();
+    let reporter = Arc::new(Reporter {
+        outcomes,
+        gate: Mutex::new(Some(report_gate)),
+    });
+    let source = SessionSource::Custom("host".to_string());
+    let mut options = StartThreadOptions {
+        session_source: Some(source.clone()),
+        thread_source: Some(ThreadSource::Subagent),
+        ..root.start_thread_options().await
+    };
+    options
+        .thread_extension_init
+        .insert(InheritedSessionId(session_id));
+    options
+        .thread_extension_init
+        .insert(reporter as Arc<dyn AgentTurnOutcomeReporter>);
+    let child = root.thread_manager.start_thread(options).await?;
+    let thread = &child.thread;
+
+    responses::mount_sse_sequence(
+        &server,
+        vec![
+            responses::sse(vec![
+                responses::ev_response_created("review"),
+                responses::ev_assistant_message("answer", ANSWER),
+                responses::ev_completed("review"),
+            ]),
+            responses::sse_failed("failed", "invalid_prompt", FAILURE),
+            responses::sse_completed("silent-followup"),
+        ],
+    )
+    .await;
+    let mut expect_report = async |expected_status| {
+        let turn_id = wait_for_event_match(thread, |event| match event {
+            EventMsg::TurnComplete(event) => Some(event.turn_id.clone()),
+            _ => None,
+        })
+        .await;
+        let report = tokio::time::timeout(Duration::from_secs(10), reports.recv())
+            .await
+            .expect("timed out waiting for the terminal turn report")
+            .expect("reporter dropped");
+        assert_eq!(
+            (report.thread_id, &report.turn_id, &report.source),
+            (child.thread_id, &turn_id, &source),
+        );
+        assert_eq!(
+            (&report.status, report.error_info.as_ref()),
+            (&expected_status, None)
+        );
+        report
+    };
+    for (prompt, expected_status) in [
+        (
+            "Review the patch.",
+            AgentStatus::Completed(Some(ANSWER.into())),
+        ),
+        ("Fail this request.", AgentStatus::Errored(FAILURE.into())),
+    ] {
+        thread
+            .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+                text: prompt.into(),
+                text_elements: Vec::new(),
+            }]))
+            .await?;
+        let report = expect_report(expected_status).await;
+        if !matches!(report.status, AgentStatus::Errored(_)) {
+            ThreadIdle::wait(thread).await;
+        }
+    }
+
+    // Queue the next task while the previous turn is still reporting its outcome.
+    let assigner = AgentPath::root().join("assigner").expect("assigner path");
+    let mail = InterAgentCommunication::new(
+        assigner.clone(),
+        AgentPath::root().join("reviewer").expect("child path"),
+        Vec::new(),
+        FOLLOWUP.into(),
+        /*trigger_turn*/ true,
+    );
+    let followup = TurnInputRequest::new(TurnInput::InterAgentCommunication(mail)).on_start(
+        TurnStartOptions {
+            parent_turn_id: Some(ASSIGNING_TURN.into()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        thread.start_or_steer_turn(followup).await?,
+        TurnInputSubmission::Accepted
+    );
+    release_report.send(()).expect("release failure report");
+
+    let report = expect_report(AgentStatus::Completed(None)).await;
+    ThreadIdle::wait(thread).await;
+    assert_eq!(
+        (
+            report.parent_turn_id.as_deref(),
+            report.initiating_agent_path
+        ),
+        (Some(ASSIGNING_TURN), Some(assigner)),
+    );
+    assert_eq!(
+        reports.try_recv().err(),
+        Some(mpsc::error::TryRecvError::Empty)
+    );
+    thread.shutdown_and_wait().await?;
+    let requests = responses::received_responses_requests(&server).await;
+    assert_eq!(requests.len(), 3);
+    assert_eq!(
+        requests[2].body_json()["client_metadata"]["turn_id"],
+        report.turn_id
+    );
+    let messages = requests[2].inputs_of_type("agent_message");
+    assert_eq!(messages.len(), 1);
+    assert!(
+        messages[0]["content"][0]["text"]
+            .as_str()
+            .is_some_and(|text| text.ends_with(FOLLOWUP))
+    );
+    root.xdcode.shutdown_and_wait().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn shutdown_waits_for_host_outcome_handoff() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    #[derive(Default)]
+    struct Handoff {
+        entered: Notify,
+        release: Notify,
+        events: Mutex<Vec<&'static str>>,
+    }
+
+    impl Handoff {
+        async fn pause(&self) {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
+    }
+
+    impl TurnLifecycleContributor for Handoff {
+        fn on_turn_stop<'a>(&'a self, _input: TurnStopInput<'a>) -> ExtensionFuture<'a, ()> {
+            Box::pin(self.pause())
+        }
+    }
+
+    impl AgentTurnOutcomeReporter for Handoff {
+        fn report(&self, _outcome: AgentTurnOutcome) -> BoxFuture<'_, ()> {
+            Box::pin(async move {
+                self.pause().await;
+                self.events.lock().expect("handoff events").push("reported");
+            })
+        }
+    }
+
+    impl ThreadLifecycleContributor<Config> for Handoff {
+        fn on_thread_stop<'a>(&'a self, _input: ThreadStopInput<'a>) -> ExtensionFuture<'a, ()> {
+            Box::pin(async move { self.events.lock().expect("handoff events").push("stopped") })
+        }
+    }
+
+    let handoff = Arc::new(Handoff::default());
+    let mut extensions = ExtensionRegistryBuilder::new();
+    extensions.turn_lifecycle_contributor(handoff.clone());
+    extensions.thread_lifecycle_contributor(handoff.clone());
+    let server = responses::start_mock_server().await;
+    let root = test_xdcode()
+        .with_extensions(Arc::new(extensions.build()))
+        .build_with_auto_env(&server)
+        .await?;
+    let mut options = root.start_thread_options().await;
+    options
+        .thread_extension_init
+        .insert(handoff.clone() as Arc<dyn AgentTurnOutcomeReporter>);
+    let child = root.thread_manager.start_thread(options).await?;
+    let thread = &child.thread;
+
+    responses::mount_sse_once(&server, responses::sse_completed("done")).await;
+    thread
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "Finish the task.".into(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+
+    // The finalizer has detached its task, but has not entered the reporter.
+    let wait_for_gate =
+        async || tokio::time::timeout(Duration::from_secs(10), handoff.entered.notified()).await;
+    wait_for_gate().await?;
+    thread.submit(Op::Shutdown).await?;
+    let assert_pending_then_release = async || {
+        assert!(
+            tokio::time::timeout(Duration::from_millis(250), thread.wait_until_terminated())
+                .await
+                .is_err(),
+            "shutdown completed before the local handoff"
+        );
+        handoff.release.notify_one();
+    };
+    assert_pending_then_release().await;
+    // The reporter has now been called, but the host has not accepted the outcome yet.
+    wait_for_gate().await?;
+    assert_pending_then_release().await;
+    tokio::time::timeout(Duration::from_secs(10), thread.wait_until_terminated()).await?;
+    assert_eq!(
+        *handoff.events.lock().expect("handoff events"),
+        ["reported", "stopped"]
+    );
+    root.xdcode.shutdown_and_wait().await?;
     Ok(())
 }
 
@@ -701,5 +1304,47 @@ async fn agent_mail_wakes_completed_root_when_enabled(
         json!([{"type": "input_text", "text": "Late agent update"}])
     );
     assert!(controller.mail.lock().expect("mail lock").is_empty());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn host_start_requires_turn_admission() -> anyhow::Result<()> {
+    struct HostWithoutAdmission(Mutex<Vec<&'static str>>);
+
+    impl ThreadLifecycleContributor<Config> for HostWithoutAdmission {
+        fn on_thread_start<'a>(
+            &'a self,
+            input: ThreadStartInput<'a, Config>,
+        ) -> ExtensionFuture<'a, ()> {
+            Box::pin(async move {
+                self.0.lock().unwrap().push("start");
+                input
+                    .thread_store
+                    .insert(xdcode_core::AgentRuntimeOwnership::Host);
+            })
+        }
+
+        fn on_thread_stop<'a>(&'a self, _input: ThreadStopInput<'a>) -> ExtensionFuture<'a, ()> {
+            Box::pin(async move { self.0.lock().unwrap().push("stop") })
+        }
+    }
+
+    skip_if_no_network!(Ok(()));
+    let server = responses::start_mock_server().await;
+    let host = Arc::new(HostWithoutAdmission(Mutex::default()));
+    let mut extensions = ExtensionRegistryBuilder::new();
+    extensions.thread_lifecycle_contributor(host.clone());
+    let error = test_xdcode()
+        .with_extensions(Arc::new(extensions.build()))
+        .build_with_auto_env(&server)
+        .await
+        .err()
+        .expect("missing admission")
+        .downcast::<XdcodeErr>()?;
+    assert!(
+        matches!(error.details(), XdcodeErrorDetails::InvalidRequest(message) if message.contains("AgentTurnAdmission")),
+        "{error:?}"
+    );
+    assert_eq!(*host.0.lock().unwrap(), ["start", "stop"]);
     Ok(())
 }

@@ -10,6 +10,7 @@ use tempfile::TempDir;
 use xdcode_config::CloudConfigBundleBindingStatus;
 use xdcode_config::CloudConfigBundlePolicy;
 use xdcode_config::CloudConfigBundleSnapshot;
+use xdcode_config::ConfigLayerSource;
 use xdcode_config::test_support::CloudConfigBundleFixture;
 use xdcode_login::test_support::auth_manager_from_optional_auth;
 use xdcode_protocol::config_types::ServiceTier;

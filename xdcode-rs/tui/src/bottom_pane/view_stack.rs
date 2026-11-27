@@ -93,7 +93,8 @@ impl Renderable for CenteredView<'_> {
     }
 
     fn desired_height(&self, width: u16) -> u16 {
-        self.area(Rect::new(0, 0, width, u16::MAX)).height
+        self.area(Rect::new(/*x*/ 0, /*y*/ 0, width, u16::MAX))
+            .height
     }
 
     fn cursor_pos(&self, area: Rect) -> Option<(u16, u16)> {

@@ -52,7 +52,7 @@ pub(crate) fn render_markdown_for_viewport_with_list_spacing(
     let lines = crate::markdown_render::render_markdown_lines_with_list_spacing(
         input,
         Some(width),
-        None,
+        /*cwd*/ None,
         &crate::markdown_render::hide_web_link_destination,
         list_spacing,
     );
@@ -140,7 +140,7 @@ pub(crate) fn render_markdown_agent_with_list_spacing(
     };
     let is_hidden_link_destination = |destination: &str| {
         rewritten.trusted_file_links.contains_key(destination)
-            || crate::markdown_render::hide_web_link_destination(destination)
+            || crate::markdown_render::preferences::hide_transcript_destination(destination)
     };
     let mut lines = crate::markdown_render::render_with_copy_sources(
         &normalized,
@@ -175,7 +175,7 @@ pub(crate) fn render_streaming_markdown_agent_with_links_and_cwd(
         &normalized,
         width,
         cwd,
-        &crate::markdown_render::hide_web_link_destination,
+        &crate::markdown_render::preferences::hide_transcript_destination,
         list_spacing,
     );
     if normalized != markdown_source {

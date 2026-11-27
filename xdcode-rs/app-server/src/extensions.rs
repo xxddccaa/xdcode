@@ -104,6 +104,15 @@ pub(crate) fn thread_extensions(
         git_attribution_base_url,
         http_client_factory,
     );
+    if config
+        .features
+        .enabled(xdcode_features::Feature::GuardianV3)
+    {
+        let board_manager = thread_manager.clone();
+        xdcode_guardian_v3::install(&mut builder, thread_manager.clone(), config, move |root| {
+            xdcode_agent_message_board_host::local_board_host(board_manager.clone(), root)
+        });
+    }
     xdcode_guardian_v2::install(&mut builder, auth_manager.clone(), thread_manager);
     xdcode_memories_extension::install(&mut builder, xdcode_otel::global());
     xdcode_mcp_extension::install(&mut builder);
@@ -127,6 +136,9 @@ pub(crate) fn thread_extensions(
             catalog_deltas_enabled: config
                 .features
                 .enabled(xdcode_features::Feature::SkillCatalogDeltas),
+            omit_descriptions: config
+                .features
+                .enabled(xdcode_features::Feature::OmitSkillDescriptions),
             max_context_tokens: config.skill_max_context_tokens,
             bundled_skills_enabled: config.bundled_skills_enabled(),
             cloud_skill_enabled: config.cloud_skill_enabled,

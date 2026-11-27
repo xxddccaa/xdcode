@@ -35,6 +35,7 @@ use xdcode_protocol::memory_citation::MemoryCitation as CoreMemoryCitation;
 use xdcode_protocol::memory_citation::MemoryCitationEntry as CoreMemoryCitationEntry;
 use xdcode_protocol::model_types::ReasoningEffort;
 use xdcode_protocol::models::AdditionalPermissionProfile as CoreAdditionalPermissionProfile;
+use xdcode_protocol::models::AudioReference;
 use xdcode_protocol::models::BUILT_IN_PERMISSION_PROFILE_WORKSPACE;
 use xdcode_protocol::models::FileSystemPermissions as CoreFileSystemPermissions;
 use xdcode_protocol::models::ImageDetail;
@@ -304,6 +305,7 @@ fn thread_resume_response_round_trips_initial_turns_page() {
             extra: None,
             session_id: "thr_123".to_string(),
             forked_from_id: None,
+            attached_to_thread_id: None,
             parent_thread_id: None,
             preview: String::new(),
             ephemeral: false,
@@ -323,7 +325,7 @@ fn thread_resume_response_round_trips_initial_turns_page() {
             recency_at: Some(1),
             status: ThreadStatus::Idle,
             path: None,
-            cwd: absolute_path("tmp"),
+            cwd: absolute_path("tmp").into(),
             cli_version: "0.0.0".to_string(),
             source: SessionSource::Exec,
             can_accept_direct_input: None,
@@ -333,12 +335,13 @@ fn thread_resume_response_round_trips_initial_turns_page() {
             git_info: None,
             name: None,
             daybreak_enabled: None,
+            daybreak_program_propagation_enrolled: None,
             turns: Vec::new(),
         },
         model: "gpt-5".to_string(),
         model_provider: "provider".to_string(),
         service_tier: None,
-        cwd: absolute_path("tmp"),
+        cwd: absolute_path("tmp").into(),
         runtime_workspace_roots: Vec::new(),
         instruction_sources: Vec::new(),
         approval_policy: AskForApproval::OnRequest,
@@ -438,6 +441,7 @@ fn thread_items_list_round_trips() {
         cursor: Some(ThreadItemsListCursor::Opaque("cursor_1".to_string())),
         limit: Some(50),
         sort_direction: Some(SortDirection::Asc),
+        defer_output: None,
     };
 
     assert_eq!(
@@ -479,8 +483,13 @@ fn thread_items_list_round_trips() {
         let response = ThreadItemsListResponse {
             data: vec![ThreadItemEntry {
                 turn_id: "turn_456".to_string(),
-                item: ThreadItem::ContextCompaction {
-                    id: "item_1".to_string(),
+                output_deferred: false,
+                item: ThreadItem {
+                    payload: ThreadItemPayload::ContextCompaction {
+                        id: "item_1".to_string(),
+                    },
+                    started_at_ms,
+                    completed_at_ms,
                 },
                 started_at_ms,
                 completed_at_ms,
@@ -494,7 +503,7 @@ fn thread_items_list_round_trips() {
             json!({
                 "data": [{
                     "turnId": "turn_456",
-                    "item": {"type": "contextCompaction", "id": "item_1"},
+                    "item": {"type": "contextCompaction", "id": "item_1", "startedAtMs": started_at_ms, "completedAtMs": completed_at_ms},
                     "startedAtMs": started_at_ms,
                     "completedAtMs": completed_at_ms,
                 }],
@@ -514,6 +523,7 @@ fn thread_items_list_round_trips() {
         cursor: None,
         limit: None,
         sort_direction: None,
+        defer_output: None,
     };
 
     assert_eq!(
@@ -2024,7 +2034,7 @@ fn sandbox_policy_round_trips_external_sandbox_network_access() {
         network_access: NetworkAccess::Enabled,
     };
 
-    let core_policy = v2_policy.to_core();
+    let core_policy = v2_policy.try_to_core().unwrap();
     assert_eq!(
         core_policy,
         xdcode_protocol::protocol::SandboxPolicy::ExternalSandbox {
@@ -2042,7 +2052,7 @@ fn sandbox_policy_round_trips_read_only_network_access() {
         network_access: true,
     };
 
-    let core_policy = v2_policy.to_core();
+    let core_policy = v2_policy.try_to_core().unwrap();
     assert_eq!(
         core_policy,
         xdcode_protocol::protocol::SandboxPolicy::ReadOnly {
@@ -2143,6 +2153,7 @@ fn config_granular_approval_policy_is_marked_experimental() {
         forced_chatgpt_workspace_id: None,
         forced_login_method: None,
         web_search: None,
+        client_search_provider: None,
         tools: None,
         instructions: None,
         developer_instructions: None,
@@ -2178,6 +2189,7 @@ fn config_approvals_reviewer_is_marked_experimental() {
         forced_chatgpt_workspace_id: None,
         forced_login_method: None,
         web_search: None,
+        client_search_provider: None,
         tools: None,
         instructions: None,
         developer_instructions: None,
@@ -2240,6 +2252,7 @@ fn config_requirements_granular_allowed_approval_policy_is_marked_experimental()
             check_for_update_on_startup: None,
             allow_login_shell: None,
             feedback: None,
+            otel: None,
         });
 
     assert_eq!(reason, Some("askForApproval.granular"));
@@ -2700,6 +2713,7 @@ fn mcp_server_elicitation_response_serializes_nullable_content() {
 fn mcp_server_status_serializes_absent_server_info_as_null() {
     let response = ListMcpServerStatusResponse {
         data: vec![McpServerStatus {
+            environment_id: None,
             tool_list_meta: None,
             server_capabilities: None,
             tools_error: None,
@@ -2721,6 +2735,7 @@ fn mcp_server_status_serializes_absent_server_info_as_null() {
         json!({
             "data": [{
                 "name": "not-ready",
+                "environmentId": null,
                 "runtimeStatus": null,
                 "pluginId": null,
                 "httpOrigin": null,
@@ -2753,6 +2768,7 @@ fn mcp_server_status_accepts_older_inventory_without_runtime_status() {
     assert_eq!(
         status,
         McpServerStatus {
+            environment_id: None,
             tool_list_meta: None,
             server_capabilities: None,
             tools_error: None,
@@ -2781,6 +2797,7 @@ fn mcp_server_status_updated_accepts_missing_thread_id() {
     let expected = McpServerStatusUpdatedNotification {
         thread_id: None,
         name: "optional_broken".to_string(),
+        environment_id: None,
         status: McpServerStartupState::Failed,
         error: Some("handshake failed".to_string()),
         failure_reason: None,
@@ -2791,6 +2808,7 @@ fn mcp_server_status_updated_accepts_missing_thread_id() {
         json!({
             "threadId": null,
             "name": "optional_broken",
+            "environmentId": null,
             "status": "failed",
             "error": "handshake failed",
             "failureReason": null,
@@ -2804,6 +2822,7 @@ fn mcp_server_status_updated_serializes_failure_reason() {
         ServerNotification::McpServerStatusUpdated(McpServerStatusUpdatedNotification {
             thread_id: Some("thread-1".to_string()),
             name: "expired-oauth".to_string(),
+            environment_id: Some("remote".to_string()),
             status: McpServerStartupState::Failed,
             error: Some("OAuth credentials expired".to_string()),
             failure_reason: Some(McpServerStartupFailureReason::ReauthenticationRequired),
@@ -2816,6 +2835,7 @@ fn mcp_server_status_updated_serializes_failure_reason() {
             "params": {
                 "threadId": "thread-1",
                 "name": "expired-oauth",
+                "environmentId": "remote",
                 "status": "failed",
                 "error": "OAuth credentials expired",
                 "failureReason": "reauthenticationRequired",
@@ -2828,6 +2848,7 @@ fn mcp_server_status_updated_serializes_failure_reason() {
 fn mcp_server_status_serializes_absent_server_info_metadata_as_null() {
     let response = ListMcpServerStatusResponse {
         data: vec![McpServerStatus {
+            environment_id: None,
             tool_list_meta: None,
             server_capabilities: None,
             tools_error: None,
@@ -2856,6 +2877,7 @@ fn mcp_server_status_serializes_absent_server_info_metadata_as_null() {
         json!({
             "data": [{
                 "name": "initialized",
+                "environmentId": null,
                 "runtimeStatus": null,
                 "pluginId": "lookup@test",
                 "httpOrigin": null,
@@ -2882,26 +2904,92 @@ fn mcp_server_status_serializes_absent_server_info_metadata_as_null() {
 
 #[test]
 fn sandbox_policy_round_trips_workspace_write_access() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let root = AbsolutePathBuf::from_absolute_path(directory.path()).expect("absolute root");
+    std::fs::create_dir(root.join(".git")).expect("git metadata");
     let v2_policy = SandboxPolicy::WorkspaceWrite {
-        writable_roots: vec![],
+        writable_roots: vec![root.clone().into(), root.clone().into()],
         network_access: true,
         exclude_tmpdir_env_var: false,
         exclude_slash_tmp: false,
     };
 
-    let core_policy = v2_policy.to_core();
+    let core_policy = v2_policy.try_to_core().unwrap();
     assert_eq!(
         core_policy,
         xdcode_protocol::protocol::SandboxPolicy::WorkspaceWrite {
-            writable_roots: vec![],
+            writable_roots: vec![root.clone(), root],
             network_access: true,
             exclude_tmpdir_env_var: false,
             exclude_slash_tmp: false,
         }
     );
 
+    let profile = xdcode_protocol::models::PermissionProfile::from_legacy_sandbox_policy_template(
+        &core_policy,
+    );
+    assert!(
+        !profile
+            .file_system_sandbox_policy()
+            .entries
+            .iter()
+            .any(|entry| {
+                entry.access == xdcode_protocol::permissions::FileSystemAccessMode::Read
+                    && matches!(
+                        entry.path,
+                        xdcode_protocol::permissions::FileSystemPath::Path { .. }
+                    )
+            })
+    );
+
+    assert_eq!(
+        SandboxPolicy::from(
+            profile
+                .to_legacy_sandbox_policy_template()
+                .expect("portable legacy template")
+        ),
+        v2_policy,
+    );
+
     let back_to_v2 = SandboxPolicy::from(core_policy);
     assert_eq!(back_to_v2, v2_policy);
+}
+
+#[test]
+fn sandbox_policy_template_preserves_foreign_writable_roots() {
+    let root = if cfg!(windows) { "/extra" } else { r"C:\extra" };
+    let policy: SandboxPolicy = serde_json::from_value(json!({
+        "type": "workspaceWrite",
+        "writableRoots": [root],
+    }))
+    .expect("workspace-write policy");
+    let root = PathUri::try_from(LegacyAppPathString::from_string(root)).expect("foreign root");
+    let file_system = policy
+        .permission_profile_template()
+        .expect("permission profile template")
+        .file_system_sandbox_policy();
+    assert!(file_system.entries.iter().any(|entry| {
+        entry.access.can_write()
+            && matches!(&entry.path, xdcode_protocol::permissions::FileSystemPath::Path { path } if path == &root)
+    }));
+}
+
+#[test]
+fn sandbox_policy_rejects_home_relative_writable_roots_for_enforcement() {
+    let policy: SandboxPolicy = serde_json::from_value(json!({
+        "type": "workspaceWrite",
+        "writableRoots": ["~/extra"],
+    }))
+    .expect("workspace-write policy");
+    let home = std::env::current_dir().expect("current directory");
+    let result =
+        xdcode_utils_absolute_path::AbsolutePathBufGuard::with_home_directory(&home, || {
+            policy.try_to_core()
+        });
+    assert_eq!(
+        result.expect_err("writable roots must be absolute").kind(),
+        std::io::ErrorKind::InvalidInput
+    );
 }
 
 #[test]
@@ -2939,7 +3027,7 @@ fn sandbox_policy_deserializes_legacy_workspace_write_full_access_field() {
     assert_eq!(
         policy,
         SandboxPolicy::WorkspaceWrite {
-            writable_roots: vec![absolute_path("/workspace")],
+            writable_roots: vec![absolute_path("/workspace").into()],
             network_access: true,
             exclude_tmpdir_env_var: true,
             exclude_slash_tmp: true,
@@ -3156,6 +3244,54 @@ fn network_requirements_serializes_canonical_and_legacy_fields() {
 }
 
 #[test]
+fn audio_references_round_trip_through_core_and_json() {
+    for wire in [
+        json!({"type": "audio", "url": "data:audio/wav;base64,AAA"}),
+        json!({"type": "audio", "fileId": "file_audio"}),
+    ] {
+        let input: UserInput = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(
+            serde_json::to_value(UserInput::from(input.into_core())).unwrap(),
+            wire
+        );
+    }
+    let old_input: UserInput = serde_json::from_value(
+        json!({"type": "audio", "fileId": "file_audio", "durationMs": 1_000}),
+    )
+    .unwrap();
+    assert_eq!(
+        serde_json::to_value(UserInput::from(old_input.into_core())).unwrap(),
+        json!({"type": "audio", "fileId": "file_audio"})
+    );
+}
+
+#[test]
+fn answer_moderation_preserves_the_display_instruction() {
+    for display in [
+        JsonValue::Null,
+        json!({"version":1, "mode":"show", "trustedContacts":"check",
+            "annotation":{"kind":"wellbeingHelpline", "subject":"prompt"}}),
+        json!({"version":1, "mode":"hide", "replacement":{"kind":"wellbeingPromptHelpline"}}),
+        json!({"version":1, "mode":"block", "reason":{"kind":"protection","protectionType":"omnimod"}}),
+        json!({"version":1, "mode":"block", "reason":{"kind":"cyber","trustedAccess":false}}),
+    ] {
+        let stored = json!({"moderated": !display.is_null(), "display": display});
+        let mut with_extra_fields = stored.clone();
+        if let Some(object) = with_extra_fields["display"].as_object_mut() {
+            object.insert("additionalV1Field".into(), json!(true));
+        }
+        let core = serde_json::from_value::<xdcode_protocol::items::AgentMessageModeration>(
+            with_extra_fields,
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(AgentMessageModeration::from(core)).unwrap(),
+            stored
+        );
+    }
+}
+
+#[test]
 fn core_turn_item_into_thread_item_converts_supported_variants() {
     let user_item = TurnItem::UserMessage(UserMessageItem {
         id: "user-1".to_string(),
@@ -3176,7 +3312,14 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
                 detail: Some(ImageDetail::Original),
             },
             CoreUserInput::Audio {
-                audio_url: "data:audio/wav;base64,AAA".to_string(),
+                audio: AudioReference::Inline {
+                    audio_url: "data:audio/wav;base64,AAA".to_string(),
+                },
+            },
+            CoreUserInput::Audio {
+                audio: AudioReference::File {
+                    file_id: "file_audio".into(),
+                },
             },
             CoreUserInput::LocalAudio {
                 path: PathBuf::from("local/audio.mp3"),
@@ -3193,8 +3336,8 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
     });
 
     assert_eq!(
-        ThreadItem::from(user_item),
-        ThreadItem::UserMessage {
+        ThreadItemPayload::from(user_item),
+        ThreadItemPayload::UserMessage {
             id: "user-1".to_string(),
             client_id: Some("client-message-1".to_string()),
             content: vec![
@@ -3213,7 +3356,14 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
                     detail: Some(ImageDetail::Original),
                 },
                 UserInput::Audio {
-                    url: "data:audio/wav;base64,AAA".to_string(),
+                    audio: crate::AudioReference::Inline {
+                        url: "data:audio/wav;base64,AAA".to_string()
+                    }
+                },
+                UserInput::Audio {
+                    audio: crate::AudioReference::File {
+                        file_id: "file_audio".into(),
+                    }
                 },
                 UserInput::LocalAudio {
                     path: PathBuf::from("local/audio.mp3"),
@@ -3231,6 +3381,7 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
     );
 
     let agent_item = TurnItem::AgentMessage(AgentMessageItem {
+        moderation: None,
         id: "agent-1".to_string(),
         content: vec![
             AgentMessageContent::Text {
@@ -3246,9 +3397,17 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
         questions: None,
     });
 
+    let agent_payload = ThreadItemPayload::from(agent_item);
     assert_eq!(
-        ThreadItem::from(agent_item),
-        ThreadItem::AgentMessage {
+        serde_json::to_value(&agent_payload)
+            .unwrap()
+            .get("moderation"),
+        Some(&serde_json::Value::Null),
+    );
+    assert_eq!(
+        agent_payload,
+        ThreadItemPayload::AgentMessage {
+            moderation: None,
             id: "agent-1".to_string(),
             text: "Hello world".to_string(),
             phase: None,
@@ -3259,6 +3418,10 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
     );
 
     let agent_item_with_phase = TurnItem::AgentMessage(AgentMessageItem {
+        moderation: Some(xdcode_protocol::items::AgentMessageModeration {
+            moderated: true,
+            display: None,
+        }),
         id: "agent-2".to_string(),
         content: vec![AgentMessageContent::Text {
             text: "final".to_string(),
@@ -3278,8 +3441,12 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
     });
 
     assert_eq!(
-        ThreadItem::from(agent_item_with_phase),
-        ThreadItem::AgentMessage {
+        ThreadItemPayload::from(agent_item_with_phase),
+        ThreadItemPayload::AgentMessage {
+            moderation: Some(AgentMessageModeration {
+                moderated: true,
+                display: None
+            }),
             id: "agent-2".to_string(),
             text: "final".to_string(),
             phase: Some(MessagePhase::FinalAnswer),
@@ -3297,7 +3464,8 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
         }
     );
 
-    let async_item = ThreadItem::from(TurnItem::AgentMessage(AgentMessageItem {
+    let async_item = ThreadItemPayload::from(TurnItem::AgentMessage(AgentMessageItem {
+        moderation: None,
         id: "async-1".to_string(),
         content: vec![AgentMessageContent::Text {
             text: "Which?".to_string(),
@@ -3314,16 +3482,17 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
         serde_json::to_value(&async_item).unwrap(),
         json!({
             "type": "agentMessage", "id": "async-1", "text": "Which?", "phase": "final_answer",
+            "moderation": null,
             "memoryCitation": null, "delivery": "async", "questions": [{"title": "Which?", "options": null}]
         })
     );
-    let old_item: ThreadItem = serde_json::from_value(json!({
+    let old_item: ThreadItemPayload = serde_json::from_value(json!({
         "type": "agentMessage", "id": "old-1", "text": "An old message"
     }))
     .unwrap();
     assert!(matches!(
         old_item,
-        ThreadItem::AgentMessage {
+        ThreadItemPayload::AgentMessage {
             questions: None,
             ..
         }
@@ -3336,8 +3505,8 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
     });
 
     assert_eq!(
-        ThreadItem::from(reasoning_item),
-        ThreadItem::Reasoning {
+        ThreadItemPayload::from(reasoning_item),
+        ThreadItemPayload::Reasoning {
             id: "reasoning-1".to_string(),
             summary: vec!["line one".to_string(), "line two".to_string()],
             content: vec![],
@@ -3374,8 +3543,8 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
     });
 
     assert_eq!(
-        ThreadItem::from(command_item),
-        ThreadItem::CommandExecution {
+        ThreadItemPayload::from(command_item),
+        ThreadItemPayload::CommandExecution {
             model_context: None,
             sandbox_type: None,
             id: "exec-1".to_string(),
@@ -3420,8 +3589,8 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
     });
 
     assert_eq!(
-        ThreadItem::from(dynamic_tool_call_item),
-        ThreadItem::DynamicToolCall {
+        ThreadItemPayload::from(dynamic_tool_call_item),
+        ThreadItemPayload::DynamicToolCall {
             id: "dynamic-1".to_string(),
             namespace: Some("apps".to_string()),
             tool: "lookup".to_string(),
@@ -3461,8 +3630,8 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
     });
 
     assert_eq!(
-        ThreadItem::from(collab_item),
-        ThreadItem::CollabAgentToolCall {
+        ThreadItemPayload::from(collab_item),
+        ThreadItemPayload::CollabAgentToolCall {
             id: "collab-1".to_string(),
             tool: CollabAgentTool::SendInput,
             status: CollabAgentToolCallStatus::Completed,
@@ -3495,8 +3664,8 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
     });
 
     assert_eq!(
-        ThreadItem::from(sub_agent_activity_item),
-        ThreadItem::SubAgentActivity {
+        ThreadItemPayload::from(sub_agent_activity_item),
+        ThreadItemPayload::SubAgentActivity {
             model: Some("gpt-5".into()),
             reasoning_effort: Some(ReasoningEffort::High),
             id: "activity-1".to_string(),
@@ -3513,7 +3682,7 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
         "agent_path": "/root/worker",
     }))
     .unwrap();
-    let old_wire_activity: ThreadItem = serde_json::from_value(json!({
+    let old_wire_activity: ThreadItemPayload = serde_json::from_value(json!({
         "type": "subAgentActivity",
         "id": "old-activity",
         "kind": "started",
@@ -3522,7 +3691,7 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
     }))
     .unwrap();
     assert_eq!(
-        ThreadItem::from(TurnItem::SubAgentActivity(old_activity)),
+        ThreadItemPayload::from(TurnItem::SubAgentActivity(old_activity)),
         old_wire_activity
     );
 
@@ -3555,14 +3724,14 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
     };
 
     assert_eq!(
-        ThreadItem::from(search_item),
-        ThreadItem::WebSearch(expected_search_item.clone())
+        ThreadItemPayload::from(search_item),
+        ThreadItemPayload::WebSearch(expected_search_item.clone())
     );
     assert_eq!(
-        ThreadItem::from(TurnItem::Extension(
+        ThreadItemPayload::from(TurnItem::Extension(
             xdcode_extension_items::ExtensionItem::WebSearch(expected_search_item.clone()),
         )),
-        ThreadItem::WebSearch(expected_search_item)
+        ThreadItemPayload::WebSearch(expected_search_item)
     );
 
     let image_view_item = TurnItem::ImageView(ImageViewItem {
@@ -3571,8 +3740,8 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
     });
 
     assert_eq!(
-        ThreadItem::from(image_view_item),
-        ThreadItem::ImageView {
+        ThreadItemPayload::from(image_view_item),
+        ThreadItemPayload::ImageView {
             id: "view-image-1".to_string(),
             path: LegacyAppPathString::from_abs_path(&test_path_buf("/tmp/view-image.png").abs()),
         }
@@ -3595,8 +3764,8 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
     });
 
     assert_eq!(
-        ThreadItem::from(file_change_item),
-        ThreadItem::FileChange {
+        ThreadItemPayload::from(file_change_item),
+        ThreadItemPayload::FileChange {
             id: "patch-1".to_string(),
             changes: vec![FileUpdateChange {
                 path: "README.md".to_string(),
@@ -3610,6 +3779,7 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
     let mcp_tool_call_item = TurnItem::McpToolCall(McpToolCallItem {
         id: "mcp-1".to_string(),
         server: "server".to_string(),
+        environment_id: Some("remote".to_string()),
         tool: "tool".to_string(),
         arguments: json!({"arg": "value"}),
         connector_id: Some("calendar".to_string()),
@@ -3627,10 +3797,11 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
     });
 
     assert_eq!(
-        ThreadItem::from(mcp_tool_call_item),
-        ThreadItem::McpToolCall {
+        ThreadItemPayload::from(mcp_tool_call_item),
+        ThreadItemPayload::McpToolCall {
             id: "mcp-1".to_string(),
             server: "server".to_string(),
+            environment_id: Some("remote".to_string()),
             tool: "tool".to_string(),
             status: McpToolCallStatus::InProgress,
             arguments: json!({"arg": "value"}),
@@ -3654,6 +3825,7 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
     let completed_mcp_tool_call_item = TurnItem::McpToolCall(McpToolCallItem {
         id: "mcp-2".to_string(),
         server: "server".to_string(),
+        environment_id: None,
         tool: "tool".to_string(),
         arguments: JsonValue::Null,
         connector_id: None,
@@ -3676,10 +3848,11 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
     });
 
     assert_eq!(
-        ThreadItem::from(completed_mcp_tool_call_item),
-        ThreadItem::McpToolCall {
+        ThreadItemPayload::from(completed_mcp_tool_call_item),
+        ThreadItemPayload::McpToolCall {
             id: "mcp-2".to_string(),
             server: "server".to_string(),
+            environment_id: None,
             tool: "tool".to_string(),
             status: McpToolCallStatus::Completed,
             arguments: JsonValue::Null,
@@ -3700,10 +3873,24 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
 }
 
 #[test]
+fn unsupported_answer_display_leaves_the_answer_restricted() {
+    for display in [
+        json!({"version": 2, "mode": "show", "trustedContacts": "skip"}),
+        json!({"version": 1, "mode": "unknown"}),
+    ] {
+        let parsed: AgentMessageModeration =
+            serde_json::from_value(json!({"moderated": false, "display": display})).unwrap();
+        assert!(parsed.moderated);
+        assert!(parsed.display.is_none());
+    }
+}
+
+#[test]
 fn mcp_tool_call_app_context_serializes_connector_id() {
-    let item = ThreadItem::McpToolCall {
+    let item = ThreadItemPayload::McpToolCall {
         id: "mcp-1".to_string(),
         server: "xdcode_apps".to_string(),
+        environment_id: None,
         tool: "calendar.create_event".to_string(),
         status: McpToolCallStatus::InProgress,
         arguments: json!({}),
@@ -3729,6 +3916,7 @@ fn mcp_tool_call_app_context_serializes_connector_id() {
             "type": "mcpToolCall",
             "id": "mcp-1",
             "server": "xdcode_apps",
+            "environmentId": null,
             "tool": "calendar.create_event",
             "status": "inProgress",
             "arguments": {},
@@ -3867,11 +4055,15 @@ fn user_input_into_core_preserves_media_fields() {
 
     assert_eq!(
         UserInput::Audio {
-            url: "data:audio/wav;base64,AAA".to_string(),
+            audio: crate::AudioReference::Inline {
+                url: "data:audio/wav;base64,AAA".to_string()
+            }
         }
         .into_core(),
         CoreUserInput::Audio {
-            audio_url: "data:audio/wav;base64,AAA".to_string(),
+            audio: AudioReference::Inline {
+                audio_url: "data:audio/wav;base64,AAA".to_string()
+            }
         }
     );
 
@@ -4821,8 +5013,32 @@ fn xdcode_error_info_serializes_http_status_code_in_camel_case() {
 #[test]
 fn core_error_info_converts_to_camel_case() {
     for (core, expected) in [
+        (
+            CoreXdcodeErrorInfo::ApiKeySpendLimitExceeded,
+            json!("apiKeySpendLimitExceeded"),
+        ),
+        (
+            CoreXdcodeErrorInfo::ProjectSpendLimitExceeded,
+            json!("projectSpendLimitExceeded"),
+        ),
+        (
+            CoreXdcodeErrorInfo::OrganizationSpendLimitExceeded,
+            json!("organizationSpendLimitExceeded"),
+        ),
+        (
+            CoreXdcodeErrorInfo::UsageLimitExceeded,
+            json!("usageLimitExceeded"),
+        ),
+        (
+            CoreXdcodeErrorInfo::PolicyCapacityUnavailable,
+            json!("policyCapacityUnavailable"),
+        ),
         (CoreXdcodeErrorInfo::CyberPolicy, json!("cyberPolicy")),
-        (CoreXdcodeErrorInfo::BioPolicy, json!("other")),
+        (
+            CoreXdcodeErrorInfo::InferenceHookDenied,
+            json!("inferenceHookDenied"),
+        ),
+        (CoreXdcodeErrorInfo::BioPolicy, json!("bioPolicy")),
         (CoreXdcodeErrorInfo::InvalidPrompt, json!("other")),
         (
             CoreXdcodeErrorInfo::FlexUnavailable,
@@ -4833,9 +5049,11 @@ fn core_error_info_converts_to_camel_case() {
             json!("rateLimitExceeded"),
         ),
     ] {
+        let converted = XdcodeErrorInfo::from(core);
+        assert_eq!(serde_json::to_value(&converted).unwrap(), expected);
         assert_eq!(
-            serde_json::to_value(XdcodeErrorInfo::from(core)).unwrap(),
-            expected
+            serde_json::from_value::<XdcodeErrorInfo>(expected).unwrap(),
+            converted
         );
     }
 }
@@ -5000,6 +5218,11 @@ fn thread_start_params_preserve_explicit_null_service_tier() {
 
 #[test]
 fn thread_lifecycle_responses_default_missing_optional_fields() {
+    let cwd = if cfg!(windows) {
+        "/home/alice/repo"
+    } else {
+        r"D:\repo"
+    };
     let response = json!({
         "thread": {
             "id": "thread-id",
@@ -5012,7 +5235,7 @@ fn thread_lifecycle_responses_default_missing_optional_fields() {
             "updatedAt": 1,
             "status": { "type": "idle" },
             "path": null,
-            "cwd": absolute_path_string("tmp"),
+            "cwd": cwd,
             "cliVersion": "0.0.0",
             "source": "exec",
             "agentNickname": null,
@@ -5024,10 +5247,11 @@ fn thread_lifecycle_responses_default_missing_optional_fields() {
         "model": "gpt-5",
         "modelProvider": "provider",
         "serviceTier": null,
-        "cwd": absolute_path_string("tmp"),
+        "cwd": cwd,
         "approvalPolicy": "on-request",
         "approvalsReviewer": "user",
-        "sandbox": { "type": "dangerFullAccess" },
+        "runtimeWorkspaceRoots": [cwd],
+        "sandbox": { "type": "workspaceWrite", "writableRoots": [cwd] },
         "reasoningEffort": null
     });
 
@@ -5038,6 +5262,12 @@ fn thread_lifecycle_responses_default_missing_optional_fields() {
     let fork: ThreadForkResponse =
         serde_json::from_value(response.clone()).expect("thread/fork response");
 
+    for encoded in [json!(start), json!(resume), json!(fork)] {
+        assert_eq!(encoded["thread"]["cwd"], cwd);
+        assert_eq!(encoded["cwd"], cwd);
+        assert_eq!(encoded["runtimeWorkspaceRoots"], json!([cwd]));
+        assert_eq!(encoded["sandbox"]["writableRoots"], json!([cwd]));
+    }
     assert_eq!(start.instruction_sources, Vec::<LegacyAppPathString>::new());
     assert_eq!(start.thread.parent_thread_id, None);
     assert_eq!(start.thread.recency_at, None);
@@ -5149,6 +5379,76 @@ fn turn_start_params_preserve_explicit_null_service_tier() {
     let serialized_without_override =
         serde_json::to_value(&without_override).expect("params should serialize");
     assert_eq!(serialized_without_override.get("serviceTier"), None);
+}
+
+#[test]
+fn model_access_programs_preserve_availability_across_wire_formats() {
+    use xdcode_protocol::model_types::ModelAccessPrograms as CoreModelAccessPrograms;
+
+    for (core_availability, app_server_availability, normalized_availability) in [
+        (json!("available"), json!("available"), json!("available")),
+        (
+            json!("enrollment_required"),
+            json!("enrollmentRequired"),
+            json!("enrollmentRequired"),
+        ),
+        (
+            json!("unavailable_for_model"),
+            json!("unavailableForModel"),
+            json!("unavailableForModel"),
+        ),
+        (json!("default"), json!("default"), json!("default")),
+        (
+            json!("future_status"),
+            json!("futureStatus"),
+            json!("default"),
+        ),
+    ] {
+        let core: CoreModelAccessPrograms = serde_json::from_value(json!({
+            "cyber": ["standard", "daybreak_blue", "daybreak_red"],
+            "daybreak_availability": core_availability,
+        }))
+        .expect("catalog availability should deserialize");
+        let app_server: ModelAccessPrograms = serde_json::from_value(json!({
+            "cyber": ["standard", "daybreakBlue", "daybreakRed"],
+            "daybreakAvailability": app_server_availability,
+        }))
+        .expect("app-server availability should deserialize");
+
+        assert_eq!(ModelAccessPrograms::from(core.clone()), app_server);
+        assert_eq!(CoreModelAccessPrograms::from(app_server.clone()), core);
+        assert_eq!(
+            serde_json::to_value(app_server).expect("model access programs should serialize"),
+            json!({
+                "cyber": ["standard", "daybreakBlue", "daybreakRed"],
+                "daybreakAvailability": normalized_availability,
+            }),
+        );
+    }
+
+    let legacy_core: CoreModelAccessPrograms = serde_json::from_value(json!({
+        "cyber": ["standard", "daybreak_blue"],
+    }))
+    .expect("old catalog metadata should deserialize");
+    let legacy_app_server: ModelAccessPrograms = serde_json::from_value(json!({
+        "cyber": ["standard", "daybreakBlue"],
+    }))
+    .expect("old app-server metadata should deserialize");
+    assert_eq!(
+        ModelAccessPrograms::from(legacy_core.clone()),
+        legacy_app_server,
+    );
+    assert_eq!(
+        CoreModelAccessPrograms::from(legacy_app_server.clone()),
+        legacy_core
+    );
+    assert_eq!(
+        serde_json::to_value(legacy_app_server).expect("legacy programs should serialize"),
+        json!({
+            "cyber": ["standard", "daybreakBlue"],
+            "daybreakAvailability": "default",
+        }),
+    );
 }
 
 #[test]
@@ -5535,4 +5835,14 @@ fn feedback_paths_preserve_native_wire_spelling_before_host_validation() {
             path
         );
     }
+}
+
+#[test]
+fn an_undated_live_voice_item_preserves_its_wire_shape() {
+    let wire = serde_json::json!({
+        "id": "speech", "realtimeSessionId": "voice", "type": "transcriptSegment",
+        "role": "assistant", "text": "hello",
+    });
+    let item: ThreadRealtimeItem = serde_json::from_value(wire.clone()).unwrap();
+    assert_eq!(serde_json::to_value(item).unwrap(), wire);
 }

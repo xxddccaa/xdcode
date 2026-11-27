@@ -1,6 +1,7 @@
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use xdcode_protocol::model_types::CatalogModel;
 
 use tokio::sync::Mutex;
 use tokio::time::Duration;
@@ -24,7 +25,6 @@ use crate::tools::events::ToolEventStage;
 use xdcode_core_plugins::PluginCommandAttribution;
 use xdcode_protocol::exec_output::ExecToolCallOutput;
 use xdcode_protocol::exec_output::StreamOutput;
-use xdcode_protocol::model_types::ModelInfo;
 use xdcode_protocol::protocol::EventMsg;
 use xdcode_protocol::protocol::ExecCommandOutputDeltaEvent;
 use xdcode_protocol::protocol::ExecCommandSource;
@@ -332,7 +332,7 @@ pub(crate) async fn emit_exec_end_for_unified_exec(
     sandbox_type: Option<xdcode_protocol::sandbox::SandboxType>,
     session_ref: Arc<Session>,
     turn_ref: Arc<TurnContext>,
-    model_info: Arc<ModelInfo>,
+    model_info: Arc<CatalogModel>,
     call_id: String,
     command: Vec<String>,
     cwd: PathUri,
@@ -384,7 +384,7 @@ pub(crate) async fn emit_failed_exec_end_for_unified_exec(
     sandbox_type: Option<xdcode_protocol::sandbox::SandboxType>,
     session_ref: Arc<Session>,
     turn_ref: Arc<TurnContext>,
-    model_info: Arc<ModelInfo>,
+    model_info: Arc<CatalogModel>,
     call_id: String,
     command: Vec<String>,
     cwd: PathUri,

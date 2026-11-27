@@ -49,7 +49,7 @@ use color_eyre::eyre::bail;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
-use xdcode_app_server_protocol::ThreadItem;
+use xdcode_app_server_protocol::ThreadItemPayload;
 use xdcode_app_server_protocol::Turn;
 use xdcode_app_server_protocol::TurnStatus;
 use xdcode_protocol::ThreadId;
@@ -396,6 +396,9 @@ impl App {
     /// source of truth for the active cell and its cache invalidation key, and because `App` owns
     /// overlay lifecycle and frame scheduling for animations.
     fn overlay_forward_event(&mut self, tui: &mut tui::Tui, event: TuiEvent) -> Result<()> {
+        let hud = self
+            .key_chord_matcher
+            .guide(&self.keymap.chords, &tui.frame_requester());
         let select_exit_key = Self::transcript_select_exit_key(&event);
         if matches!(
             &event,
@@ -420,7 +423,7 @@ impl App {
         {
             let was_select_mode = t.is_select_mode();
             let pending_follow_before = t.pending_follow_id();
-            tui.set_overlay_input(tui::OverlayInput::Transcript)?;
+            tui.set_mouse_capture(tui::MouseCapture::Enabled)?;
             t.motion = crate::motion::MotionMode::from_animations_enabled(
                 self.local_settings.tui.animations && self.local_settings.tui.effects.shimmer,
             );
@@ -444,15 +447,21 @@ impl App {
                 }
             });
             // Refresh visible rows before selection captures this live revision.
-            let result =
-                if input { t.draw(tui) } else { Ok(()) }.and_then(|()| t.handle_event(tui, event));
+            let result = tui.with_shortcut_hud(hud, |tui| {
+                if input { t.draw(tui) } else { Ok(()) }.and_then(|()| t.handle_event(tui, event))
+            });
             if result.is_err() {
-                let _ = tui.set_overlay_input(tui::OverlayInput::Default);
+                let _ = tui.set_mouse_capture(tui::MouseCapture::Inherit);
             }
             let completed_copy = result?;
-            let close_overlay = t.is_done();
+            let thread_link = t.pending_thread_link.take();
+            let close_overlay = t.is_done() || thread_link.is_some();
             let select_mode_closed = was_select_mode && (!t.is_select_mode() || close_overlay);
             let pending_follow_id = t.pending_follow_id();
+            if let Some(thread_id) = thread_link {
+                self.app_event_tx
+                    .send(AppEvent::OpenThreadLink { thread_id });
+            }
             if !close_overlay
                 && active_key.is_some_and(|key| key.animation_tick.is_some())
                 && t.is_scrolled_to_bottom()
@@ -483,7 +492,7 @@ impl App {
         }
 
         if let Some(overlay) = &mut self.overlay {
-            overlay.handle_event(tui, event)?;
+            tui.with_shortcut_hud(hud, |tui| overlay.handle_event(tui, event))?;
             if overlay.is_done() {
                 self.close_transcript_overlay(tui);
                 tui.frame_requester().schedule_frame();
@@ -598,12 +607,12 @@ pub(crate) fn backtrack_revert_before_turn_id(
                     &previous.items
                 };
                 is_hidden_nested_review_turn(previous, turn)
-                    && previous_items
-                        .iter()
-                        .any(|item| matches!(item, ThreadItem::EnteredReviewMode { .. }))
-                    && previous_items
-                        .iter()
-                        .any(|item| matches!(item, ThreadItem::ExitedReviewMode { .. }))
+                    && previous_items.iter().any(|item| {
+                        matches!(&item.payload, ThreadItemPayload::EnteredReviewMode { .. })
+                    })
+                    && previous_items.iter().any(|item| {
+                        matches!(&item.payload, ThreadItemPayload::ExitedReviewMode { .. })
+                    })
             });
         let first_item = if turn_index == start_turn {
             start_item
@@ -612,21 +621,22 @@ pub(crate) fn backtrack_revert_before_turn_id(
         };
         // Clipped items affect whether an input is a steer, but were never displayed and
         // therefore must not change the transcript's review visibility or prompt ordinals.
-        let mut user_messages_in_turn = turn.items[..first_item]
-            .iter()
-            .filter(|item| matches!(item, ThreadItem::UserMessage { .. }))
+        let mut user_messages_in_turn = turn
+            .item_payloads()
+            .take(first_item)
+            .filter(|item| matches!(item, ThreadItemPayload::UserMessage { .. }))
             .count();
-        for item in &turn.items[first_item..] {
+        for item in turn.item_payloads().skip(first_item) {
             let content = match item {
-                ThreadItem::EnteredReviewMode { .. } => {
+                ThreadItemPayload::EnteredReviewMode { .. } => {
                     review_mode = true;
                     continue;
                 }
-                ThreadItem::ExitedReviewMode { .. } => {
+                ThreadItemPayload::ExitedReviewMode { .. } => {
                     review_mode = false;
                     continue;
                 }
-                ThreadItem::UserMessage { content, .. } => content,
+                ThreadItemPayload::UserMessage { content, .. } => content,
                 _ => continue,
             };
             let is_steer = user_messages_in_turn > 0;
@@ -684,19 +694,17 @@ pub(crate) fn is_hidden_nested_review_turn(previous: &Turn, turn: &Turn) -> bool
         || turn.status != TurnStatus::Interrupted
         || turn.completed_at.is_some()
         || !previous
-            .items
-            .iter()
-            .any(|item| matches!(item, ThreadItem::EnteredReviewMode { .. }))
+            .item_payloads()
+            .any(|item| matches!(item, ThreadItemPayload::EnteredReviewMode { .. }))
         || !previous
-            .items
-            .iter()
-            .any(|item| matches!(item, ThreadItem::ExitedReviewMode { .. }))
+            .item_payloads()
+            .any(|item| matches!(item, ThreadItemPayload::ExitedReviewMode { .. }))
     {
         return false;
     }
 
-    let mut user_messages = turn.items.iter().filter_map(|item| match item {
-        ThreadItem::UserMessage { content, .. } => Some(content),
+    let mut user_messages = turn.item_payloads().filter_map(|item| match item {
+        ThreadItemPayload::UserMessage { content, .. } => Some(content),
         _ => None,
     });
     matches!(
@@ -785,6 +793,7 @@ mod tests {
     use ratatui::prelude::Line;
     use std::path::PathBuf;
     use std::sync::Arc;
+    use xdcode_app_server_protocol::ThreadItem;
     use xdcode_app_server_protocol::UserInput;
 
     fn render_lines(lines: &[Line<'static>]) -> Vec<String> {
@@ -836,7 +845,7 @@ mod tests {
             id: turn_id.to_string(),
             root_turn_id: None,
             items: (0..user_messages)
-                .map(|index| ThreadItem::UserMessage {
+                .map(|index| ThreadItemPayload::UserMessage {
                     id: format!("user-{index}"),
                     client_id: None,
                     content: vec![UserInput::Text {
@@ -844,6 +853,7 @@ mod tests {
                         text_elements: Vec::new(),
                     }],
                 })
+                .map(ThreadItem::untimed)
                 .collect(),
             items_view: xdcode_app_server_protocol::TurnItemsView::Full,
             status,
@@ -867,7 +877,7 @@ mod tests {
     #[test]
     fn backtrack_revert_before_turn_id_resolves_first_and_later_prompts() {
         let mut hidden = turn("hidden", TurnStatus::Completed, /*user_messages*/ 1);
-        let ThreadItem::UserMessage { content, .. } = &mut hidden.items[0] else {
+        let ThreadItemPayload::UserMessage { content, .. } = &mut hidden.items[0].payload else {
             unreachable!()
         };
         *content = vec![UserInput::Text {
@@ -1008,15 +1018,17 @@ mod tests {
         );
         review_turn.items.insert(
             /*index*/ 0,
-            ThreadItem::EnteredReviewMode {
+            ThreadItem::untimed(ThreadItemPayload::EnteredReviewMode {
                 id: "review-start".to_string(),
                 review: "changes against main".to_string(),
-            },
+            }),
         );
-        review_turn.items.push(ThreadItem::ExitedReviewMode {
-            id: "review-end".to_string(),
-            review: "review complete".to_string(),
-        });
+        review_turn
+            .items
+            .push(ThreadItem::untimed(ThreadItemPayload::ExitedReviewMode {
+                id: "review-end".to_string(),
+                review: "review complete".to_string(),
+            }));
         let turns = vec![
             turn("turn-1", TurnStatus::Completed, /*user_messages*/ 1),
             review_turn,
@@ -1054,14 +1066,14 @@ mod tests {
             "Review the current code changes (staged, unstaged, and untracked files).";
         let review_turn = Turn {
             items: vec![
-                ThreadItem::EnteredReviewMode {
+                ThreadItem::untimed(ThreadItemPayload::EnteredReviewMode {
                     id: "review-start".to_string(),
                     review: review_hint.to_string(),
-                },
-                ThreadItem::ExitedReviewMode {
+                }),
+                ThreadItem::untimed(ThreadItemPayload::ExitedReviewMode {
                     id: "review-end".to_string(),
                     review: "review complete".to_string(),
-                },
+                }),
             ],
             ..turn(
                 "turn-review",
@@ -1071,7 +1083,7 @@ mod tests {
         };
         let review_child_turn = Turn {
             items: (0..2)
-                .map(|index| ThreadItem::UserMessage {
+                .map(|index| ThreadItemPayload::UserMessage {
                     id: format!("review-prompt-{index}"),
                     client_id: None,
                     content: vec![UserInput::Text {
@@ -1079,6 +1091,7 @@ mod tests {
                         text_elements: Vec::new(),
                     }],
                 })
+                .map(ThreadItem::untimed)
                 .collect(),
             ..turn(
                 "turn-review-child",
@@ -1120,7 +1133,7 @@ mod tests {
     #[test]
     fn backtrack_revert_before_turn_id_restores_canonical_mention_bindings() {
         let mut selected_turn = turn("turn-2", TurnStatus::Completed, /*user_messages*/ 1);
-        selected_turn.items = vec![ThreadItem::UserMessage {
+        selected_turn.items = vec![ThreadItem::untimed(ThreadItemPayload::UserMessage {
             id: "selected-prompt".to_string(),
             client_id: None,
             content: vec![
@@ -1141,7 +1154,7 @@ mod tests {
                     path: "app://google_calendar".to_string(),
                 },
             ],
-        }];
+        })];
         let turns = vec![
             turn("turn-1", TurnStatus::Completed, /*user_messages*/ 1),
             selected_turn,

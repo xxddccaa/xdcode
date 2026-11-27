@@ -14,7 +14,7 @@ use serde_json::json;
 use tokio::sync::Notify;
 use tokio::time::timeout;
 use xdcode_app_server_protocol::ThreadHistoryBuilder;
-use xdcode_app_server_protocol::ThreadItem;
+use xdcode_app_server_protocol::ThreadItemPayload;
 use xdcode_app_server_protocol::TurnStatus;
 use xdcode_config::Constrained;
 use xdcode_config::test_support::CloudConfigBundleFixture;
@@ -203,14 +203,15 @@ async fn interrupted_one_shot_launch_failure_completes_and_persists() -> Result<
         .context("interrupted turn in persisted history")?;
     assert_eq!(turn.status, TurnStatus::Interrupted);
     let commands = turn
-        .items
-        .into_iter()
+        .item_payloads()
         .filter(|item| item.id() == CALL_ID)
         .collect::<Vec<_>>();
     // History reconstructs persisted fields; model_context is only present on live items.
     assert_eq!(
         commands,
-        vec![ThreadItem::from(persisted_completions[0].item.clone())]
+        vec![&ThreadItemPayload::from(
+            persisted_completions[0].item.clone()
+        )]
     );
     assert!(
         matches!(aborted, EventMsg::TurnAborted(event) if event.turn_id.as_deref() == Some(completed[0].turn_id.as_str()))

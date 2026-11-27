@@ -25,8 +25,8 @@ use super::ExecServerClient;
 use super::ExecServerReconnectStrategy;
 use super::INITIAL_REGISTRY_MAX_RETRIES;
 use super::INITIAL_REGISTRY_OPERATION_TIMEOUT;
-use super::INITIAL_REGISTRY_REQUEST_TIMEOUT;
 use super::PROVISIONED_ENVIRONMENT_CONNECT_TIMEOUT;
+use super::REGISTRY_REQUEST_TIMEOUT;
 use crate::ExecServerError;
 use crate::NoiseChannelIdentity;
 use crate::NoiseChannelPublicKey;
@@ -161,6 +161,7 @@ impl NoiseRendezvousConnectProvider for SequenceNoiseConnectProvider {
 
 fn test_bundle(websocket_url: String) -> Result<NoiseRendezvousConnectBundle> {
     Ok(NoiseRendezvousConnectBundle {
+        http_headers: Default::default(),
         websocket_url,
         environment_id: "environment".to_string(),
         executor_registration_id: "registration".to_string(),
@@ -238,6 +239,35 @@ async fn noise_handshake_reports_disconnect_reason() -> Result<()> {
 }
 
 #[tokio::test]
+async fn noise_admission_headers_are_rejected_before_dialing_plaintext() -> Result<()> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let mut bundle = test_bundle(format!("ws://{}", listener.local_addr()?))?;
+    bundle.http_headers.insert(
+        http::header::AUTHORIZATION,
+        http::HeaderValue::from_static("fake-token"),
+    );
+    let result = ExecServerClient::open_noise_rendezvous_connection(NoiseRendezvousConnectArgs {
+        bundle,
+        harness_identity: NoiseChannelIdentity::generate()?,
+        client_name: "test".to_string(),
+        connect_timeout: std::time::Duration::from_secs(1),
+        initialize_timeout: std::time::Duration::from_secs(1),
+        resume_session_id: None,
+        http_client_factory: xdcode_http_client::HttpClientFactory::new(
+            xdcode_http_client::OutboundProxyPolicy::ReqwestDefault,
+        ),
+    })
+    .await;
+    assert!(matches!(result, Err(ExecServerError::Protocol(_))));
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(10), listener.accept())
+            .await
+            .is_err()
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn noise_handshake_uses_initialize_timeout() -> Result<()> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let websocket_url = format!("ws://{}", listener.local_addr()?);
@@ -262,6 +292,7 @@ async fn noise_handshake_uses_initialize_timeout() -> Result<()> {
     let initialize_timeout = std::time::Duration::from_millis(1);
     let opened = ExecServerClient::open_noise_rendezvous_connection(NoiseRendezvousConnectArgs {
         bundle: NoiseRendezvousConnectBundle {
+            http_headers: Default::default(),
             websocket_url,
             environment_id: "environment".to_string(),
             executor_registration_id: "registration".to_string(),
@@ -310,6 +341,57 @@ async fn noise_handshake_uses_initialize_timeout() -> Result<()> {
     ] {
         assert!(logs.contains(field), "missing {field} in {logs}");
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn cancelling_noise_handshake_closes_websocket() -> Result<()> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let websocket_url = format!("ws://{}", listener.local_addr()?);
+    let (handshake_seen_tx, handshake_seen_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await?;
+        let mut websocket = accept_async(socket).await?;
+        for _ in 0..2 {
+            assert!(matches!(
+                websocket.next().await,
+                Some(Ok(Message::Binary(_)))
+            ));
+        }
+        handshake_seen_tx
+            .send(())
+            .expect("handshake should be pending");
+        let closed =
+            tokio::time::timeout(std::time::Duration::from_secs(1), websocket.next()).await?;
+        assert!(matches!(
+            closed,
+            None | Some(Ok(Message::Close(_))) | Some(Err(_))
+        ));
+        anyhow::Ok(())
+    });
+
+    let opened = ExecServerClient::open_noise_rendezvous_connection(NoiseRendezvousConnectArgs {
+        bundle: test_bundle(websocket_url)?,
+        harness_identity: NoiseChannelIdentity::generate()?,
+        client_name: "test".to_string(),
+        connect_timeout: DEFAULT_REMOTE_EXEC_SERVER_CONNECT_TIMEOUT,
+        initialize_timeout: DEFAULT_REMOTE_EXEC_SERVER_INITIALIZE_TIMEOUT,
+        resume_session_id: Some("session".to_string()),
+        http_client_factory: xdcode_http_client::HttpClientFactory::new(
+            xdcode_http_client::OutboundProxyPolicy::ReqwestDefault,
+        ),
+    })
+    .await?;
+    {
+        let handshake = ExecServerClient::finish_noise_rendezvous_connection(opened);
+        tokio::pin!(handshake);
+        tokio::select! {
+            biased;
+            _ = &mut handshake => anyhow::bail!("expected a pending Noise handshake"),
+            result = handshake_seen_rx => result?,
+        }
+    }
+    server.await??;
     Ok(())
 }
 
@@ -467,7 +549,7 @@ async fn initial_noise_connection_retries_a_stalled_initial_request() -> Result<
             ..
         }
     ));
-    assert!(started.elapsed() >= INITIAL_REGISTRY_REQUEST_TIMEOUT);
+    assert!(started.elapsed() >= REGISTRY_REQUEST_TIMEOUT);
     assert!(started.elapsed() < INITIAL_REGISTRY_OPERATION_TIMEOUT);
     sequence.assert_requested_identity(&identity, /*requests*/ 2);
     Ok(())
@@ -696,20 +778,20 @@ async fn noise_session_resume_rejects_a_changed_noise_key_before_connecting() ->
         identity: NoiseChannelIdentity::generate()?,
         client_name: "test".to_string(),
         connect_timeout: DEFAULT_REMOTE_EXEC_SERVER_CONNECT_TIMEOUT,
-        initialize_timeout: DEFAULT_REMOTE_EXEC_SERVER_INITIALIZE_TIMEOUT,
         http_client_factory: xdcode_http_client::HttpClientFactory::new(
             xdcode_http_client::OutboundProxyPolicy::ReqwestDefault,
         ),
     };
     assert!(
-        matches!(strategy.resume("session").await, Err(ExecServerError::Protocol(message)) if message == "executor key changed during session recovery")
+        matches!(strategy.resume("session", &mut "transport").await, Err(ExecServerError::Protocol(message)) if message == "executor key changed during session recovery")
     );
     Ok(())
 }
 
 #[tokio::test(start_paused = true)]
-async fn noise_session_resume_leaves_offline_retries_to_recovery() -> Result<()> {
+async fn noise_session_resume_leaves_registry_retries_to_recovery() -> Result<()> {
     let sequence = Arc::new(SequenceNoiseConnectProvider::default());
+    sequence.push_pending();
     sequence.push_error(registry_error(
         http::StatusCode::CONFLICT,
         "environment_offline",
@@ -721,20 +803,35 @@ async fn noise_session_resume_leaves_offline_retries_to_recovery() -> Result<()>
         identity: identity.clone(),
         client_name: "test".to_string(),
         connect_timeout: DEFAULT_REMOTE_EXEC_SERVER_CONNECT_TIMEOUT,
-        initialize_timeout: DEFAULT_REMOTE_EXEC_SERVER_INITIALIZE_TIMEOUT,
         http_client_factory: xdcode_http_client::HttpClientFactory::new(
             xdcode_http_client::OutboundProxyPolicy::ReqwestDefault,
         ),
     };
     let started = tokio::time::Instant::now();
+    let mut stage = "transport";
     let error = strategy
-        .resume("session")
+        .resume("session", &mut stage)
+        .await
+        .err()
+        .expect("a stalled registry request must time out");
+    assert!(matches!(
+        &error,
+        ExecServerError::EnvironmentRegistryRequest(error) if error.is_timeout()
+    ));
+    assert!(crate::client::is_retryable_recovery_error(&error));
+    assert_eq!(stage, "registry_connect");
+    assert_eq!(started.elapsed(), REGISTRY_REQUEST_TIMEOUT);
+    sequence.assert_requested_identity(&identity, /*requests*/ 1);
+
+    let started = tokio::time::Instant::now();
+    let error = strategy
+        .resume("session", &mut "transport")
         .await
         .err()
         .expect("resume must return the offline error");
     assert!(crate::client::is_environment_offline_error(&error));
     assert_eq!(started.elapsed(), std::time::Duration::ZERO);
-    sequence.assert_requested_identity(&identity, /*requests*/ 1);
+    sequence.assert_requested_identity(&identity, /*requests*/ 2);
     Ok(())
 }
 

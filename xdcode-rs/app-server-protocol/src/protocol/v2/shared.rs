@@ -77,11 +77,19 @@ pub enum XdcodeErrorInfo {
     ContextWindowExceeded,
     SessionBudgetExceeded,
     UsageLimitExceeded,
+    ApiKeySpendLimitExceeded,
+    ProjectSpendLimitExceeded,
+    OrganizationSpendLimitExceeded,
     RateLimitExceeded,
     FlexUnavailable,
     ServerOverloaded,
     ModelNotFound,
+    // Capacity is unavailable on a route restricted by server policy.
+    PolicyCapacityUnavailable,
+    /// The workspace's inference hook explicitly denied this request.
+    InferenceHookDenied,
     CyberPolicy,
+    BioPolicy,
     MisalignmentPolicyViolation,
     TooManyDenials,
     HttpConnectionFailed {
@@ -152,13 +160,26 @@ impl From<CoreXdcodeErrorInfo> for XdcodeErrorInfo {
         match value {
             CoreXdcodeErrorInfo::ContextWindowExceeded => XdcodeErrorInfo::ContextWindowExceeded,
             CoreXdcodeErrorInfo::SessionBudgetExceeded => XdcodeErrorInfo::SessionBudgetExceeded,
+            CoreXdcodeErrorInfo::ApiKeySpendLimitExceeded => {
+                XdcodeErrorInfo::ApiKeySpendLimitExceeded
+            }
+            CoreXdcodeErrorInfo::ProjectSpendLimitExceeded => {
+                XdcodeErrorInfo::ProjectSpendLimitExceeded
+            }
+            CoreXdcodeErrorInfo::OrganizationSpendLimitExceeded => {
+                XdcodeErrorInfo::OrganizationSpendLimitExceeded
+            }
             CoreXdcodeErrorInfo::UsageLimitExceeded => XdcodeErrorInfo::UsageLimitExceeded,
             CoreXdcodeErrorInfo::RateLimitExceeded => XdcodeErrorInfo::RateLimitExceeded,
             CoreXdcodeErrorInfo::FlexUnavailable => XdcodeErrorInfo::FlexUnavailable,
             CoreXdcodeErrorInfo::ServerOverloaded => XdcodeErrorInfo::ServerOverloaded,
             CoreXdcodeErrorInfo::ModelNotFound => XdcodeErrorInfo::ModelNotFound,
+            CoreXdcodeErrorInfo::PolicyCapacityUnavailable => {
+                XdcodeErrorInfo::PolicyCapacityUnavailable
+            }
             CoreXdcodeErrorInfo::CyberPolicy => XdcodeErrorInfo::CyberPolicy,
-            CoreXdcodeErrorInfo::BioPolicy => XdcodeErrorInfo::Other,
+            CoreXdcodeErrorInfo::InferenceHookDenied => XdcodeErrorInfo::InferenceHookDenied,
+            CoreXdcodeErrorInfo::BioPolicy => XdcodeErrorInfo::BioPolicy,
             CoreXdcodeErrorInfo::MisalignmentPolicyViolation => {
                 XdcodeErrorInfo::MisalignmentPolicyViolation
             }

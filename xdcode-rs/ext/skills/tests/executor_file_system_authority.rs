@@ -3,7 +3,6 @@ use std::io;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
-use xdcode_skills::ImplicitSkillLookup;
 
 use pretty_assertions::assert_eq;
 use xdcode_config::ConfigLayerEntry;
@@ -40,14 +39,14 @@ use xdcode_exec_server::WalkOutcome;
 #[cfg(windows)]
 use xdcode_exec_server::WindowsSandboxSelection;
 use xdcode_exec_server::WriteFileOptions;
+use xdcode_extension_api::AccessedSelectedCapabilityRoot;
 use xdcode_protocol::capabilities::CapabilityRootLocation;
 use xdcode_protocol::capabilities::SelectedCapabilityRoot;
 use xdcode_protocol::models::PermissionProfile;
-#[cfg(windows)]
 use xdcode_protocol::permissions::FileSystemSandboxPolicy;
-#[cfg(windows)]
 use xdcode_protocol::permissions::NetworkSandboxPolicy;
 use xdcode_protocol::protocol::Product;
+use xdcode_skills::ImplicitSkillLookup;
 use xdcode_skills_extension::ExecutorSkillProvider;
 use xdcode_skills_extension::HostSkillsLoadInput;
 use xdcode_skills_extension::HostSkillsService;
@@ -291,14 +290,16 @@ async fn skill_loading_and_reads_use_the_supplied_executor_file_system() {
         /*bundled_skills_enabled*/ false,
         /*restriction_product*/ None,
     );
+    let file_system: Arc<dyn ExecutorFileSystem> = Arc::new(SyntheticFileSystem {
+        alias_root: PathUri::from_abs_path(&alias_root),
+        canonical_root: PathUri::from_abs_path(&canonical_root),
+        has_plugin_manifest: false,
+    });
+    let access = FileSystemEnvironmentAccessor::unrestricted(&file_system);
     let snapshot = service
         .snapshot_for_config(
             &HostSkillsLoadInput::new(cwd, Vec::new(), config_layer_stack),
-            Some(Arc::new(SyntheticFileSystem {
-                alias_root: PathUri::from_abs_path(&alias_root),
-                canonical_root: PathUri::from_abs_path(&canonical_root),
-                has_plugin_manifest: false,
-            })),
+            Some(&access),
         )
         .await;
     let outcome = snapshot.outcome();
@@ -320,8 +321,40 @@ async fn skill_loading_and_reads_use_the_supplied_executor_file_system() {
         PathUri::from_abs_path(&canonical_root.join("skill/SKILL.md"))
     );
     assert_eq!(
-        snapshot.read_skill_text(&skill).await.expect("skill body"),
+        snapshot
+            .read_skill_text(&skill, &[&access])
+            .await
+            .expect("skill body"),
         SKILL_CONTENTS
+    );
+    assert_eq!(
+        snapshot
+            .read_skill_text(&skill, &[])
+            .await
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::PermissionDenied,
+    );
+    let replacement: Arc<dyn ExecutorFileSystem> = Arc::new(SyntheticFileSystem {
+        alias_root: PathUri::from_abs_path(&alias_root),
+        canonical_root: PathUri::from_abs_path(&canonical_root),
+        has_plugin_manifest: false,
+    });
+    let replacement = FileSystemEnvironmentAccessor::unrestricted(&replacement);
+    assert_eq!(
+        snapshot
+            .read_skill_text(&skill, &[&replacement])
+            .await
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::PermissionDenied,
+    );
+    assert_eq!(
+        snapshot
+            .read_skill_text(&skill, &[&replacement, &access])
+            .await
+            .expect("select the original filesystem regardless of accessor order"),
+        SKILL_CONTENTS,
     );
 }
 
@@ -332,10 +365,9 @@ async fn reads_use_callback_access_without_capability_roots() {
     let environment = manager.get_environment("local").expect("local environment");
     let fs = environment.get_filesystem();
     let access = FileSystemEnvironmentAccessor::unrestricted(&fs);
-    let provider = ExecutorSkillProvider::new_with_restriction_product(
-        manager, /*restriction_product*/ None,
-    );
-    // This ID is absent from the provider's registry; the callback owns its filesystem access.
+    let provider =
+        ExecutorSkillProvider::new_with_restriction_product(/*restriction_product*/ None);
+    // The callback owns filesystem access for this environment ID.
     let resource = SkillResourceId::environment(
         "skill://root/skill/SKILL.md",
         "captured",
@@ -362,10 +394,8 @@ async fn reads_use_callback_access_without_capability_roots() {
 #[tokio::test]
 async fn executor_skill_reads_reject_invalid_resource_handles() {
     let access = FileSystemEnvironmentAccessor::unrestricted(&LOCAL_FS);
-    let provider = ExecutorSkillProvider::new_with_restriction_product(
-        Arc::new(EnvironmentManager::default_for_tests()),
-        /*restriction_product*/ None,
-    );
+    let provider =
+        ExecutorSkillProvider::new_with_restriction_product(/*restriction_product*/ None);
     for (resource, message) in [
         (
             "skill://root/package/../secret",
@@ -408,10 +438,8 @@ async fn windows_executor_skill_read_requires_a_requested_sandbox() -> io::Resul
     )?;
     let file_system: Arc<dyn ExecutorFileSystem> =
         Arc::new(LocalFileSystem::with_runtime_paths(runtime_paths));
-    let provider = ExecutorSkillProvider::new_with_restriction_product(
-        Arc::new(EnvironmentManager::default_for_tests()),
-        /*restriction_product*/ None,
-    );
+    let provider =
+        ExecutorSkillProvider::new_with_restriction_product(/*restriction_product*/ None);
     let resource = SkillResourceId::environment(
         "skill://windows-root/skill/SKILL.md",
         "local",
@@ -477,24 +505,29 @@ async fn selected_root_id_distinguishes_identical_executor_paths() {
     } else {
         selected_root
     };
-    let provider = ExecutorSkillProvider::new_with_restriction_product(
-        Arc::new(EnvironmentManager::default_for_tests()),
-        /*restriction_product*/ None,
+    let provider =
+        ExecutorSkillProvider::new_with_restriction_product(/*restriction_product*/ None);
+    let access = FileSystemEnvironmentAccessor::new(
+        &LOCAL_FS,
+        FileSystemSandboxContext::from_permission_profile(
+            PermissionProfile::Disabled,
+            PathUri::from_host_native_path(&test_root).expect("skill root URI"),
+        ),
     );
+    let selected_roots = ["root-a", "root-b"].map(|id| SelectedCapabilityRoot {
+        id: id.to_string(),
+        location: CapabilityRootLocation::Environment {
+            environment_id: "local".to_string(),
+            path: PathUri::from_host_native_path(&test_root).expect("skill root URI"),
+        },
+    });
     let catalog = provider
         .list(SkillListQuery {
-            turn_id: "turn-1".to_string(),
-            executor_roots: ["root-a", "root-b"]
-                .into_iter()
-                .map(|id| SelectedCapabilityRoot {
-                    id: id.to_string(),
-                    location: CapabilityRootLocation::Environment {
-                        environment_id: "local".to_string(),
-                        path: PathUri::from_host_native_path(&test_root).expect("skill root URI"),
-                    },
-                })
+            turn_id: Some("turn-1".to_string()),
+            executor_roots: selected_roots
+                .iter()
+                .map(|root| AccessedSelectedCapabilityRoot { root, fs: &access })
                 .collect(),
-            resolved_executor_roots: Vec::new(),
             host_snapshot: None,
             include_host_skills: false,
             include_bundled_skills: true,
@@ -538,10 +571,8 @@ async fn selected_root_id_distinguishes_identical_executor_paths() {
 
 #[tokio::test]
 async fn executor_discovery_preserves_posix_and_windows_locator_alias_roots() {
-    let provider = ExecutorSkillProvider::new_with_restriction_product(
-        Arc::new(EnvironmentManager::default_for_tests()),
-        /*restriction_product*/ None,
-    );
+    let provider =
+        ExecutorSkillProvider::new_with_restriction_product(/*restriction_product*/ None);
 
     for (root_uri, alias_root) in [
         (
@@ -583,9 +614,8 @@ async fn executor_discovery_preserves_posix_and_windows_locator_alias_roots() {
         );
         let catalog = provider
             .list(SkillListQuery {
-                turn_id: "turn-1".to_string(),
-                executor_roots: vec![selected_root],
-                resolved_executor_roots: Vec::new(),
+                turn_id: Some("turn-1".to_string()),
+                executor_roots: Vec::new(),
                 host_snapshot: None,
                 include_host_skills: false,
                 include_bundled_skills: true,
@@ -690,10 +720,7 @@ async fn executor_discovery_routes_produce_equivalent_catalog_metadata() {
     .expect("write invalid metadata");
 
     let manager = Arc::new(EnvironmentManager::default_for_tests());
-    let provider = ExecutorSkillProvider::new_with_restriction_product(
-        Arc::clone(&manager),
-        Some(Product::Xdcode),
-    );
+    let provider = ExecutorSkillProvider::new_with_restriction_product(Some(Product::Xdcode));
     let executor_roots = vec![SelectedCapabilityRoot {
         id: "parity-root".to_string(),
         location: CapabilityRootLocation::Environment {
@@ -701,10 +728,19 @@ async fn executor_discovery_routes_produce_equivalent_catalog_metadata() {
             path: PathUri::from_host_native_path(&test_root).expect("skill root URI"),
         },
     }];
+    let access = FileSystemEnvironmentAccessor::new(
+        &LOCAL_FS,
+        FileSystemSandboxContext::from_permission_profile(
+            PermissionProfile::Disabled,
+            PathUri::from_host_native_path(&test_root).expect("skill root URI"),
+        ),
+    );
     let query = |executor_capability_discovery| SkillListQuery {
-        turn_id: "turn-1".to_string(),
-        executor_roots: executor_roots.clone(),
-        resolved_executor_roots: Vec::new(),
+        turn_id: Some("turn-1".to_string()),
+        executor_roots: executor_roots
+            .iter()
+            .map(|root| AccessedSelectedCapabilityRoot { root, fs: &access })
+            .collect(),
         host_snapshot: None,
         include_host_skills: false,
         include_bundled_skills: true,
@@ -753,6 +789,32 @@ async fn executor_discovery_routes_produce_equivalent_catalog_metadata() {
             .collect::<Vec<_>>()
     };
     assert_eq!(comparable_entries(&bundled), comparable_entries(&direct));
+    // This filesystem has no sandbox helper: restricted discovery must fail closed instead
+    // of falling back to its ambient access, and restoring access must discover the same skills.
+    let restricted = FileSystemEnvironmentAccessor::new(
+        &LOCAL_FS,
+        FileSystemSandboxContext::from_permission_profile(
+            PermissionProfile::from_runtime_permissions(
+                &FileSystemSandboxPolicy::restricted(Vec::new()),
+                NetworkSandboxPolicy::Restricted,
+            ),
+            PathUri::from_host_native_path(&test_root).expect("skill root URI"),
+        ),
+    );
+    let mut restricted_query = query(None);
+    restricted_query.executor_roots[0].fs = &restricted;
+    assert!(
+        provider
+            .list(restricted_query)
+            .await
+            .unwrap()
+            .entries
+            .is_empty()
+    );
+    assert_eq!(
+        comparable_entries(&provider.list(query(None)).await.unwrap()),
+        comparable_entries(&direct),
+    );
     assert_eq!(direct.warnings.len(), 1);
     assert!(direct.warnings[0].contains("missing field `description`"));
     let entry = direct
@@ -845,10 +907,8 @@ async fn pre_discovered_executor_catalog_snapshot() {
     .expect("write skill metadata");
 
     let manager = Arc::new(EnvironmentManager::default_for_tests());
-    let provider = ExecutorSkillProvider::new_with_restriction_product(
-        Arc::clone(&manager),
-        /*restriction_product*/ None,
-    );
+    let provider =
+        ExecutorSkillProvider::new_with_restriction_product(/*restriction_product*/ None);
     let executor_roots = vec![SelectedCapabilityRoot {
         id: "snapshot-root".to_string(),
         location: CapabilityRootLocation::Environment {
@@ -867,9 +927,8 @@ async fn pre_discovered_executor_catalog_snapshot() {
         .await;
     let catalog = provider
         .list(SkillListQuery {
-            turn_id: "turn-1".to_string(),
-            executor_roots,
-            resolved_executor_roots: Vec::new(),
+            turn_id: Some("turn-1".to_string()),
+            executor_roots: Vec::new(),
             host_snapshot: None,
             include_host_skills: false,
             include_bundled_skills: true,
@@ -979,15 +1038,19 @@ async fn direct_executor_discovery_preserves_hidden_nested_and_probed_metadata()
             path: root_uri.clone(),
         },
     };
-    let manager = Arc::new(EnvironmentManager::default_for_tests());
-    let provider = ExecutorSkillProvider::new_with_restriction_product(
-        manager, /*restriction_product*/ None,
+    let provider =
+        ExecutorSkillProvider::new_with_restriction_product(/*restriction_product*/ None);
+    let access = FileSystemEnvironmentAccessor::new(
+        &LOCAL_FS,
+        FileSystemSandboxContext::from_permission_profile(PermissionProfile::Disabled, root_uri),
     );
     let direct = provider
         .list(SkillListQuery {
-            turn_id: "turn-1".to_string(),
-            executor_roots: vec![selected_root],
-            resolved_executor_roots: Vec::new(),
+            turn_id: Some("turn-1".to_string()),
+            executor_roots: vec![AccessedSelectedCapabilityRoot {
+                root: &selected_root,
+                fs: &access,
+            }],
             host_snapshot: None,
             include_host_skills: false,
             include_bundled_skills: true,
@@ -1030,10 +1093,8 @@ async fn direct_executor_discovery_preserves_hidden_nested_and_probed_metadata()
 async fn high_level_discovery_reuses_materialized_skill_contents_for_reads() {
     let test_root = create_local_skill_root("materialized").expect("create local skill root");
     let manager = Arc::new(EnvironmentManager::default_for_tests());
-    let provider = ExecutorSkillProvider::new_with_restriction_product(
-        Arc::clone(&manager),
-        /*restriction_product*/ None,
-    );
+    let provider =
+        ExecutorSkillProvider::new_with_restriction_product(/*restriction_product*/ None);
     let executor_roots = vec![SelectedCapabilityRoot {
         id: "materialized-root".to_string(),
         location: CapabilityRootLocation::Environment {
@@ -1052,9 +1113,8 @@ async fn high_level_discovery_reuses_materialized_skill_contents_for_reads() {
         .await;
     let catalog = provider
         .list(SkillListQuery {
-            turn_id: "turn-1".to_string(),
-            executor_roots,
-            resolved_executor_roots: Vec::new(),
+            turn_id: Some("turn-1".to_string()),
+            executor_roots: Vec::new(),
             host_snapshot: None,
             include_host_skills: false,
             include_bundled_skills: true,

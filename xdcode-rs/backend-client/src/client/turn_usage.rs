@@ -6,6 +6,8 @@ use http::header::CONTENT_TYPE;
 use http::header::HeaderValue;
 use serde::Deserialize;
 use serde::Serialize;
+use xdcode_http_client::PROVIDER_ORGANIZATION_HEADER;
+use xdcode_http_client::PROVIDER_PROJECT_HEADER;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -65,7 +67,7 @@ impl Client {
         let provider_scope_headers = provider_headers
             .iter()
             .filter(|(name, _)| {
-                ["openai-organization", "openai-project"]
+                [PROVIDER_ORGANIZATION_HEADER, PROVIDER_PROJECT_HEADER]
                     .iter()
                     .any(|allowed| name.as_str().eq_ignore_ascii_case(allowed))
             })
@@ -83,8 +85,7 @@ impl Client {
         turn_ids: &[String],
         provider_headers: &HeaderMap,
     ) -> Result<Vec<ApiKeyTurnCost>, RequestError> {
-        let mut headers = provider_headers.clone();
-        headers.extend(self.headers()?);
+        let headers = self.headers_with(provider_headers.clone()).await?;
         let request = self
             .request(Method::POST, url)
             .headers(headers)

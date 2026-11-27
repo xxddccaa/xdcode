@@ -5,20 +5,24 @@ use crate::clock_format::ClockFormat;
 use chrono::Local;
 use chrono::TimeZone;
 use pretty_assertions::assert_eq;
+use xdcode_app_server_protocol::ThreadItem;
 
 const COMPLETED_AT: i64 = 1_700_000_000;
 
 fn completed_turn(duration_ms: Option<i64>, completed_at: Option<i64>) -> AppServerTurn {
     AppServerTurn {
         completed_at,
-        items: vec![AppServerThreadItem::AgentMessage {
-            id: "answer-1".to_string(),
-            text: "The change is ready.".to_string(),
-            phase: Some(MessagePhase::FinalAnswer),
-            memory_citation: None,
-            delivery: None,
-            questions: None,
-        }],
+        items: vec![ThreadItem::untimed(
+            AppServerThreadItemPayload::AgentMessage {
+                moderation: None,
+                id: "answer-1".to_string(),
+                text: "The change is ready.".to_string(),
+                phase: Some(MessagePhase::FinalAnswer),
+                memory_citation: None,
+                delivery: None,
+                questions: None,
+            },
+        )],
         ..app_server_turn(
             "turn-1",
             AppServerTurnStatus::Completed,

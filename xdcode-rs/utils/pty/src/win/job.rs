@@ -54,6 +54,7 @@ pub struct JobObject {
     preserve_descendants: Mutex<bool>,
 }
 
+// A failed restart must still stop any remaining members.
 struct TerminateOnDrop<'a>(Option<&'a JobObject>);
 
 impl Drop for TerminateOnDrop<'_> {
@@ -99,7 +100,9 @@ impl JobObject {
     }
 
     fn open_process(process_id: u32, access: u32) -> io::Result<ProcessHandle> {
-        let handle = unsafe { OpenProcess(access, 0, process_id) };
+        let handle = unsafe {
+            OpenProcess(access, /*bInheritHandle*/ 0, process_id)
+        };
         if handle.is_null() {
             return Err(io::Error::last_os_error());
         }
@@ -280,6 +283,8 @@ impl JobObject {
         let deadline = Instant::now() + grace;
         Self::request_stop(root)?;
         Self::wait_for_exit(root, deadline)?;
+        // TerminateJobObject can empty the job list before members release their handles.
+        // Stop by process handle, then rescan for children born during the previous pass.
         let mut list = vec![0usize; 16];
         let mut stopped = HashMap::new();
         loop {
@@ -306,6 +311,7 @@ impl JobObject {
                     }
                     Err(error) => return Err(error),
                 };
+                // A listed PID can be reused before OpenProcess. Only signal confirmed job members.
                 let mut in_job = 0;
                 if unsafe {
                     IsProcessInJob(
@@ -359,6 +365,8 @@ impl JobObject {
     }
 
     fn request_stop(process: &ProcessHandle) -> io::Result<()> {
+        // Windows also returns access denied when the process has already exited. Its handle
+        // must still signal before a replacement can start.
         match Self::terminate_process_handle(process) {
             Err(error) if error.kind() == io::ErrorKind::PermissionDenied => Ok(()),
             result => result,
@@ -367,6 +375,7 @@ impl JobObject {
 
     fn wait_for_exit(process: &ProcessHandle, deadline: Instant) -> io::Result<()> {
         let remaining = deadline.saturating_duration_since(Instant::now());
+        // The largest DWORD denotes INFINITE, so cap this bounded wait below it.
         let millis = remaining.as_millis().min(u128::from(u32::MAX - 1)) as u32;
         match unsafe { WaitForSingleObject(process.as_raw_handle().cast(), millis) } {
             WAIT_OBJECT_0 => Ok(()),

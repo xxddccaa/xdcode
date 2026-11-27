@@ -63,6 +63,7 @@ async fn skill_names_preserve_package_and_alias_precedence_in_both_versions() ->
 async fn listed_skill_names_preserve_merged_locations_and_source_filters() -> TestResult {
     let mut cloud = cloud_skill("work");
     let mut executor = installed_skill("first", "work")?;
+    // A valid qualified name can exceed the byte limit in skills.list.
     cloud.name = format!("x:{}", "🦀".repeat(64));
     executor.name.clone_from(&cloud.name);
     let harness = MergeHarness::new(

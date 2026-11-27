@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::context::ContextualUserFragment;
+use crate::context::world_state::WorldStateUpdateContent;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use std::sync::Arc;

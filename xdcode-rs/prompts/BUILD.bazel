@@ -1,5 +1,10 @@
 load("//:defs.bzl", "xdcode_rust_crate")
 
+exports_files(
+    ["templates/permissions/approval_policy/on_request_rule_request_permission.md"],
+    visibility = ["//xdcode-rs/core:__pkg__"],
+)
+
 xdcode_rust_crate(
     name = "prompts",
     compile_data = glob(["templates/**"]),

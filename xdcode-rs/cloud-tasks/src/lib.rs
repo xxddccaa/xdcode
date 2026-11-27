@@ -1,4 +1,6 @@
 mod app;
+#[cfg(test)]
+mod backend_auth_tests;
 mod cli;
 pub(crate) mod env_detect;
 mod new_task;
@@ -29,10 +31,12 @@ use xdcode_cloud_tasks_client::TaskStatus;
 use xdcode_git_utils::current_branch_name;
 use xdcode_git_utils::default_branch_name;
 use xdcode_http_client::ClientRouteClass;
-use xdcode_http_client::HttpClientFactory;
-use xdcode_http_client::OutboundProxyPolicy;
 use xdcode_http_client::RouteAwareClientPool;
+use xdcode_login::XdcodeAuth;
 use xdcode_login::default_client::get_xdcode_user_agent;
+use xdcode_model_provider::ClientAuth;
+use xdcode_model_provider::auth_provider_from_auth_manager;
+use xdcode_utils_cli::CliConfigOverrides;
 
 struct ApplyJob {
     task_id: xdcode_cloud_tasks_client::TaskId,
@@ -42,10 +46,13 @@ struct ApplyJob {
 struct BackendContext {
     backend: Arc<dyn xdcode_cloud_tasks_client::CloudBackend>,
     base_url: String,
-    environment_http: RouteAwareClientPool,
+    environment_http: env_detect::EnvironmentClient,
 }
 
-async fn init_backend(user_agent_suffix: &str) -> anyhow::Result<BackendContext> {
+async fn init_backend(
+    user_agent_suffix: &str,
+    config_overrides: &CliConfigOverrides,
+) -> anyhow::Result<BackendContext> {
     #[cfg(debug_assertions)]
     let use_mock = matches!(
         std::env::var("XDCODE_CLOUD_TASKS_MODE").ok().as_deref(),
@@ -57,28 +64,73 @@ async fn init_backend(user_agent_suffix: &str) -> anyhow::Result<BackendContext>
 
     set_user_agent_suffix(user_agent_suffix);
 
+    let ua = get_xdcode_user_agent();
+    let (auth_manager, http_client_factory, config) =
+        util::load_auth_manager(Some(base_url.clone()), config_overrides).await?;
+    let auth = match auth_manager.as_ref() {
+        Some(manager) => manager.auth().await,
+        None => None,
+    };
+    // Existing agent assertions and supplied headers cannot register a new runtime.
+    let runtime = if let (Some(config), Some(auth_manager)) = (config, auth_manager.as_ref())
+        && config
+            .features
+            .enabled(xdcode_features::Feature::RuntimeAgentInstances)
+        && matches!(
+            auth.as_ref(),
+            Some(
+                XdcodeAuth::Chatgpt(_)
+                    | XdcodeAuth::ChatgptAuthTokens(_)
+                    | XdcodeAuth::PersonalAccessToken(_)
+            )
+        ) {
+        // Use the validated command destination for registration as well as actor refresh.
+        let mut config = config;
+        config.chatgpt_base_url = base_url.clone();
+        let installation_id = xdcode_core::resolve_installation_id(&config.xdcode_home).await?;
+        xdcode_core::build_runtime_auth_manager(&config, Arc::clone(auth_manager), &installation_id)
+            .map(|runtime| (runtime, config.runtime_auth_mode))
+    } else {
+        None
+    };
+    let (environment_auth, http_client_factory) =
+        match auth.as_ref().filter(|auth| auth.uses_xdcode_backend()) {
+            Some(auth) => {
+                let (mut client_auth, factory) = ClientAuth::for_auth(
+                    auth,
+                    runtime.as_ref(),
+                    http_client_factory,
+                    /*headers*/ &Default::default(),
+                )
+                .await?;
+                if runtime.is_none()
+                    && let Some(auth_manager) = auth_manager.as_ref()
+                {
+                    client_auth.set_provider(auth_provider_from_auth_manager(
+                        Arc::clone(auth_manager),
+                        auth,
+                    ))?;
+                }
+                (Some(client_auth), factory)
+            }
+            None => (None, http_client_factory),
+        };
+    let environment_http = env_detect::EnvironmentClient {
+        http: RouteAwareClientPool::new_without_redirects_or_request_logging(
+            http_client_factory.clone(),
+            ClientRouteClass::Api,
+        ),
+        auth: environment_auth,
+    };
     #[cfg(debug_assertions)]
     if use_mock {
-        let http_client_factory = HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault);
         return Ok(BackendContext {
             backend: Arc::new(xdcode_cloud_tasks_mock_client::MockClient),
             base_url,
-            environment_http: RouteAwareClientPool::new_without_redirects_or_request_logging(
-                http_client_factory,
-                ClientRouteClass::Api,
-            ),
+            environment_http,
         });
     }
 
-    let ua = get_xdcode_user_agent();
-    let (auth_manager, http_client_factory) = util::load_auth_manager(Some(base_url.clone())).await;
-    let environment_http = RouteAwareClientPool::new_without_redirects_or_request_logging(
-        http_client_factory.clone(),
-        ClientRouteClass::Api,
-    );
-    let mut http =
-        xdcode_cloud_tasks_client::HttpClient::new(base_url.clone(), http_client_factory)
-            .with_user_agent(ua);
     let style = if base_url.contains("/backend-api") {
         "wham"
     } else {
@@ -86,10 +138,6 @@ async fn init_backend(user_agent_suffix: &str) -> anyhow::Result<BackendContext>
     };
     append_error_log(format!("startup: base_url={base_url} path_style={style}"));
 
-    let auth = match auth_manager.as_ref() {
-        Some(manager) => manager.auth().await,
-        None => None,
-    };
     let auth = match auth {
         Some(auth) => auth,
         None => {
@@ -111,8 +159,18 @@ async fn init_backend(user_agent_suffix: &str) -> anyhow::Result<BackendContext>
         std::process::exit(1);
     }
 
-    let auth_provider = xdcode_model_provider::auth_provider_from_auth(&auth);
-    http = http.with_auth_provider(auth_provider);
+    let backend = xdcode_backend_client::Client::from_auth_with_runtime_without_redirects(
+        base_url.clone(),
+        &auth,
+        http_client_factory,
+        runtime.as_ref(),
+        /*headers*/ &Default::default(),
+    )
+    .await?;
+    let http = xdcode_cloud_tasks_client::HttpClient::from_backend(
+        base_url.clone(),
+        backend.with_user_agent(ua),
+    );
     if let Some(acc) = auth.get_account_id() {
         append_error_log(format!("auth: set ChatGPT-Account-Id header: {acc}"));
     }
@@ -176,14 +234,16 @@ async fn resolve_git_ref_with_git_info(
     }
 }
 
-async fn run_exec_command(args: crate::cli::ExecCommand) -> anyhow::Result<()> {
+async fn run_exec_command(
+    args: crate::cli::ExecCommand,
+    ctx: BackendContext,
+) -> anyhow::Result<()> {
     let crate::cli::ExecCommand {
         query,
         environment,
         branch,
         attempts,
     } = args;
-    let ctx = init_backend("xdcode_cloud_tasks_exec").await?;
     let prompt = resolve_query_input(query)?;
     let env_id = resolve_environment_id(&ctx, &environment).await?;
     let git_ref = resolve_git_ref(branch.as_ref()).await;
@@ -207,7 +267,7 @@ async fn resolve_environment_id(ctx: &BackendContext, requested: &str) -> anyhow
         return Err(anyhow!("environment id must not be empty"));
     }
     let normalized = util::normalize_base_url(&ctx.base_url);
-    let headers = util::build_chatgpt_headers().await?;
+    let headers = util::build_chatgpt_headers();
     let environments =
         crate::env_detect::list_environments(&ctx.environment_http, &normalized, &headers).await?;
     if environments.is_empty() {
@@ -513,8 +573,10 @@ fn format_task_list_lines(
     lines
 }
 
-async fn run_status_command(args: crate::cli::StatusCommand) -> anyhow::Result<()> {
-    let ctx = init_backend("xdcode_cloud_tasks_status").await?;
+async fn run_status_command(
+    args: crate::cli::StatusCommand,
+    ctx: BackendContext,
+) -> anyhow::Result<()> {
     let task_id = parse_task_id(&args.task_id)?;
     let summary =
         xdcode_cloud_tasks_client::CloudBackend::get_task_summary(&*ctx.backend, task_id).await?;
@@ -529,8 +591,10 @@ async fn run_status_command(args: crate::cli::StatusCommand) -> anyhow::Result<(
     Ok(())
 }
 
-async fn run_list_command(args: crate::cli::ListCommand) -> anyhow::Result<()> {
-    let ctx = init_backend("xdcode_cloud_tasks_list").await?;
+async fn run_list_command(
+    args: crate::cli::ListCommand,
+    ctx: BackendContext,
+) -> anyhow::Result<()> {
     let env_filter = if let Some(env) = args.environment {
         Some(resolve_environment_id(&ctx, &env).await?)
     } else {
@@ -596,8 +660,10 @@ async fn run_list_command(args: crate::cli::ListCommand) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn run_diff_command(args: crate::cli::DiffCommand) -> anyhow::Result<()> {
-    let ctx = init_backend("xdcode_cloud_tasks_diff").await?;
+async fn run_diff_command(
+    args: crate::cli::DiffCommand,
+    ctx: BackendContext,
+) -> anyhow::Result<()> {
     let task_id = parse_task_id(&args.task_id)?;
     let attempts = collect_attempt_diffs(&*ctx.backend, &task_id).await?;
     let selected = select_attempt(&attempts, args.attempt)?;
@@ -605,8 +671,10 @@ async fn run_diff_command(args: crate::cli::DiffCommand) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn run_apply_command(args: crate::cli::ApplyCommand) -> anyhow::Result<()> {
-    let ctx = init_backend("xdcode_cloud_tasks_apply").await?;
+async fn run_apply_command(
+    args: crate::cli::ApplyCommand,
+    ctx: BackendContext,
+) -> anyhow::Result<()> {
     let task_id = parse_task_id(&args.task_id)?;
     let attempts = collect_attempt_diffs(&*ctx.backend, &task_id).await?;
     let selected = select_attempt(&attempts, args.attempt)?;
@@ -752,16 +820,31 @@ fn spawn_apply(
 
 /// Entry point for the `xdcode cloud` subcommand.
 pub async fn run_main(cli: Cli, _xdcode_linux_sandbox_exe: Option<PathBuf>) -> anyhow::Result<()> {
+    // Keep the Cloud future out of the CLI dispatcher frame while the TUI is running.
+    Box::pin(run_cloud(cli)).await
+}
+
+async fn run_cloud(cli: Cli) -> anyhow::Result<()> {
+    let backend = |suffix| init_backend(suffix, &cli.config_overrides);
     if let Some(command) = cli.command {
         return match command {
-            crate::cli::Command::Exec(args) => run_exec_command(args).await,
-            crate::cli::Command::Status(args) => run_status_command(args).await,
-            crate::cli::Command::List(args) => run_list_command(args).await,
-            crate::cli::Command::Apply(args) => run_apply_command(args).await,
-            crate::cli::Command::Diff(args) => run_diff_command(args).await,
+            crate::cli::Command::Exec(args) => {
+                run_exec_command(args, backend("xdcode_cloud_tasks_exec").await?).await
+            }
+            crate::cli::Command::Status(args) => {
+                run_status_command(args, backend("xdcode_cloud_tasks_status").await?).await
+            }
+            crate::cli::Command::List(args) => {
+                run_list_command(args, backend("xdcode_cloud_tasks_list").await?).await
+            }
+            crate::cli::Command::Apply(args) => {
+                run_apply_command(args, backend("xdcode_cloud_tasks_apply").await?).await
+            }
+            crate::cli::Command::Diff(args) => {
+                run_diff_command(args, backend("xdcode_cloud_tasks_diff").await?).await
+            }
         };
     }
-    let Cli { .. } = cli;
 
     // Very minimal logging setup; mirrors other crates' pattern.
     let default_level = "error";
@@ -780,7 +863,7 @@ pub async fn run_main(cli: Cli, _xdcode_linux_sandbox_exe: Option<PathBuf>) -> a
         backend,
         base_url,
         environment_http,
-    } = init_backend("xdcode_cloud_tasks_tui").await?;
+    } = backend("xdcode_cloud_tasks_tui").await?;
 
     // Terminal setup
     use crossterm::ExecutableCommand;
@@ -870,14 +953,8 @@ pub async fn run_main(cli: Cli, _xdcode_linux_sandbox_exe: Option<PathBuf>) -> a
         let environment_http = environment_http.clone();
         tokio::spawn(async move {
             let base_url = util::normalize_base_url(&base_url);
-            // Build headers: UA + ChatGPT auth if available
-            let headers = match util::build_chatgpt_headers().await {
-                Ok(headers) => headers,
-                Err(error) => {
-                    let _ = tx.send(app::AppEvent::EnvironmentAutodetected(Err(error)));
-                    return;
-                }
-            };
+            // Authentication is resolved by the environment client for each request.
+            let headers = util::build_chatgpt_headers();
 
             // Run autodetect. If it fails, we keep using "All".
             let res = crate::env_detect::autodetect_environment_id(
@@ -2033,14 +2110,12 @@ pub async fn run_main(cli: Cli, _xdcode_linux_sandbox_exe: Option<PathBuf>) -> a
 fn spawn_environment_load(
     tx: UnboundedSender<app::AppEvent>,
     base_url: String,
-    http: RouteAwareClientPool,
+    http: env_detect::EnvironmentClient,
 ) {
     tokio::spawn(async move {
         let base_url = util::normalize_base_url(&base_url);
-        let result = match util::build_chatgpt_headers().await {
-            Ok(headers) => crate::env_detect::list_environments(&http, &base_url, &headers).await,
-            Err(error) => Err(error),
-        };
+        let headers = util::build_chatgpt_headers();
+        let result = crate::env_detect::list_environments(&http, &base_url, &headers).await;
         let _ = tx.send(app::AppEvent::EnvironmentsLoaded(result));
     });
 }

@@ -49,6 +49,7 @@ use xdcode_core::config::ConfigOverrides;
 use xdcode_core::config::LoaderOverrides;
 use xdcode_core::config::find_xdcode_home;
 use xdcode_features::FEATURES;
+use xdcode_features::Feature;
 use xdcode_http_client::ClientRouteClass;
 use xdcode_http_client::HttpClientFactory;
 use xdcode_http_client::OutboundProxyPolicy;
@@ -1520,6 +1521,7 @@ async fn mcp_check_from_servers(servers: &HashMap<String, McpServerConfig>) -> D
     let mut details = Vec::new();
     let mut transport_counts: BTreeMap<&'static str, usize> = BTreeMap::new();
     let mut disabled = 0usize;
+    let mut invalid_config = Vec::new();
     let mut missing_env = Vec::new();
     let mut unreachable_required_http = Vec::new();
     let mut unreachable_optional_http = Vec::new();
@@ -1543,43 +1545,44 @@ async fn mcp_check_from_servers(servers: &HashMap<String, McpServerConfig>) -> D
                 }
                 let command_is_empty = command.trim().is_empty();
                 if command_is_empty {
-                    missing_env.push(format!("{name}: stdio command is empty"));
+                    invalid_config.push(format!("{name}: stdio command is empty"));
                 }
                 if server.is_local_environment() {
                     let host_native_cwd = cwd.as_ref().map(|cwd| Path::new(cwd.as_str()));
                     if let Some(cwd) = host_native_cwd
                         && !cwd.exists()
                     {
-                        missing_env.push(format!("{name}: cwd does not exist ({})", cwd.display()));
+                        invalid_config
+                            .push(format!("{name}: cwd does not exist ({})", cwd.display()));
                     }
                     if !command_is_empty
                         && let Err(err) =
                             stdio_command_resolves(command, host_native_cwd, env.as_ref())
                     {
-                        missing_env.push(format!(
+                        invalid_config.push(format!(
                             "{name}: stdio command {command:?} is not resolvable ({err})"
                         ));
                     }
                 } else {
                     match cwd {
                         Some(cwd) if cwd.to_inferred_path_uri().is_none() => {
-                            missing_env
+                            invalid_config
                                 .push(format!("{name}: remote stdio cwd is not absolute ({cwd})"));
                         }
-                        None => missing_env
+                        None => invalid_config
                             .push(format!("{name}: remote stdio requires an explicit cwd")),
                         Some(_) => {}
                     }
                 }
                 if let Some(env) = env {
                     for key in env.keys().filter(|key| key.trim().is_empty()) {
-                        missing_env.push(format!("{name}: empty env key {key}"));
+                        invalid_config.push(format!("{name}: empty env key {key}"));
                     }
                 }
                 for env_var in env_vars {
                     if env_var.is_remote_source() {
                         if server.is_local_environment() {
-                            missing_env.push(format!(
+                            invalid_config.push(format!(
                                 "{name}: env_vars entry `{}` uses source `remote`, which requires remote MCP stdio",
                                 env_var.name()
                             ));
@@ -1629,7 +1632,25 @@ async fn mcp_check_from_servers(servers: &HashMap<String, McpServerConfig>) -> D
     for (transport, count) in transport_counts {
         details.push(format!("{transport} servers: {count}"));
     }
-    details.extend(missing_env.iter().cloned());
+    let mut hints = Vec::new();
+    if !invalid_config.is_empty() {
+        hints.push("Correct the listed MCP server configuration errors.");
+    }
+    if !missing_env.is_empty() {
+        hints.push("Set the missing MCP env vars.");
+    }
+    if !unreachable_required_http.is_empty() || !unreachable_optional_http.is_empty() {
+        hints.push("Check that the MCP server is running and its URL is reachable.");
+    }
+    let required_missing = servers.iter().any(|(name, server)| {
+        server.required
+            && invalid_config
+                .iter()
+                .chain(&missing_env)
+                .any(|detail| detail.starts_with(&format!("{name}:")))
+    });
+    details.extend(invalid_config);
+    details.extend(missing_env);
     details.extend(
         unreachable_required_http
             .iter()
@@ -1641,15 +1662,9 @@ async fn mcp_check_from_servers(servers: &HashMap<String, McpServerConfig>) -> D
             .map(|detail| format!("optional reachability failed: {detail}")),
     );
 
-    let required_missing = servers.iter().any(|(name, server)| {
-        server.required
-            && missing_env
-                .iter()
-                .any(|missing| missing.starts_with(&format!("{name}:")))
-    });
     let status = if required_missing || !unreachable_required_http.is_empty() {
         CheckStatus::Fail
-    } else if !missing_env.is_empty() || !unreachable_optional_http.is_empty() {
+    } else if !hints.is_empty() {
         CheckStatus::Warning
     } else {
         CheckStatus::Ok
@@ -1662,7 +1677,8 @@ async fn mcp_check_from_servers(servers: &HashMap<String, McpServerConfig>) -> D
 
     let mut check = DoctorCheck::new("mcp.config", "mcp", status, summary).details(details);
     if status != CheckStatus::Ok {
-        check = check.remediation("Set the missing MCP env vars or disable the affected server.");
+        hints.push("Alternatively, disable the affected server.");
+        check = check.remediation(hints.join(" "));
     }
     check
 }
@@ -1869,6 +1885,7 @@ fn terminal_name(info: &TerminalInfo) -> &'static str {
     match info.name {
         TerminalName::AppleTerminal => "Apple Terminal",
         TerminalName::Ghostty => "Ghostty",
+        TerminalName::Rex => "Rex",
         TerminalName::Iterm2 => "iTerm2",
         TerminalName::WarpTerminal => "Warp",
         TerminalName::VsCode => "VS Code",
@@ -2361,7 +2378,6 @@ async fn websocket_reachability_check(config: &Config) -> DoctorCheck {
         Some(token) => Arc::new(BearerAuthProvider::new(token)) as xdcode_api::SharedAuthProvider,
         None => unauthenticated_auth_provider(),
     };
-
     let mut extra_headers = HeaderMap::new();
     extra_headers.insert(
         PROVIDER_BETA_HEADER,
@@ -2521,12 +2537,15 @@ fn websocket_error_detail(err: &ApiError) -> String {
         }
         // These variants format fixed text; retry metadata is typed and never printed.
         ApiError::ContentFilter
+        | ApiError::WebsocketMessageTooLarge
         | ApiError::ContextWindowExceeded
+        | ApiError::SpendLimitExceeded(_)
         | ApiError::QuotaExceeded
         | ApiError::UsageNotIncluded
         | ApiError::SessionBudgetExceeded
         | ApiError::FlexUnavailable
-        | ApiError::ServerOverloaded { .. } => format!("handshake error: {err}"),
+        | ApiError::ServerOverloaded { .. }
+        | ApiError::PolicyCapacityUnavailable { .. } => format!("handshake error: {err}"),
         ApiError::Retryable { .. } => "handshake error: retryable error: [redacted]".to_string(),
         ApiError::RateLimitExceeded { .. } => {
             "handshake error: rate limit exceeded: [redacted]".to_string()
@@ -2535,10 +2554,22 @@ fn websocket_error_detail(err: &ApiError) -> String {
         ApiError::InvalidRequest { .. } => {
             "handshake error: invalid request: [redacted]".to_string()
         }
+        ApiError::InvalidAudioInput { .. } => {
+            "handshake error: invalid audio input: [redacted]".to_string()
+        }
         ApiError::ModelNotFound { .. } => {
             "handshake error: model not found: [redacted]".to_string()
         }
         ApiError::InvalidPrompt { .. } => "handshake error: invalid prompt: [redacted]".to_string(),
+        ApiError::InferenceHookDenied { .. } => {
+            "handshake error: inference hook denied: [redacted]".to_string()
+        }
+        ApiError::ContentPolicyViolation { .. } => {
+            "handshake error: content policy violation".to_string()
+        }
+        ApiError::AccessProgramNotEnabled { .. } => {
+            "handshake error: access program not enabled".to_string()
+        }
         ApiError::CyberPolicy { .. } => "handshake error: cyber policy: [redacted]".to_string(),
         ApiError::BioPolicy { .. } => "handshake error: bio policy: [redacted]".to_string(),
         ApiError::MisalignmentPolicyViolation { .. } => {
@@ -3323,6 +3354,7 @@ mod tests {
             ApiError::Stream(message()),
             ApiError::ResponseIncomplete(Box::new(
                 xdcode_protocol::error::ResponseIncompleteError {
+                    partial_output: vec![],
                     reason: message(),
                     response_id: Some(message()),
                     token_usage: None,
@@ -3338,11 +3370,20 @@ mod tests {
             },
             ApiError::RateLimit(message()),
             ApiError::InvalidRequest { message: message() },
+            ApiError::InvalidAudioInput {
+                message: message(),
+                per_recording: true,
+            },
             ApiError::ModelNotFound {
                 message: message(),
                 status: Some(http::StatusCode::NOT_FOUND),
             },
             ApiError::InvalidPrompt { message: message() },
+            ApiError::ContentPolicyViolation {
+                message: message(),
+                status: None,
+            },
+            ApiError::AccessProgramNotEnabled { message: message() },
             ApiError::CyberPolicy { message: message() },
             ApiError::BioPolicy { message: message() },
             ApiError::MisalignmentPolicyViolation {
@@ -3365,8 +3406,11 @@ mod tests {
                 "handshake error: rate limit exceeded: [redacted]",
                 "handshake error: rate limit: [redacted]",
                 "handshake error: invalid request: [redacted]",
+                "handshake error: invalid audio input: [redacted]",
                 "handshake error: model not found: [redacted]",
                 "handshake error: invalid prompt: [redacted]",
+                "handshake error: content policy violation",
+                "handshake error: access program not enabled",
                 "handshake error: cyber policy: [redacted]",
                 "handshake error: bio policy: [redacted]",
                 "handshake error: misalignment policy violation: [redacted]",
@@ -3773,12 +3817,30 @@ mod tests {
 
         assert_eq!(check.status, CheckStatus::Warning);
         assert_eq!(check.summary, "MCP configuration has optional issues");
+        insta::assert_snapshot!(check.remediation.unwrap(), @"Check that the MCP server is running and its URL is reachable. Alternatively, disable the affected server.");
         assert!(
             check
                 .details
                 .iter()
                 .any(|detail| detail.contains("optional reachability failed: optional:"))
         );
+    }
+
+    #[tokio::test]
+    async fn mcp_check_reports_both_missing_token_and_unreachable_url() {
+        let server = toml::from_str(
+            r#"
+                url = "http://127.0.0.1:9/mcp"
+                bearer_token_env_var = "XDCODE_DOCTOR_MISSING_MCP_TOKEN"
+                required = true
+            "#,
+        )
+        .expect("required MCP config");
+        let check =
+            mcp_check_from_servers(&HashMap::from([("required".to_string(), server)])).await;
+
+        assert_eq!(check.status, CheckStatus::Fail);
+        insta::assert_snapshot!(check.remediation.unwrap(), @"Set the missing MCP env vars. Check that the MCP server is running and its URL is reachable. Alternatively, disable the affected server.");
     }
 
     #[tokio::test]
@@ -4276,35 +4338,51 @@ mod tests {
         assert_eq!(status, Ok("HTTP 405".to_string()));
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn mcp_http_probe_falls_back_to_get_when_head_times_out() {
+        use std::io::BufRead as _;
+
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
         let addr = listener.local_addr().expect("listener address");
-        let server = std::thread::spawn(move || {
+        let (head_received_tx, head_received_rx) = tokio::sync::oneshot::channel();
+        let (probe_done_tx, probe_done_rx) = std::sync::mpsc::channel::<()>();
+        // A blocking task inhibits Tokio's automatic clock advancement while real socket I/O
+        // is pending. Keep it alive until the client has consumed the GET response, too.
+        let server = tokio::task::spawn_blocking(move || {
             let (mut head_stream, _) = listener.accept().expect("accept HEAD probe request");
-            let head = std::thread::spawn(move || {
-                let mut request = [0; 1024];
-                let _ = head_stream.read(&mut request);
-                std::thread::sleep(Duration::from_millis(50));
-            });
+            let mut head_request = String::new();
+            std::io::BufReader::new(&mut head_stream)
+                .read_line(&mut head_request)
+                .expect("read HEAD request line");
+            assert_eq!(head_request, "HEAD /mcp HTTP/1.1\r\n");
+            head_received_tx.send(()).expect("signal HEAD receipt");
 
             let (mut get_stream, _) = listener.accept().expect("accept GET probe request");
-            let mut request = [0; 1024];
-            let _ = get_stream.read(&mut request);
+            let mut get_request = String::new();
+            std::io::BufReader::new(&mut get_stream)
+                .read_line(&mut get_request)
+                .expect("read GET request line");
+            assert_eq!(get_request, "GET /mcp HTTP/1.1\r\n");
             get_stream
                 .write_all(
                     b"HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
                 )
                 .expect("write response");
-            head.join().expect("HEAD holder should finish");
+            // Dropping the sender also releases this wait if the probe panics.
+            let _ = probe_done_rx.recv();
+            drop(head_stream);
         });
 
-        let status = mcp_http_probe_url_with_timeout(
-            &format!("http://{addr}/mcp"),
-            Duration::from_millis(10),
-        )
-        .await;
-        server.join().expect("probe server thread should finish");
+        let url = format!("http://{addr}/mcp");
+        let probe = mcp_http_probe_url_with_timeout(&url, Duration::from_millis(10));
+        let expire_head = async {
+            head_received_rx.await.expect("server should receive HEAD");
+            // Cross the unchanged 10 ms deadline only after HEAD is waiting for a response.
+            tokio::time::advance(Duration::from_millis(11)).await;
+        };
+        let (status, ()) = tokio::join!(probe, expire_head);
+        drop(probe_done_tx);
+        server.await.expect("probe server task should finish");
 
         assert_eq!(status, Ok("HTTP 405".to_string()));
     }
@@ -4327,6 +4405,7 @@ mod tests {
             check.summary,
             "MCP configuration has failing required inputs or reachability"
         );
+        insta::assert_snapshot!(check.remediation.unwrap(), @"Correct the listed MCP server configuration errors. Alternatively, disable the affected server.");
         assert!(check.details.iter().any(|detail| {
             detail.contains(
                 "required: stdio command \"definitely-missing-xdcode-doctor-mcp\" is not resolvable",
@@ -4502,6 +4581,7 @@ mod tests {
     fn terminal_inputs() -> TerminalCheckInputs {
         TerminalCheckInputs {
             info: TerminalInfo {
+                backend: None,
                 name: TerminalName::Unknown,
                 term_program: None,
                 version: None,

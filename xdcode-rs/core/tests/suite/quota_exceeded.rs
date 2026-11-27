@@ -13,12 +13,17 @@ use xdcode_protocol::protocol::EventMsg;
 use xdcode_protocol::protocol::XdcodeErrorInfo;
 use xdcode_protocol::user_input::UserInput;
 
-#[test_case::test_case("insufficient_quota"; "quota")]
-#[test_case::test_case("credit_balance_exhausted"; "credit_balance")]
-#[test_case::test_case("organization_spend_limit_exceeded"; "organization_spend_limit")]
-#[test_case::test_case("project_spend_limit_exceeded"; "project_spend_limit")]
+#[test_case::test_case("insufficient_quota", XdcodeErrorInfo::UsageLimitExceeded, "Quota exceeded. Check your plan and billing details."; "quota")]
+#[test_case::test_case("credit_balance_exhausted", XdcodeErrorInfo::UsageLimitExceeded, "Quota exceeded. Check your plan and billing details."; "credit_balance")]
+#[test_case::test_case("api_key_spend_limit_exceeded", XdcodeErrorInfo::ApiKeySpendLimitExceeded, "Your API key has reached its spend limit."; "api_key_spend_limit")]
+#[test_case::test_case("organization_spend_limit_exceeded", XdcodeErrorInfo::OrganizationSpendLimitExceeded, "Your API organization has reached its spend limit."; "organization_spend_limit")]
+#[test_case::test_case("project_spend_limit_exceeded", XdcodeErrorInfo::ProjectSpendLimitExceeded, "Your API project has reached its spend limit."; "project_spend_limit")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn quota_exceeded_emits_single_error_event(code: &str) -> Result<()> {
+async fn quota_exceeded_emits_single_error_event(
+    code: &str,
+    expected: XdcodeErrorInfo,
+    expected_message: &str,
+) -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
@@ -59,14 +64,8 @@ async fn quota_exceeded_emits_single_error_event(code: &str) -> Result<()> {
         match event {
             EventMsg::Error(err) => {
                 error_events += 1;
-                assert_eq!(
-                    err.message,
-                    "Quota exceeded. Check your plan and billing details."
-                );
-                assert_eq!(
-                    err.xdcode_error_info,
-                    Some(XdcodeErrorInfo::UsageLimitExceeded)
-                );
+                assert_eq!(err.message, expected_message);
+                assert_eq!(err.xdcode_error_info, Some(expected.clone()));
             }
             EventMsg::TurnComplete(_) => break,
             _ => {}

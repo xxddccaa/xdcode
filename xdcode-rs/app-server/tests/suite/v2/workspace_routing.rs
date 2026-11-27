@@ -6,6 +6,7 @@ use app_test_support::ChatGptIdTokenClaims;
 use app_test_support::TestAppServer;
 use app_test_support::encode_id_token;
 use app_test_support::write_chatgpt_auth;
+use app_test_support::write_models_cache;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
 use serde_json::json;
@@ -26,7 +27,13 @@ use xdcode_app_server_protocol::GetAccountParams;
 use xdcode_app_server_protocol::LoginAccountResponse;
 use xdcode_app_server_protocol::LogoutAccountResponse;
 use xdcode_app_server_protocol::RequestId;
+use xdcode_app_server_protocol::ThreadStartParams;
+use xdcode_app_server_protocol::TurnStartParams;
+use xdcode_app_server_protocol::TurnStatus;
+use xdcode_app_server_protocol::UserInput;
+use xdcode_app_server_protocol::XdcodeErrorInfo;
 use xdcode_config::types::AuthCredentialsStoreMode;
+use xdcode_login::REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR;
 
 const READ_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 60);
 
@@ -101,7 +108,7 @@ async fn saved_workspace_is_discovered_once_and_not_the_default_account(
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "accounts": [
                 {"id": "other", "workspace_backend_origin": "https://other.example", "account_routing_override": "us"},
-                {"id": "selected", "workspace_backend_origin": "https://gov.chatgpt.com", "account_routing_override": "NO_CONSTRAINT"}
+                {"id": "selected", "name": "Selected workspace", "workspace_backend_origin": "https://gov.chatgpt.com", "account_routing_override": "NO_CONSTRAINT"}
             ], "default_account_id": "other"
         })).set_delay(Duration::from_secs(accounts_delay_secs)))
         .expect(if accounts_delay_secs > 5 { 2 } else { 1 })
@@ -148,11 +155,13 @@ async fn saved_workspace_is_discovered_once_and_not_the_default_account(
     .await??;
     assert_eq!(
         notification.params,
-        Some(json!({"authMode": "chatgpt", "planType": plan_type}))
+        Some(
+            json!({"authMode": "chatgpt", "planType": plan_type, "reason": "workspaceRoutingReady"})
+        )
     );
     let expected = json!({
-        "account": {"type": "chatgpt", "email": "user@example.com", "planType": plan_type},
-        "requiresHostedAuth": true, "workspaceRouting": routing("selected", "https://gov.chatgpt.com", "NO_CONSTRAINT")
+        "account": {"type": "chatgpt", "email": "user@example.com", "planType": plan_type, "workspaceName": "Selected workspace"},
+        "userId": null, "requiresHostedAuth": true, "workspaceRouting": routing("selected", "https://gov.chatgpt.com", "NO_CONSTRAINT")
     });
     assert_eq!(read(&mut server).await?, expected);
     assert_eq!(read(&mut server).await?, expected);
@@ -178,8 +187,8 @@ async fn saved_chatgpt_login_without_selected_workspace_preserves_account() -> R
     let mut server = start(&home).await?;
     assert_eq!(
         read(&mut server).await?,
-        json!({"account": {"type": "chatgpt", "email": null, "planType": "pro"},
-            "requiresHostedAuth": true, "workspaceRouting": null})
+        json!({"account": {"type": "chatgpt", "email": null, "planType": "pro", "workspaceName": null},
+            "userId": null, "requiresHostedAuth": true, "workspaceRouting": null})
     );
     backend.verify().await;
     Ok(())
@@ -238,9 +247,79 @@ async fn stable_clients_do_not_treat_failed_workspace_discovery_as_unrestricted(
         .await;
     assert_eq!(
         read(&mut server).await?,
-        json!({"account": {"type": "chatgpt", "email": null, "planType": "pro"},
-            "requiresHostedAuth": true, "workspaceRouting": routing("selected", "https://chatgpt.com", "NO_CONSTRAINT")})
+        json!({"account": {"type": "chatgpt", "email": null, "planType": "pro", "workspaceName": null},
+            "userId": null, "requiresHostedAuth": true, "workspaceRouting": routing("selected", "https://chatgpt.com", "NO_CONSTRAINT")})
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn reused_refresh_token_tells_the_user_to_sign_in_again() -> Result<()> {
+    let backend = MockServer::start().await;
+    Mock::given(path("/backend-api/wham/config/bundle"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .mount(&backend)
+        .await;
+    Mock::given(path("/backend-api/wham/accounts/check"))
+        .respond_with(ResponseTemplate::new(401))
+        .mount(&backend)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/oauth/token"))
+        .respond_with(ResponseTemplate::new(401).set_body_json(json!({
+            "error": {"code": "refresh_token_reused"}
+        })))
+        .mount(&backend)
+        .await;
+    let home = TempDir::new()?;
+    std::fs::write(
+        home.path().join("config.toml"),
+        format!(
+            "chatgpt_base_url = '{0}/backend-api'\nprovider_base_url = '{0}/backend-api/xdcode'\ncli_auth_credentials_store = 'file'\n",
+            backend.uri()
+        ),
+    )?;
+    write_models_cache(home.path()).await?;
+    write_chatgpt_auth(
+        home.path(),
+        ChatGptAuthFixture::new("stale-token")
+            .account_id("selected")
+            .plan_type("pro"),
+        AuthCredentialsStoreMode::File,
+    )?;
+    let refresh_url = format!("{}/oauth/token", backend.uri());
+    let mut server = TestAppServer::builder()
+        .with_xdcode_home(home.path())
+        .with_env_overrides(&[
+            ("PROVIDER_API_KEY", None),
+            (REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR, Some(&refresh_url)),
+        ])
+        .build_initialized_with_timeout(READ_TIMEOUT)
+        .await?;
+    let thread = server
+        .start_thread(ThreadStartParams::default())
+        .await?
+        .thread;
+    let completed = timeout(
+        READ_TIMEOUT,
+        server.start_turn_and_wait_for_completion(TurnStartParams {
+            thread_id: thread.id,
+            input: vec![UserInput::Text {
+                text: "hi".into(),
+                text_elements: Vec::new(),
+            }],
+            ..Default::default()
+        }),
+    )
+    .await??;
+    assert_eq!(completed.turn.status, TurnStatus::Failed);
+    let error = completed.turn.error.expect("failed turn error");
+    assert_eq!(error.xdcode_error_info, Some(XdcodeErrorInfo::Unauthorized));
+    assert!(
+        error.message.contains("refresh token was already used"),
+        "{error}"
+    );
+    assert!(error.message.contains("sign in again"), "{error}");
     Ok(())
 }
 
@@ -268,7 +347,9 @@ async fn login_and_workspace_switch_notify_after_routing_is_ready_then_logout_cl
         .await??;
         assert_eq!(
             notification.params,
-            Some(json!({"authMode": "chatgptAuthTokens", "planType": "enterprise"}))
+            Some(
+                json!({"authMode": "chatgptAuthTokens", "planType": "enterprise", "reason": null})
+            )
         );
         assert_eq!(
             read(&mut server).await?["workspaceRouting"],
@@ -285,9 +366,18 @@ async fn login_and_workspace_switch_notify_after_routing_is_ready_then_logout_cl
     }
     let request = server.send_logout_account_request().await?;
     let _: LogoutAccountResponse = timeout(READ_TIMEOUT, server.read_response(request)).await??;
+    let notification = timeout(
+        READ_TIMEOUT,
+        server.read_stream_until_notification_message("account/updated"),
+    )
+    .await??;
+    assert_eq!(
+        notification.params,
+        Some(json!({"authMode": null, "planType": null, "reason": null}))
+    );
     assert_eq!(
         read(&mut server).await?,
-        json!({"account": null, "requiresHostedAuth": true, "workspaceRouting": null})
+        json!({"account": null, "userId": null, "requiresHostedAuth": true, "workspaceRouting": null})
     );
     backend.verify().await;
     Ok(())
@@ -389,7 +479,7 @@ async fn api_only_login_does_not_discover_chatgpt_routing() -> Result<()> {
     let _: LoginAccountResponse = timeout(READ_TIMEOUT, server.read_response(request)).await??;
     assert_eq!(
         read(&mut server).await?,
-        json!({"account": {"type": "apiKey"}, "requiresHostedAuth": true, "workspaceRouting": null})
+        json!({"account": {"type": "apiKey"}, "userId": null, "requiresHostedAuth": true, "workspaceRouting": null})
     );
     backend.verify().await;
     Ok(())

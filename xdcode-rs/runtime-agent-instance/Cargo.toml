@@ -17,6 +17,7 @@ xdcode-api = { workspace = true }
 xdcode-features = { workspace = true }
 xdcode-http-client = { workspace = true }
 xdcode-login = { workspace = true }
+xdcode-utils-absolute-path = { workspace = true }
 xdcode-utils-redacted-string = { workspace = true }
 ed25519-dalek = { workspace = true }
 http = { workspace = true }
@@ -24,12 +25,14 @@ rand = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["sync"] }
+tokio = { workspace = true, features = ["fs", "rt", "sync"] }
 url = { workspace = true }
 uuid = { workspace = true, features = ["serde", "v4"] }
 zeroize = { workspace = true }
 
 [dev-dependencies]
+bytes = { workspace = true }
+futures = { workspace = true }
 pretty_assertions = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

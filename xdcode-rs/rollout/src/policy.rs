@@ -13,7 +13,8 @@ use xdcode_protocol::protocol::ThreadHistoryMode;
 use xdcode_utils_output_truncation::truncate_mcp_tool_result;
 use xdcode_utils_string::truncate_middle_with_marker;
 
-const PERSISTED_MCP_RESULT_MAX_BYTES: usize = 64 * 1024;
+/// Maximum encoded size of an untruncated MCP result in durable history.
+pub const PERSISTED_MCP_RESULT_MAX_BYTES: usize = 64 * 1024;
 pub(super) const PERSISTED_COMMAND_OUTPUT_MAX_BYTES: usize = 64 * 1024;
 const PERSISTED_COMMAND_OUTPUT_TRUNCATION_MARKER: &str =
     "\n... command output truncated for persistence ...\n";
@@ -45,6 +46,7 @@ pub fn persisted_rollout_item(
         | RolloutItem::WorldState(_)
         | RolloutItem::RetainedContext(_)
         | RolloutItem::SecurityRiskScore(_)
+        | RolloutItem::DynamicToolsUpdated { .. }
         | RolloutItem::SessionMeta(_) => Some(Cow::Borrowed(item)),
     }
 }

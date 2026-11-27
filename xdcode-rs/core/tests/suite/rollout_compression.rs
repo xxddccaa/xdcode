@@ -137,8 +137,11 @@ async fn compressed_shared_fork_resume_preserves_checkpoint_and_frozen_history()
         .features
         .enable(Feature::LocalThreadStoreCompression)?;
     // Use production feature wiring, rather than manually writing zstd files or calling the worker.
-    let store =
-        xdcode_core::thread_store_from_config(&config, xdcode_core::init_state_db(&config).await);
+    let store = xdcode_core::ThreadStoreBuilder::from_config(
+        &config,
+        xdcode_core::init_state_db(&config).await,
+    )
+    .build();
     tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             if paths

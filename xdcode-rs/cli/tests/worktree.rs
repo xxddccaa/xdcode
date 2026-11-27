@@ -81,7 +81,7 @@ async fn rejected_start(
     expected: &str,
 ) -> anyhow::Result<String> {
     let spawned = xdcode_utils_pty::spawn_pty_process(
-        &program.to_string_lossy(),
+        program.as_os_str(),
         args,
         cwd,
         env,
@@ -447,7 +447,7 @@ trust_level = "trusted"
             assert!(!home.join("worktrees").exists());
         }
         let spawned = xdcode_utils_pty::spawn_pty_process(
-            &program.to_string_lossy(),
+            program.as_os_str(),
             &args,
             &launcher,
             &env,
@@ -639,8 +639,9 @@ trust_level = "trusted"
         } else {
             session.terminate();
         }
-        let exit =
-            tokio::time::timeout(Duration::from_secs(/*secs*/ 10), spawned.exit_rx).await??;
+        let exit = tokio::time::timeout(Duration::from_secs(/*secs*/ 30), spawned.exit_rx)
+            .await
+            .context("timed out waiting for the worktree TUI to exit")??;
         // Include shutdown output: ConPTY can retain the channel after process exit.
         let _ = tokio::time::timeout(Duration::from_secs(/*secs*/ 1), async {
             while let Some(bytes) = stdout.recv().await {
@@ -823,7 +824,7 @@ trust_level = "trusted"
         assert!(context.contains("managed cloud instructions"), "{context}");
         if previous.is_empty() {
             // A legacy summary still says launcher A, but persisted turns use checkout B.
-            let sqlite = xdcode_state::SqliteConfig::from_sqlite_home(
+            let sqlite = xdcode_state::SqliteConfig::new_for_testing(
                 xdcode_utils_absolute_path::AbsolutePathBuf::from_absolute_path(&home)?,
             );
             let db = sqlite.open_read_write_pool(&sqlite.state_db_path()).await?;

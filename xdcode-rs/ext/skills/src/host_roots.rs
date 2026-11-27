@@ -13,6 +13,7 @@ use xdcode_config::merge_toml_values;
 use xdcode_config::project_root_markers_from_config;
 use xdcode_exec_server::EnvironmentAccess;
 use xdcode_exec_server::EnvironmentAccessKey;
+use xdcode_exec_server::FileMetadata;
 use xdcode_exec_server::FileSystemEnvironmentAccessor;
 use xdcode_exec_server::GetMetadataOptions;
 use xdcode_exec_server::LOCAL_FS;
@@ -148,6 +149,8 @@ fn roots_from_layer_stack<'a>(
                 }
             }
             ConfigLayerSource::User { .. } => {
+                // Deprecated user skills location (`$XDCODE_HOME/skills`), kept for backward
+                // compatibility.
                 roots.push(HostSkillRoot::host(
                     config_folder.join(SKILLS_DIR_NAME),
                     SkillScope::User,
@@ -237,20 +240,18 @@ async fn repo_agents_skill_roots<'a>(
         cwd,
     )
     .await;
-    let directories = dirs_between_project_root_and_cwd(cwd, &project_root);
+    let mut candidates = Vec::new();
+    for directory in cwd.ancestors() {
+        candidates.push(directory.join(AGENTS_DIR_NAME).join(SKILLS_DIR_NAME));
+        if directory == project_root {
+            break;
+        }
+    }
+    candidates.reverse();
+    let results = skill_root_metadata(repository_fs_accessor, &candidates).await;
     let mut roots = Vec::new();
     let mut missing = Vec::new();
-    let mut results = futures::stream::iter(directories)
-        .map(|directory| async move {
-            let agents_skills = directory.join(AGENTS_DIR_NAME).join(SKILLS_DIR_NAME);
-            let agents_skills_uri = PathUri::from_abs_path(&agents_skills);
-            let result = repository_fs_accessor
-                .get_metadata(&agents_skills_uri, GetMetadataOptions::default())
-                .await;
-            (agents_skills, result)
-        })
-        .buffered(MAX_CONCURRENT_ANCESTOR_PROBES);
-    while let Some((agents_skills, result)) = results.next().await {
+    for (agents_skills, result) in candidates.into_iter().zip(results) {
         match result {
             Ok(metadata) if metadata.is_directory => roots.push(HostSkillRoot::host(
                 agents_skills,
@@ -265,6 +266,7 @@ async fn repo_agents_skill_roots<'a>(
             }
             Err(error) if error.kind() == io::ErrorKind::Unsupported => {
                 complete = false;
+                // Let loading report an unsupported sandbox backend instead of hiding this root.
                 roots.push(HostSkillRoot::host(
                     agents_skills,
                     SkillScope::Repo,
@@ -284,6 +286,8 @@ async fn repo_agents_skill_roots<'a>(
         && roots.is_empty()
         && let (Some(cache), Some(generation)) = (cache, generation)
     {
+        // A nearer marker can only narrow an empty scan. Losing the selected marker
+        // can widen it. With no marker, a new marker above cwd can widen it too.
         if marker.is_none() {
             for ancestor in cwd.ancestors() {
                 missing.extend(
@@ -304,6 +308,8 @@ async fn repo_agents_skill_roots<'a>(
                 markers: project_root_markers,
                 watch: EmptyRootsWatch::Registering(registered),
             });
+            // A cold question never waits for an extra round trip. Until the executor
+            // acknowledges coverage, other questions take the ordinary live scan.
             let present = marker.as_ref().map(PathUri::from_abs_path);
             let watch = repository_fs_accessor.watch_missing(missing, present);
             tokio::spawn(async move {
@@ -323,6 +329,36 @@ async fn repo_agents_skill_roots<'a>(
         }
     }
     roots
+}
+
+async fn skill_root_metadata(
+    fs: &dyn EnvironmentAccess,
+    paths: &[AbsolutePathBuf],
+) -> Vec<io::Result<FileMetadata>> {
+    let options = GetMetadataOptions::default();
+    let mut results = Vec::with_capacity(paths.len());
+    // Keep the existing probe concurrency limit inside each helper. If a batch fails,
+    // retry the remaining paths individually.
+    for chunk in paths.chunks(MAX_CONCURRENT_ANCESTOR_PROBES) {
+        if chunk.len() == 1 {
+            break;
+        }
+        let uris = chunk.iter().map(PathUri::from_abs_path).collect::<Vec<_>>();
+        match fs.get_metadata_batch(&uris, options).await {
+            Ok(batch) if batch.len() == chunk.len() => results.extend(batch),
+            _ => break,
+        }
+    }
+    let mut remaining = futures::stream::iter(results.len()..paths.len())
+        .map(|index| async move {
+            fs.get_metadata(&PathUri::from_abs_path(&paths[index]), options)
+                .await
+        })
+        .buffered(MAX_CONCURRENT_ANCESTOR_PROBES);
+    while let Some(metadata) = remaining.next().await {
+        results.push(metadata);
+    }
+    results
 }
 
 fn project_root_markers_from_stack(config_layer_stack: &ConfigLayerStack) -> Vec<String> {
@@ -395,6 +431,7 @@ async fn find_project_root(
                     "failed to stat project root marker {}: {error:#}",
                     marker_path.display()
                 );
+                // An inconclusive nearer marker must not expose a parent repository's skills.
                 return ResolvedProjectRoot {
                     path: ancestor,
                     marker: None,
@@ -409,27 +446,6 @@ async fn find_project_root(
         marker: None,
         complete: true,
     }
-}
-
-fn dirs_between_project_root_and_cwd(
-    cwd: &AbsolutePathBuf,
-    project_root: &AbsolutePathBuf,
-) -> Vec<AbsolutePathBuf> {
-    let mut directories = cwd
-        .ancestors()
-        .scan(false, |done, directory| {
-            if *done {
-                None
-            } else {
-                if &directory == project_root {
-                    *done = true;
-                }
-                Some(directory)
-            }
-        })
-        .collect::<Vec<_>>();
-    directories.reverse();
-    directories
 }
 
 fn dedupe_skill_roots_by_path(roots: &mut Vec<HostSkillRoot>) {

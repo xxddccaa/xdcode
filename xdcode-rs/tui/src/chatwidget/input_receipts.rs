@@ -42,6 +42,8 @@ impl ChatWidget {
                 }
                 self.record_safety_buffering_turn(turn_id, turn);
             }
+            // A duplicate identifies the message, but only its history event confirms
+            // whether a steer committed. Keep it out of automatic delivery until then.
             UserMessageAdmission::Duplicate => {
                 self.hold_unconfirmed_user_message(client_id);
             }
@@ -94,7 +96,7 @@ impl ChatWidget {
         } else {
             queue
                 .take_pending_steer(client_id)
-                .map(|pending| (pending.user_message, pending.history_record, pending.source))
+                .map(|p| (p.user_message, p.history_record, p.source))
         }
     }
 

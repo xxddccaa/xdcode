@@ -649,6 +649,7 @@ fn open_questions(chat: &mut ChatWidget, options: Option<Vec<String>>) {
     chat.thread_id = Some(ThreadId::new());
     chat.on_agent_message_item_completed(
         AgentMessageItem {
+            moderation: None,
             id: "review".into(),
             content: Vec::new(),
             phase: None,
@@ -667,6 +668,27 @@ fn open_questions(chat: &mut ChatWidget, options: Option<Vec<String>>) {
     );
     chat.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT));
     render_bottom_popup(chat, /*width*/ 80);
+}
+
+#[tokio::test]
+async fn expanded_question_yields_mouse_to_terminal_for_links() {
+    use crate::tui::MouseCapture::Disabled;
+    use crate::tui::MouseCapture::Inherit;
+
+    let (mut chat, _rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
+    let url = "https://example.com/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/r2/overview";
+    chat.add_async_questions("message", &[question(url, /*options*/ None)]);
+    assert_eq!(chat.mouse_capture(/*owned_screen*/ true), Inherit);
+    chat.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT));
+    assert_eq!(chat.mouse_capture(/*owned_screen*/ true), Disabled);
+    assert_eq!(chat.mouse_capture(/*owned_screen*/ false), Inherit);
+    chat.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::ALT));
+    assert_eq!(chat.mouse_capture(/*owned_screen*/ true), Inherit);
+
+    chat.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT));
+    chat.open_warnings(&[]);
+    assert!(render_bottom_popup(&chat, /*width*/ 100).contains(url));
+    assert_eq!(chat.mouse_capture(/*owned_screen*/ true), Disabled);
 }
 
 #[tokio::test]
@@ -780,7 +802,8 @@ async fn question_drafts_survive_navigation_and_snapshot_replay() {
     chat.bottom_pane.handle_paste("second draft".into());
     let saved = chat.capture_thread_input_state();
     let (mut chat, _rx, mut ops) = make_chatwidget_manual(/*model_override*/ None).await;
-    let item = AppServerThreadItem::AgentMessage {
+    let item = AppServerThreadItemPayload::AgentMessage {
+        moderation: None,
         id: "buffered".into(),
         text: String::new(),
         phase: None,
@@ -796,12 +819,13 @@ async fn question_drafts_survive_navigation_and_snapshot_replay() {
         assert!(chat.bottom_pane.questions.is_none());
     }
     chat.handle_server_notification(
-        ServerNotification::ItemCompleted(ItemCompletedNotification {
+        ServerNotification::ItemCompleted(ItemCompletedNotification::new(
+            "thread".into(),
+            "turn".into(),
             item,
-            thread_id: "thread".into(),
-            turn_id: "turn".into(),
-            completed_at_ms: 0,
-        }),
+            /*started_at_ms*/ None,
+            /*completed_at_ms*/ 0,
+        )),
         Some(ReplayKind::ThreadSnapshot),
     );
     assert_eq!(question_count(&chat), 1);
@@ -981,7 +1005,7 @@ async fn desktop_async_answer_dismisses_only_its_question_and_preserves_the_othe
         let reply = format!(
             "# Context from my IDE setup:\n\n## Open tabs:\n- lib.rs: src/lib.rs\n\n## My request for Xdcode:\n{reply}"
         );
-        let item = AppServerThreadItem::UserMessage {
+        let item = AppServerThreadItemPayload::UserMessage {
             id: "answer".into(),
             client_id: None,
             content: vec![UserInput::Text {
@@ -991,12 +1015,13 @@ async fn desktop_async_answer_dismisses_only_its_question_and_preserves_the_othe
         };
         drain_insert_history(&mut rx);
         chat.handle_server_notification(
-            ServerNotification::ItemCompleted(ItemCompletedNotification {
-                thread_id: "thread".into(),
-                turn_id: "turn".into(),
-                completed_at_ms: 0,
-                item: item.clone(),
-            }),
+            ServerNotification::ItemCompleted(ItemCompletedNotification::new(
+                "thread".into(),
+                "turn".into(),
+                item.clone(),
+                /*started_at_ms*/ None,
+                /*completed_at_ms*/ 0,
+            )),
             replay_kind,
         );
         assert_eq!(question_count(&chat), 1);
@@ -1044,7 +1069,8 @@ async fn desktop_async_answer_dismisses_only_its_question_and_preserves_the_othe
 async fn async_question_markdown_matches_loaded_history() {
     let (mut chat, mut rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
     let title = "Keep `--verbose` for **failed** runs?";
-    let item = AppServerThreadItem::AgentMessage {
+    let item = AppServerThreadItemPayload::AgentMessage {
+        moderation: None,
         id: "ask".into(),
         text: format!("{title}\n- Only for **CI**\n\nSee the [guide](https://example.test/guide)?"),
         phase: None,
@@ -1148,4 +1174,21 @@ async fn retried_question_answers_keep_separate_envelopes_and_order() {
         }
         assert_eq!(retried, original);
     }
+}
+
+#[tokio::test]
+async fn archived_view_collapses_questions_and_retains_answers() {
+    let (mut chat, _events, mut ops) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.add_async_questions("message", &questions());
+    chat.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT));
+    chat.bottom_pane.handle_paste("kept answer".into());
+    assert!(!chat.no_modal_or_popup_active());
+    chat.show_read_only_thread(ReadOnlyThread::Archived);
+    assert!(chat.no_modal_or_popup_active());
+    let questions = chat.bottom_pane.questions.as_mut().unwrap();
+    assert!(!questions.delivery_enabled);
+    questions.set_expanded(/*expanded*/ true);
+    chat.read_only_thread = None;
+    assert!(render_bottom_popup(&chat, /*width*/ 100).contains("kept answer"));
+    assert_no_submit_op(&mut ops);
 }

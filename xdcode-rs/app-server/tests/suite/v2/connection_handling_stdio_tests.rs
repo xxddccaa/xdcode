@@ -2,7 +2,7 @@
 
 use anyhow::Context;
 use anyhow::Result;
-use app_test_support::DISABLE_PLUGIN_STARTUP_TASKS_ARG;
+use app_test_support::DEFAULT_APP_SERVER_TEST_ARGS;
 use app_test_support::MockResponsesConfig;
 use app_test_support::TestAppServer;
 use base64::Engine;
@@ -60,7 +60,7 @@ async fn stdio_sigterm_times_out_with_blocked_stderr() -> Result<()> {
     let xdcode_home = TempDir::new()?;
     MockResponsesConfig::new("http://127.0.0.1:9").write(xdcode_home.path())?;
     let mut process = tokio::process::Command::new(cargo_bin("xdcode-app-server")?)
-        .arg(DISABLE_PLUGIN_STARTUP_TASKS_ARG)
+        .args(DEFAULT_APP_SERVER_TEST_ARGS)
         .env("XDCODE_HOME", xdcode_home.path())
         .env(
             "XDCODE_APP_SERVER_MANAGED_CONFIG_PATH",

@@ -5,44 +5,120 @@ use pretty_assertions::assert_eq;
 use std::sync::Arc;
 use tokio::io::AsyncBufReadExt;
 
+#[path = "../../../message-board/tests/common/mod.rs"]
+mod board_host;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BoardMode {
+    Config,
+    Plugin,
+    InMemory,
+    Feature,
+}
+
+#[test_case::test_case(BoardMode::Config; "config")]
+#[test_case::test_case(BoardMode::Plugin; "plugin")]
+#[test_case::test_case(BoardMode::InMemory; "in_memory")]
+#[test_case::test_case(BoardMode::Feature; "feature")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn http_board_is_shared_with_children() -> anyhow::Result<()> {
+async fn http_board_is_shared_with_children(mode: BoardMode) -> anyhow::Result<()> {
+    let plugin = matches!(mode, BoardMode::Plugin | BoardMode::InMemory);
+    let in_memory = matches!(mode, BoardMode::InMemory | BoardMode::Feature);
     let server = responses::start_mock_server().await;
     let home = Arc::new(tempfile::tempdir()?);
     let sqlite = xdcode_state::SqliteConfig::new_for_testing(home.path().to_path_buf().try_into()?);
-    let _state = xdcode_state::StateRuntime::init(sqlite.clone(), "openai".into()).await?;
-    let command = xdcode_utils_cargo_bin::cargo_bin("xdcode-message-board-mcp")?;
-    let mut process =
-        tokio::process::Command::from(xdcode_utils_process::background_command(command))
-            .arg("--sqlite-home")
-            .arg(sqlite.home())
-            .args(["--listen", "127.0.0.1:0", "--allowed-host", "board.example"])
-            .env("XDCODE_MESSAGE_BOARD_TOKEN", "http-board-test-token")
-            .stdout(std::process::Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()?;
-    let ready = tokio::io::BufReader::new(process.stdout.take().context("server stdout")?)
-        .lines()
-        .next_line()
-        .await?
-        .context("server readiness")?;
-    let ready: Value = serde_json::from_str(&ready)?;
-    let endpoint = json!({"url":ready["url"],"http_headers":{"Authorization":"Bearer http-board-test-token","Host":"board.example"},"required":true,"default_tools_approval_mode":"approve"});
+    let mut process = None;
+    let mut local = None;
+    let (url, authorization) = if mode == BoardMode::Feature {
+        (String::new(), String::new())
+    } else if in_memory {
+        let launched = xdcode_message_board_mcp::launch_in_memory().await?;
+        let connection = (
+            launched.url().to_owned(),
+            launched.authorization().to_str()?.to_owned(),
+        );
+        local = Some(launched);
+        connection
+    } else {
+        let _state = xdcode_state::StateRuntime::init(sqlite.clone(), "provider".into()).await?;
+        let command = xdcode_utils_cargo_bin::cargo_bin("xdcode-message-board-mcp")?;
+        let mut child =
+            tokio::process::Command::from(xdcode_utils_process::background_command(command))
+                .arg("--sqlite-home")
+                .arg(sqlite.home())
+                .args(["--listen", "127.0.0.1:0", "--allowed-host", "board.example"])
+                .env("XDCODE_MESSAGE_BOARD_TOKEN", "http-board-test-token")
+                .stdout(std::process::Stdio::piped())
+                .kill_on_drop(true)
+                .spawn()?;
+        let ready = tokio::io::BufReader::new(child.stdout.take().context("server stdout")?)
+            .lines()
+            .next_line()
+            .await?
+            .context("server readiness")?;
+        let ready: Value = serde_json::from_str(&ready)?;
+        process = Some(child);
+        (
+            ready["url"].as_str().context("server URL")?.to_owned(),
+            "Bearer http-board-test-token".to_owned(),
+        )
+    };
+    let host = if in_memory {
+        "127.0.0.1"
+    } else {
+        "board.example"
+    };
+    let endpoint = json!({"url":url,"http_headers":{"Authorization":authorization,"Host":host},"required":true,"default_tools_approval_mode":"approve"});
+    if plugin {
+        let manifest = xdcode_utils_cargo_bin::find_resource!(
+            "../message-board-mcp/plugin/.xdcode-plugin/plugin.json"
+        )?;
+        let declaration_path =
+            xdcode_utils_cargo_bin::find_resource!("../message-board-mcp/plugin/.mcp.json")?;
+        let installed = home.path().join("plugins/cache/test/message-board/local");
+        std::fs::create_dir_all(installed.join(".xdcode-plugin"))?;
+        std::fs::copy(manifest, installed.join(".xdcode-plugin/plugin.json"))?;
+        let mut declaration: Value = serde_json::from_slice(&std::fs::read(declaration_path)?)?;
+        if !in_memory {
+            declaration["mcpServers"]["xdcode_message_board"] = endpoint.clone();
+        }
+        std::fs::write(
+            installed.join(".mcp.json"),
+            serde_json::to_vec(&declaration)?,
+        )?;
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[features]\nplugins = true\n[plugins.\"message-board@test\"]\nenabled = true\n",
+        )?;
+    }
+    if mode == BoardMode::Feature {
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[features]\nagent_message_board_mcp = true\n",
+        )?;
+    }
     let configured_endpoint = endpoint.clone();
     let configured_sqlite = sqlite.clone();
     let configure_board = move |config: &mut xdcode_core::config::Config| {
         configure(config);
         config.sqlite = configured_sqlite.clone();
+        config.ephemeral = in_memory;
+        if mode == BoardMode::Feature {
+            return; // The feature supplies the endpoint and suppresses the native board.
+        }
         config
             .features
             .disable(Feature::AgentMessageBoard)
             .expect("disable native board");
-        let mut servers = config.mcp_servers.get().clone();
-        servers.insert(
-            "xdcode_message_board".into(),
-            serde_json::from_value(configured_endpoint.clone()).expect("HTTP config"),
-        );
-        config.mcp_servers.set(servers).expect("configure endpoint");
+        if !plugin || in_memory {
+            // The runner endpoint overrides the packaged plugin endpoint.
+            let mut servers = config.mcp_servers.get().clone();
+            servers.insert(
+                "xdcode_message_board".into(),
+                serde_json::from_value(configured_endpoint.clone()).expect("HTTP config"),
+            );
+            config.mcp_servers.set(servers).expect("configure endpoint");
+        }
     };
     let mut builder = test_xdcode()
         .with_home(home)
@@ -88,7 +164,8 @@ async fn http_board_is_shared_with_children() -> anyhow::Result<()> {
             ]
             .into(),
             clock: Default::default(),
-            fail_clock: Default::default(),
+            // MCP timestamps must not depend on the runner's clock.
+            fail_clock: true.into(),
             agent_path_calls: Default::default(),
             active: Default::default(),
             fail_notifications: Default::default(),
@@ -132,6 +209,7 @@ async fn http_board_is_shared_with_children() -> anyhow::Result<()> {
     let posted =
         responses::mount_sse_sequence(&server, board_turn("worker-post", "post", post_arguments))
             .await;
+    let before_post = chrono::Utc::now().timestamp_millis();
     child
         .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
             text: "Find the board tools and post your decision.".into(),
@@ -144,13 +222,16 @@ async fn http_board_is_shared_with_children() -> anyhow::Result<()> {
         "worker-post",
     )?;
     assert_eq!(post["author"], "/root/worker");
-    if mode == BoardMode::InMemory {
-        assert_eq!(post["created_at"], "2026-09-18T12:00:00Z");
-    }
+    let created_at = chrono::DateTime::parse_from_rfc3339(
+        post["created_at"].as_str().context("post timestamp")?,
+    )?
+    .timestamp_millis();
+    assert!((before_post..=chrono::Utc::now().timestamp_millis()).contains(&created_at));
     if mode != BoardMode::Feature {
         child.shutdown_and_wait().await?;
     }
 
+    // Persistent boards survive a parent restart; the in-memory runner owns its lifetime.
     let resumed = if in_memory {
         root
     } else {
@@ -159,6 +240,7 @@ async fn http_board_is_shared_with_children() -> anyhow::Result<()> {
             .restart_with_auto_env(&server, &root)
             .await?
     };
+    // A read must not initialize the schema or acquire the database writer lock.
     let writer = if in_memory {
         None
     } else {
@@ -182,8 +264,37 @@ async fn http_board_is_shared_with_children() -> anyhow::Result<()> {
     if let Some(writer) = writer {
         writer.rollback().await?;
     }
+    let preview = xdcode_message_board::PostPreview {
+        metadata: serde_json::from_value(post.clone())?,
+        text_preview: "Worker's durable decision.".into(),
+        n_chars: "Worker's durable decision.".chars().count(),
+        truncated: false,
+    };
     if mode == BoardMode::Feature {
-        assert!(read.requests()[1].body_contains_text("Message Type: CHANNEL_POST"));
+        let notices = read.requests()[1]
+            .inputs_of_type("agent_message")
+            .into_iter()
+            .filter(|item| {
+                item["content"]
+                    .to_string()
+                    .contains("Message Type: CHANNEL_POST")
+            })
+            .map(|item| {
+                json!({
+                    "author": item["author"],
+                    "recipient": item["recipient"],
+                    "content": item["content"],
+                })
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            notices,
+            vec![json!({
+                "author": "/root/worker",
+                "recipient": "/root",
+                "content": [{"type":"input_text", "text":preview.notification_text()}],
+            })]
+        );
     }
     let result = board_result(
         read.requests().last().context("parent follow-up")?,
@@ -194,12 +305,7 @@ async fn http_board_is_shared_with_children() -> anyhow::Result<()> {
             result
         )?,
         xdcode_message_board::Page {
-            results: vec![xdcode_message_board::PostPreview {
-                metadata: serde_json::from_value(post.clone())?,
-                text_preview: "Worker's durable decision.".into(),
-                n_chars: "Worker's durable decision.".chars().count(),
-                truncated: false,
-            }],
+            results: vec![preview],
             next_cursor: None,
         }
     );
@@ -212,50 +318,172 @@ async fn http_board_is_shared_with_children() -> anyhow::Result<()> {
         );
         assert!(request.tool_by_name("collaboration", "post").is_none());
     }
-    let timestamp = post["created_at"].as_str().context("post timestamp")?;
-    let mut bodies = posted
-        .requests()
-        .iter()
-        .chain(read.requests().iter())
-        .map(ResponsesRequest::body_json)
-        .collect::<Vec<_>>();
-    for body in &mut bodies {
-        for item in body["input"].as_array_mut().context("request input")? {
-            if item["type"] == "function_call_output"
-                && let Some(output) = item["output"].as_str()
-            {
-                item["output"] = Value::String(
-                    context_snapshot::normalize_json_lines(output)
-                        .replace(timestamp, "<TIMESTAMP>"),
-                );
+    if mode != BoardMode::InMemory {
+        let timestamp = post["created_at"].as_str().context("post timestamp")?;
+        let mut bodies = posted
+            .requests()
+            .iter()
+            .chain(read.requests().iter())
+            .map(ResponsesRequest::body_json)
+            .collect::<Vec<_>>();
+        for body in &mut bodies {
+            for item in body["input"].as_array_mut().context("request input")? {
+                if item["type"] == "function_call_output"
+                    && let Some(output) = item["output"].as_str()
+                {
+                    item["output"] = Value::String(
+                        context_snapshot::normalize_json_lines(output)
+                            .replace(timestamp, "<TIMESTAMP>"),
+                    );
+                }
             }
         }
+        insta::assert_snapshot!(
+            if mode == BoardMode::Feature {
+                "agent_message_board_mcp_feature_context"
+            } else if plugin {
+                "agent_message_board_plugin_context"
+            } else {
+                "agent_message_board_mcp_context"
+            },
+            context_snapshot::format_context_snapshot(
+                if mode == BoardMode::Feature {
+                    "The config flag starts an in-memory MCP board shared by a parent and child."
+                } else {
+                    "A child posts through the HTTP MCP executable; its restarted parent discovers the same board and reads the decision."
+                },
+                &bodies.iter().map(SnapshotEntry::body).collect::<Vec<_>>(),
+                &ContextSnapshotOptions::default().rewrite_known_segments(),
+            )
+        );
     }
-    insta::assert_snapshot!(
-        "agent_message_board_mcp_context",
-        context_snapshot::format_context_snapshot(
-            "A child posts through the HTTP MCP executable; its restarted parent discovers the same board and reads the decision.",
-            &bodies.iter().map(SnapshotEntry::body).collect::<Vec<_>>(),
-            &ContextSnapshotOptions::default().rewrite_known_segments(),
-        )
-    );
+    if mode == BoardMode::Feature {
+        // The child must keep the shared board usable after its original host unloads.
+        resumed.xdcode.shutdown_and_wait().await?;
+        assert!(
+            resumed
+                .thread_manager
+                .remove_thread(&root_id)
+                .await
+                .is_some()
+        );
+        for (name, enabled) in [("subscribe", true), ("unsubscribe", false)] {
+            let subscribed = responses::mount_sse_sequence(
+                &server,
+                board_turn(name, name, json!({"channel_name":"design"})),
+            )
+            .await;
+            child
+                .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+                    text: format!("{name} to the design channel."),
+                    text_elements: vec![],
+                }]))
+                .await?;
+            wait_for_event(&child, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+            assert_eq!(
+                board_result(
+                    subscribed
+                        .requests()
+                        .last()
+                        .context("subscription result")?,
+                    name
+                )?,
+                json!({
+                    "channel_name":"design", "thread_id":null,
+                    "target_agent":"/root/worker", "enabled":enabled,
+                    "last_message_id":post["message_id"],
+                }),
+            );
+        }
+        // Offer two mutations together and observe the real MCP execution intervals.
+        // Native board writes are exclusive even though reads may run concurrently.
+        let arguments = json!({
+            "channel_name":"design", "text":"The child still owns its host.",
+            "agents_to_notify":["/root/worker"],
+        });
+        let mut mutation_turn = board_turn("survivor-a", "post", arguments.clone());
+        mutation_turn[1] = sse(vec![
+            ev_function_call_with_namespace(
+                "survivor-a",
+                "mcp__xdcode_message_board",
+                "post",
+                &arguments.to_string(),
+            ),
+            ev_function_call_with_namespace(
+                "survivor-b",
+                "mcp__xdcode_message_board",
+                "post",
+                &arguments.to_string(),
+            ),
+            ev_completed("survivor-posts"),
+        ]);
+        let mutations = responses::mount_sse_sequence(&server, mutation_turn).await;
+        child
+            .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+                text: "Post twice, notifying yourself.".into(),
+                text_elements: vec![],
+            }]))
+            .await?;
+        let mut active_call = None;
+        let mut completed_calls = 0;
+        wait_for_event(&child, |event| {
+            match event {
+                EventMsg::McpToolCallBegin(begin) => {
+                    assert_eq!(
+                        active_call.replace(begin.call_id.clone()),
+                        None,
+                        "board mutations overlapped"
+                    );
+                }
+                EventMsg::McpToolCallEnd(end) => {
+                    assert_eq!(active_call.take(), Some(end.call_id.clone()));
+                    completed_calls += 1;
+                }
+                _ => {}
+            }
+            matches!(event, EventMsg::TurnComplete(_))
+        })
+        .await;
+        assert_eq!(completed_calls, 2);
+        for id in ["survivor-a", "survivor-b"] {
+            let result = board_result(
+                mutations
+                    .requests()
+                    .last()
+                    .context("surviving child follow-up")?,
+                id,
+            )?;
+            assert_eq!(result["author"], "/root/worker");
+        }
+        child.shutdown_and_wait().await?;
+        assert!(!sqlite.home().join("agent_message_board_1.sqlite").exists());
+        return Ok(());
+    }
+    // The endpoint runs on the app host, including when the executor is remote.
+    // Exercise authentication and membership through a host-local HTTP client.
     use xdcode_rmcp_client::RmcpClient;
     let url = endpoint["url"].as_str().context("endpoint URL")?;
+    let valid_token = endpoint["http_headers"]["Authorization"]
+        .as_str()
+        .context("authorization")?
+        .strip_prefix("Bearer ")
+        .context("bearer token")?;
+    let mut connected_client = None;
     for (token, host) in [
-        ("wrong-token", "board.example"),
-        ("http-board-test-token", "unlisted.example"),
-        ("http-board-test-token", "127.0.0.1"),
+        ("wrong-token", host),
+        (valid_token, "unlisted.example"),
+        (valid_token, "127.0.0.1"),
     ] {
         let client = RmcpClient::new_streamable_http_client(
             "board-auth-test",
             url,
             Some(token.to_owned()),
             Some([("Host".into(), host.into())].into()),
-            None,
+            /*env_http_headers*/ None,
             xdcode_config::types::OAuthCredentialsStoreMode::File,
             Default::default(),
             xdcode_exec_server::Environment::default_for_tests().get_http_client(),
-            None,
+            /*auth_provider*/ None,
         )
         .await?;
         let initialized = client
@@ -278,9 +506,9 @@ async fn http_board_is_shared_with_children() -> anyhow::Result<()> {
             let error = client
                 .call_tool(
                     "get_channels".into(),
-                    None,
+                    /*arguments*/ None,
                     |_| Ok(metadata.clone()),
-                    None,
+                    /*timeout*/ None,
                 )
                 .await
                 .expect_err("invalid identity must fail");
@@ -301,6 +529,8 @@ async fn http_board_is_shared_with_children() -> anyhow::Result<()> {
                 .join("agent_message_board_1.sqlite")
                 .exists()
         );
+        // The legacy client remains connected: shutdown must release the board
+        // without waiting for a client DELETE or the session idle timeout.
         local.shutdown().await?;
         assert!(host_state.context("in-memory host")?.upgrade().is_none());
     }
@@ -316,9 +546,9 @@ async fn http_board_is_shared_with_children() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn http_shutdown_releases_pending_binding() -> anyhow::Result<()> {
+    use tokio_util::sync::CancellationToken;
     use xdcode_message_board::MessageBoardHost;
     use xdcode_rmcp_client::RmcpClient;
-    use tokio_util::sync::CancellationToken;
 
     let caller = xdcode_protocol::ThreadId::new();
     let host = Arc::new(board_host::Host {
@@ -353,10 +583,11 @@ async fn http_shutdown_releases_pending_binding() -> anyhow::Result<()> {
             let started = started.clone();
             let resume = resume.clone();
             async move {
+                // Pause the real board binding before it can dispatch a tool.
                 started.notify_one();
                 resume.notified().await;
                 let path = host.agent_path(caller).await.map_err(|error| {
-                    rmcp::ErrorData::invalid_params(error.to_string(), None)
+                    rmcp::ErrorData::invalid_params(error.to_string(), /*data*/ None)
                 })?;
                 Ok(xdcode_message_board_mcp::MessageBoardMcpServer::new(
                     &xdcode_message_board::MessageBoardTool::DISCUSSION,
@@ -371,19 +602,19 @@ async fn http_shutdown_releases_pending_binding() -> anyhow::Result<()> {
         "board-shutdown-test",
         &url,
         Some("shutdown-test-token".into()),
-        None,
-        None,
+        /*http_headers*/ None,
+        /*env_http_headers*/ None,
         xdcode_config::types::OAuthCredentialsStoreMode::File,
         Default::default(),
         xdcode_exec_server::Environment::default_for_tests().get_http_client(),
-        None,
+        /*auth_provider*/ None,
     )
     .await?;
     client
         .initialize(
             rmcp::model::InitializeRequestParams::default()
                 .with_protocol_version(rmcp::model::ProtocolVersion::V_2025_11_25),
-            None,
+            /*timeout*/ None,
             Box::new(|_, _| Box::pin(async { anyhow::bail!("unexpected elicitation") })),
         )
         .await?;
@@ -392,7 +623,7 @@ async fn http_shutdown_releases_pending_binding() -> anyhow::Result<()> {
             "post".into(),
             Some(json!({"new_channel_name":"design", "text":"Must not be dispatched."})),
             |_| Ok(Some(json!({"threadId":caller, "sessionId":caller}))),
-            None,
+            /*timeout*/ None,
         );
         tokio::pin!(call);
         tokio::select! {
@@ -401,6 +632,8 @@ async fn http_shutdown_releases_pending_binding() -> anyhow::Result<()> {
         }
         cancellation.cancel();
         serving.await??;
+        // Cleanup must drop the pending binding as well as the idle session's closure.
+        // Resuming it after shutdown must never dispatch the post.
         assert!(host_state.upgrade().is_none());
         resume_binding.notify_one();
     }
@@ -410,10 +643,11 @@ async fn http_shutdown_releases_pending_binding() -> anyhow::Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn http_shutdown_releases_factory_with_keep_alive_connection() -> anyhow::Result<()> {
-    use xdcode_message_board::MessageBoardHost;
     use tokio::io::AsyncWriteExt;
     use tokio_util::sync::CancellationToken;
+    use xdcode_message_board::MessageBoardHost;
 
+    // Exercise the cross-worker race between connection completion and service drop.
     for iteration in 0..256 {
         let caller = xdcode_protocol::ThreadId::new();
         let host = Arc::new(board_host::Host {
@@ -437,6 +671,8 @@ async fn http_shutdown_releases_factory_with_keep_alive_connection() -> anyhow::
         let connection = tokio::spawn(async move {
             let _shutdown = shutdown.drop_guard();
             let mut stream = tokio::net::TcpStream::connect(address).await?;
+            // An unauthenticated request retains the HTTP service without ever
+            // creating an MCP handler. HTTP/1.1 keeps this connection alive.
             stream
                 .write_all(b"GET /mcp HTTP/1.1\r\nHost: localhost\r\n\r\n")
                 .await?;
@@ -451,6 +687,7 @@ async fn http_shutdown_releases_factory_with_keep_alive_connection() -> anyhow::
                     "incomplete response"
                 );
             }
+            // The completed task retains the open socket until shutdown returns.
             Ok::<_, anyhow::Error>(stream)
         });
         xdcode_message_board_mcp::serve_http(
@@ -463,7 +700,7 @@ async fn http_shutdown_releases_factory_with_keep_alive_connection() -> anyhow::
                 let board = board.clone();
                 async move {
                     let path = host.agent_path(caller).await.map_err(|error| {
-                        rmcp::ErrorData::invalid_params(error.to_string(), None)
+                        rmcp::ErrorData::invalid_params(error.to_string(), /*data*/ None)
                     })?;
                     Ok(xdcode_message_board_mcp::MessageBoardMcpServer::new(
                         &xdcode_message_board::MessageBoardTool::DISCUSSION,

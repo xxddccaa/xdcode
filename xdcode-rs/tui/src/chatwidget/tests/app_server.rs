@@ -2,6 +2,7 @@ use super::helpers::drain_insert_history_transcript;
 use super::*;
 use pretty_assertions::assert_eq;
 use xdcode_app_server_protocol::AuthRecoveryNotification;
+use xdcode_app_server_protocol::ThreadItem;
 use xdcode_protocol::error::XdcodeErr;
 use xdcode_protocol::error::XdcodeErrorDetails;
 
@@ -16,7 +17,8 @@ fn thread_settings_for_test(
         thread_settings: xdcode_app_server_protocol::ThreadSettings {
             catalog_id: None,
             disabled_plugin_ids: Vec::new(),
-            cwd: test_path_buf("/tmp/thread-settings").abs(),
+            environments: None,
+            cwd: test_path_buf("/tmp/thread-settings").abs().into(),
             approval_policy: AskForApproval::OnRequest,
             approvals_reviewer: xdcode_app_server_protocol::ApprovalsReviewer::AutoReview,
             sandbox_policy: xdcode_app_server_protocol::SandboxPolicy::ReadOnly {
@@ -44,9 +46,14 @@ fn thread_settings_for_test(
     }
 }
 
-fn configured_thread_session(thread_id: ThreadId) -> crate::session_state::ThreadSessionState {
+pub(super) fn configured_thread_session(
+    thread_id: ThreadId,
+) -> crate::session_state::ThreadSessionState {
     crate::session_state::ThreadSessionState {
         catalog_id: None,
+        read_only_history: false,
+        thread_settings_confirmed: true,
+        primary_environment_cwd: None,
         daybreak_enabled: false,
         windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
         thread_id,
@@ -60,8 +67,8 @@ fn configured_thread_session(thread_id: ThreadId) -> crate::session_state::Threa
         approvals_reviewer: ApprovalsReviewer::User,
         permission_profile: PermissionProfile::read_only(),
         active_permission_profile: None,
-        cwd: test_path_buf("/tmp/thread-settings").abs(),
-        runtime_workspace_roots: vec![test_path_buf("/tmp/thread-settings").abs()],
+        cwd: test_path_buf("/tmp/thread-settings").abs().into(),
+        runtime_workspace_roots: vec![test_path_buf("/tmp/thread-settings").abs().into()],
         instruction_source_paths: Vec::new(),
         reasoning_effort: None,
         collaboration_mode: None,
@@ -127,10 +134,26 @@ async fn session_and_settings_sync_server_provider_id() {
     let first_id = ThreadId::new();
     let mut first = configured_thread_session(first_id);
     first.model_provider_id = "server-ollama".to_string();
+    chat.status_account_display = Some(StatusAccountDisplay::ChatGpt {
+        email: None,
+        plan: None,
+        workspace: Some("account-123".to_string()),
+    });
+    let mut provider = chat.config.model_provider.clone();
+    provider.env_key = Some("CUSTOM_API_KEY".to_string());
+    provider.capabilities = Some(xdcode_model_provider_info::ModelProviderCapabilities {
+        cyber_access_programs: Some(true),
+        ..Default::default()
+    });
+    chat.config
+        .model_providers
+        .insert(first.model_provider_id.clone(), provider);
     chat.handle_thread_session(first.clone());
+    assert!(chat.daybreak_account_eligible());
     let displayed = status(&mut chat);
     assert!(displayed.contains("Model provider:") && displayed.contains("server-ollama"));
     assert!(!displayed.contains("local-provider.example"));
+    assert!(!displayed.contains("ChatGPT workspace:"));
     assert_eq!(
         status_line_text(&chat).as_deref(),
         Some("provider: server-ollama")
@@ -139,6 +162,7 @@ async fn session_and_settings_sync_server_provider_id() {
     let mut other = configured_thread_session(ThreadId::new());
     other.model_provider_id = "server-bedrock".to_string();
     chat.handle_thread_session_quiet(other);
+    assert!(!chat.daybreak_account_eligible());
     let displayed = status(&mut chat);
     assert!(displayed.contains("server-bedrock"));
     assert!(!displayed.contains("server-ollama"));
@@ -547,6 +571,7 @@ async fn tool_suggestion_install_url_is_validated_before_opening() {
         chat.handle_elicitation_request_now(
             xdcode_app_server_protocol::RequestId::Integer(9),
             xdcode_app_server_protocol::McpServerElicitationRequestParams {
+                environment_id: None,
                 thread_id: request_thread_id.to_string(),
                 turn_id: Some("turn-install".to_string()),
                 server_name: "connector-server".to_string(),
@@ -611,6 +636,7 @@ async fn invalid_url_elicitation_is_declined() {
     chat.handle_elicitation_request_now(
         xdcode_app_server_protocol::RequestId::Integer(9),
         xdcode_app_server_protocol::McpServerElicitationRequestParams {
+            environment_id: Some("env-a".to_string()),
             thread_id: request_thread_id.to_string(),
             turn_id: Some("turn-auth".to_string()),
             server_name: "payments".to_string(),
@@ -639,6 +665,74 @@ async fn invalid_url_elicitation_is_declined() {
 }
 
 #[tokio::test]
+async fn statusline_workspace_follows_primary_executor_and_legacy_settings() {
+    let (mut chat, _events, _ops) = make_chatwidget_manual(Some("gpt-5.2")).await;
+    let id = ThreadId::new();
+    chat.handle_thread_session(configured_thread_session(id));
+    let mut update = thread_settings_for_test("gpt-5.2", id);
+    let host = update.thread_settings.cwd.to_string();
+    let remote = r"C:\executor\checkout";
+    let primary = xdcode_app_server_protocol::ThreadEnvironment {
+        environment_id: "remote".into(),
+        cwd: xdcode_utils_path_uri::LegacyAppPathString::from_string(remote),
+        runtime_workspace_roots: Vec::new(),
+    };
+    for (environments, expected) in [
+        (Some(vec![primary]), remote),
+        (None, remote),
+        (Some(vec![]), host.as_str()),
+    ] {
+        update.thread_settings.environments = environments;
+        chat.handle_server_notification(
+            ServerNotification::ThreadSettingsUpdated(update.clone()),
+            /*replay_kind*/ None,
+        );
+        let state = serde_json::to_value(chat.statusline_state()).unwrap();
+        assert_eq!(state["thread"]["workspace"]["cwd"], expected);
+    }
+}
+
+#[tokio::test]
+async fn statusline_and_title_abbreviate_only_the_local_workspace() {
+    let (mut chat, _events, _ops) = make_chatwidget_manual(Some("gpt-5.2")).await;
+    let id = ThreadId::new();
+    chat.handle_thread_session(configured_thread_session(id));
+    let mut update = thread_settings_for_test("gpt-5.2", id);
+    let path = dirs::home_dir()
+        .unwrap()
+        .join("a-checkout-with-a-long-directory-name");
+    let raw = path.display().to_string();
+    let local = format_directory_display(&path, /*max_width*/ None);
+    for (environment_id, expected) in [
+        ("remote", raw.as_str()),
+        (xdcode_exec_server::LOCAL_ENVIRONMENT_ID, local.as_str()),
+    ] {
+        update.thread_settings.environments =
+            Some(vec![xdcode_app_server_protocol::ThreadEnvironment {
+                environment_id: environment_id.into(),
+                cwd: xdcode_utils_path_uri::LegacyAppPathString::from_path(&path),
+                runtime_workspace_roots: Vec::new(),
+            }]);
+        chat.handle_server_notification(
+            ServerNotification::ThreadSettingsUpdated(update.clone()),
+            /*replay_kind*/ None,
+        );
+        assert_eq!(
+            chat.status_line_value_for_item(StatusLineItem::CurrentDir)
+                .as_deref(),
+            Some(expected)
+        );
+        assert_eq!(
+            chat.terminal_title_value_for_item(TerminalTitleItem::CurrentDir, Instant::now()),
+            Some(ChatWidget::truncate_terminal_title_part(
+                expected.into(),
+                /*max_chars*/ 32
+            ))
+        );
+    }
+}
+
+#[tokio::test]
 async fn thread_settings_updated_updates_visible_state_without_transcript() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.2")).await;
     set_chatgpt_auth(&mut chat);
@@ -646,7 +740,9 @@ async fn thread_settings_updated_updates_visible_state_without_transcript() {
     chat.set_feature_enabled(Feature::Apps, /*enabled*/ true);
     let thread_id = ThreadId::new();
     let mut session = configured_thread_session(thread_id);
-    session.cwd = test_path_buf("/tmp/original-workspace").abs();
+    session.cwd = test_path_buf("/tmp/original-workspace").abs().into();
+    session.runtime_workspace_roots = vec![session.cwd.clone()];
+    session.thread_settings_confirmed = false;
     chat.handle_thread_session(session);
     chat.config.permissions.approval_policy =
         Constrained::allow_only(AskForApproval::Never.to_core());
@@ -658,15 +754,32 @@ async fn thread_settings_updated_updates_visible_state_without_transcript() {
     });
     let _ = drain_insert_history(&mut rx);
 
+    let remote_cwd = if cfg!(windows) {
+        "/home/alice/repo"
+    } else {
+        r"D:\repo"
+    };
+    let mut notification = thread_settings_for_test("gpt-5.4", thread_id);
+    notification.thread_settings.cwd =
+        xdcode_utils_path_uri::LegacyAppPathString::from_string(remote_cwd);
     chat.handle_server_notification(
-        ServerNotification::ThreadSettingsUpdated(thread_settings_for_test("gpt-5.4", thread_id)),
+        ServerNotification::ThreadSettingsUpdated(notification),
         /*replay_kind*/ None,
     );
 
+    assert_eq!(chat.session_cwd().inferred_native_path_string(), remote_cwd);
+    assert_eq!(
+        chat.current_workspace_roots.as_slice(),
+        std::slice::from_ref(chat.session_cwd())
+    );
+    assert!(chat.config_ref().workspace_roots.is_empty());
     assert_ne!(chat.connector_scope_generation(), previous_generation);
     assert!(chat.connectors_for_mentions().is_none());
     assert!(chat.connectors.mention_refresh_in_flight);
     assert_eq!(chat.current_model(), "gpt-5.4");
+    let state = serde_json::to_value(chat.statusline_state()).unwrap();
+    assert_eq!(state["thread"]["approval"]["policy"], "on-request");
+    assert_eq!(state["thread"]["model"]["service_tier"], "fast");
     assert_eq!(
         chat.current_reasoning_effort(),
         Some(ReasoningEffortConfig::High)
@@ -756,11 +869,10 @@ async fn collab_spawn_end_shows_requested_model_and_effort() {
     );
 
     chat.handle_server_notification(
-        ServerNotification::ItemStarted(ItemStartedNotification {
-            thread_id: "thread-1".to_string(),
-            turn_id: "turn-1".to_string(),
-            started_at_ms: 0,
-            item: AppServerThreadItem::CollabAgentToolCall {
+        ServerNotification::ItemStarted(ItemStartedNotification::new(
+            "thread-1".to_string(),
+            "turn-1".to_string(),
+            AppServerThreadItemPayload::CollabAgentToolCall {
                 id: "call-spawn".to_string(),
                 tool: AppServerCollabAgentTool::SpawnAgent,
                 status: AppServerCollabAgentToolCallStatus::InProgress,
@@ -771,15 +883,15 @@ async fn collab_spawn_end_shows_requested_model_and_effort() {
                 reasoning_effort: Some(ReasoningEffortConfig::High),
                 agents_states: HashMap::new(),
             },
-        }),
+            /*started_at_ms*/ 0,
+        )),
         /*replay_kind*/ None,
     );
     chat.handle_server_notification(
-        ServerNotification::ItemCompleted(ItemCompletedNotification {
-            thread_id: "thread-1".to_string(),
-            turn_id: "turn-1".to_string(),
-            completed_at_ms: 0,
-            item: AppServerThreadItem::CollabAgentToolCall {
+        ServerNotification::ItemCompleted(ItemCompletedNotification::new(
+            "thread-1".to_string(),
+            "turn-1".to_string(),
+            AppServerThreadItemPayload::CollabAgentToolCall {
                 id: "call-spawn".to_string(),
                 tool: AppServerCollabAgentTool::SpawnAgent,
                 status: AppServerCollabAgentToolCallStatus::Completed,
@@ -796,7 +908,9 @@ async fn collab_spawn_end_shows_requested_model_and_effort() {
                     },
                 )]),
             },
-        }),
+            /*started_at_ms*/ None,
+            /*completed_at_ms*/ 0,
+        )),
         /*replay_kind*/ None,
     );
 
@@ -832,11 +946,10 @@ async fn live_app_server_user_message_item_completed_does_not_duplicate_rendered
     assert!(lines_to_single_string(&inserted[0]).contains("Hi, are you there?"));
 
     chat.handle_server_notification(
-        ServerNotification::ItemCompleted(ItemCompletedNotification {
-            thread_id: "thread-1".to_string(),
-            turn_id: "turn-1".to_string(),
-            completed_at_ms: 0,
-            item: AppServerThreadItem::UserMessage {
+        ServerNotification::ItemCompleted(ItemCompletedNotification::new(
+            "thread-1".to_string(),
+            "turn-1".to_string(),
+            AppServerThreadItemPayload::UserMessage {
                 id: "user-1".to_string(),
                 client_id: None,
                 content: vec![AppServerUserInput::Text {
@@ -844,7 +957,9 @@ async fn live_app_server_user_message_item_completed_does_not_duplicate_rendered
                     text_elements: Vec::new(),
                 }],
             },
-        }),
+            /*started_at_ms*/ None,
+            /*completed_at_ms*/ 0,
+        )),
         /*replay_kind*/ None,
     );
 
@@ -856,11 +971,10 @@ async fn live_app_server_user_message_omits_unsupported_media() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
 
     chat.handle_server_notification(
-        ServerNotification::ItemCompleted(ItemCompletedNotification {
-            thread_id: "thread-1".to_string(),
-            turn_id: "turn-1".to_string(),
-            completed_at_ms: 0,
-            item: AppServerThreadItem::UserMessage {
+        ServerNotification::ItemCompleted(ItemCompletedNotification::new(
+            "thread-1".to_string(),
+            "turn-1".to_string(),
+            AppServerThreadItemPayload::UserMessage {
                 id: "user-1".to_string(),
                 client_id: None,
                 content: vec![
@@ -869,14 +983,18 @@ async fn live_app_server_user_message_omits_unsupported_media() {
                         text_elements: Vec::new(),
                     },
                     AppServerUserInput::Audio {
-                        url: "https://example.com/one.wav".to_string(),
+                        audio: xdcode_app_server_protocol::AudioReference::Inline {
+                            url: "https://example.com/one.wav".to_string(),
+                        },
                     },
                     AppServerUserInput::LocalAudio {
                         path: test_path_buf("/tmp/two.wav"),
                     },
                 ],
             },
-        }),
+            /*started_at_ms*/ None,
+            /*completed_at_ms*/ 0,
+        )),
         /*replay_kind*/ None,
     );
 
@@ -917,7 +1035,8 @@ async fn live_app_server_turn_completed_clears_working_status_after_answer_item(
         .expect("status indicator should be visible");
     assert_eq!(status.header(), "Working");
 
-    let item = AppServerThreadItem::AgentMessage {
+    let item = AppServerThreadItemPayload::AgentMessage {
+        moderation: None,
         id: "msg-1".to_string(),
         text: "Yes. What do you need?".to_string(),
         phase: Some(MessagePhase::FinalAnswer),
@@ -926,12 +1045,13 @@ async fn live_app_server_turn_completed_clears_working_status_after_answer_item(
         questions: None,
     };
     chat.handle_server_notification(
-        ServerNotification::ItemCompleted(ItemCompletedNotification {
-            thread_id: "thread-1".to_string(),
-            turn_id: "turn-1".to_string(),
-            completed_at_ms: 0,
-            item: item.clone(),
-        }),
+        ServerNotification::ItemCompleted(ItemCompletedNotification::new(
+            "thread-1".to_string(),
+            "turn-1".to_string(),
+            item.clone(),
+            /*started_at_ms*/ None,
+            /*completed_at_ms*/ 0,
+        )),
         /*replay_kind*/ None,
     );
 
@@ -947,7 +1067,7 @@ async fn live_app_server_turn_completed_clears_working_status_after_answer_item(
                 id: "turn-1".to_string(),
                 root_turn_id: None,
                 items_view: xdcode_app_server_protocol::TurnItemsView::Summary,
-                items: vec![item],
+                items: vec![ThreadItem::untimed(item)],
                 status: AppServerTurnStatus::Completed,
                 error: None,
                 started_at: None,
@@ -1000,6 +1120,7 @@ async fn live_app_server_turn_started_sets_feedback_turn_id() {
         crate::app_event::FeedbackCategory::Bug,
         /*include_logs*/ false,
         crate::bottom_pane::FeedbackAudience::External,
+        /*can_save*/ true,
     );
     chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
@@ -1010,6 +1131,7 @@ async fn live_app_server_turn_started_sets_feedback_turn_id() {
             reason: None,
             turn_id: Some(turn_id),
             include_logs: false,
+            destination: crate::app_event::FeedbackDestination::Provider,
         }) if turn_id == "turn-1"
     );
 }
@@ -1176,7 +1298,7 @@ async fn startup_config_warning_is_not_repeated_by_thread() {
             chat.remote_connection =
                 Some(crate::status::remote_connection::RemoteConnectionStatus {
                     address: "local".into(),
-                    version: "v0.153.0".into(),
+                    version: Some("v0.153.0".into()),
                     is_local_daemon: true,
                     is_managed_daemon: managed_daemon,
                 });
@@ -1243,7 +1365,7 @@ async fn startup_config_warning_is_not_repeated_by_thread() {
 async fn live_app_server_file_change_item_started_preserves_changes() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
 
-    let item = AppServerThreadItem::FileChange {
+    let item = AppServerThreadItemPayload::FileChange {
         id: "patch-1".to_string(),
         changes: vec![FileUpdateChange {
             path: "foo.txt".to_string(),
@@ -1253,23 +1375,23 @@ async fn live_app_server_file_change_item_started_preserves_changes() {
         status: AppServerPatchApplyStatus::InProgress,
     };
     chat.handle_server_notification(
-        ServerNotification::ItemStarted(ItemStartedNotification {
-            thread_id: "thread-1".to_string(),
-            turn_id: "turn-1".to_string(),
-            started_at_ms: 0,
-            item: item.clone(),
-        }),
+        ServerNotification::ItemStarted(ItemStartedNotification::new(
+            "thread-1".to_string(),
+            "turn-1".to_string(),
+            item.clone(),
+            /*started_at_ms*/ 0,
+        )),
         /*replay_kind*/ None,
     );
 
     let cells = drain_insert_history(&mut rx);
     assert!(!cells.is_empty(), "expected patch history to be rendered");
     let transcript = lines_to_single_string(cells.last().expect("patch cell"));
-    let AppServerThreadItem::FileChange { id, changes, .. } = item else {
+    let AppServerThreadItemPayload::FileChange { id, changes, .. } = item else {
         unreachable!()
     };
     chat.replay_thread_item(
-        AppServerThreadItem::FileChange {
+        AppServerThreadItemPayload::FileChange {
             id,
             changes,
             status: AppServerPatchApplyStatus::Completed,
@@ -1294,11 +1416,10 @@ async fn live_app_server_command_execution_strips_shell_wrapper() {
         shlex::try_join(["/bin/zsh", "-lc", script]).expect("round-trippable shell wrapper");
 
     chat.handle_server_notification(
-        ServerNotification::ItemStarted(ItemStartedNotification {
-            thread_id: "thread-1".to_string(),
-            turn_id: "turn-1".to_string(),
-            started_at_ms: 0,
-            item: AppServerThreadItem::CommandExecution {
+        ServerNotification::ItemStarted(ItemStartedNotification::new(
+            "thread-1".to_string(),
+            "turn-1".to_string(),
+            AppServerThreadItemPayload::CommandExecution {
                 model_context: None,
                 sandbox_type: None,
                 id: "cmd-1".to_string(),
@@ -1316,15 +1437,15 @@ async fn live_app_server_command_execution_strips_shell_wrapper() {
                 exit_code: None,
                 duration_ms: None,
             },
-        }),
+            /*started_at_ms*/ 0,
+        )),
         /*replay_kind*/ None,
     );
     chat.handle_server_notification(
-        ServerNotification::ItemCompleted(ItemCompletedNotification {
-            thread_id: "thread-1".to_string(),
-            turn_id: "turn-1".to_string(),
-            completed_at_ms: 0,
-            item: AppServerThreadItem::CommandExecution {
+        ServerNotification::ItemCompleted(ItemCompletedNotification::new(
+            "thread-1".to_string(),
+            "turn-1".to_string(),
+            AppServerThreadItemPayload::CommandExecution {
                 model_context: None,
                 sandbox_type: None,
                 id: "cmd-1".to_string(),
@@ -1342,7 +1463,9 @@ async fn live_app_server_command_execution_strips_shell_wrapper() {
                 exit_code: Some(0),
                 duration_ms: Some(5),
             },
-        }),
+            /*started_at_ms*/ None,
+            /*completed_at_ms*/ 0,
+        )),
         /*replay_kind*/ None,
     );
 
@@ -1413,7 +1536,7 @@ async fn live_app_server_command_output_delta_transcript_snapshot() {
 #[tokio::test]
 async fn live_app_server_sub_agent_activity_renders_once() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-    let activity = AppServerThreadItem::SubAgentActivity {
+    let activity = AppServerThreadItemPayload::SubAgentActivity {
         model: None,
         reasoning_effort: None,
         id: "activity-1".to_string(),
@@ -1423,21 +1546,22 @@ async fn live_app_server_sub_agent_activity_renders_once() {
     };
 
     chat.handle_server_notification(
-        ServerNotification::ItemStarted(ItemStartedNotification {
-            thread_id: "thread-1".to_string(),
-            turn_id: "turn-1".to_string(),
-            started_at_ms: 0,
-            item: activity.clone(),
-        }),
+        ServerNotification::ItemStarted(ItemStartedNotification::new(
+            "thread-1".to_string(),
+            "turn-1".to_string(),
+            activity.clone(),
+            /*started_at_ms*/ 0,
+        )),
         /*replay_kind*/ None,
     );
     chat.handle_server_notification(
-        ServerNotification::ItemCompleted(ItemCompletedNotification {
-            thread_id: "thread-1".to_string(),
-            turn_id: "turn-1".to_string(),
-            completed_at_ms: 0,
-            item: activity,
-        }),
+        ServerNotification::ItemCompleted(ItemCompletedNotification::new(
+            "thread-1".to_string(),
+            "turn-1".to_string(),
+            activity,
+            /*started_at_ms*/ None,
+            /*completed_at_ms*/ 0,
+        )),
         /*replay_kind*/ None,
     );
 
@@ -1468,11 +1592,10 @@ async fn live_app_server_collab_wait_items_render_history() {
     );
 
     chat.handle_server_notification(
-        ServerNotification::ItemStarted(ItemStartedNotification {
-            thread_id: "thread-1".to_string(),
-            turn_id: "turn-1".to_string(),
-            started_at_ms: 0,
-            item: AppServerThreadItem::CollabAgentToolCall {
+        ServerNotification::ItemStarted(ItemStartedNotification::new(
+            "thread-1".to_string(),
+            "turn-1".to_string(),
+            AppServerThreadItemPayload::CollabAgentToolCall {
                 id: "wait-1".to_string(),
                 tool: AppServerCollabAgentTool::Wait,
                 status: AppServerCollabAgentToolCallStatus::InProgress,
@@ -1486,16 +1609,16 @@ async fn live_app_server_collab_wait_items_render_history() {
                 reasoning_effort: None,
                 agents_states: HashMap::new(),
             },
-        }),
+            /*started_at_ms*/ 0,
+        )),
         /*replay_kind*/ None,
     );
 
     chat.handle_server_notification(
-        ServerNotification::ItemCompleted(ItemCompletedNotification {
-            thread_id: "thread-1".to_string(),
-            turn_id: "turn-1".to_string(),
-            completed_at_ms: 0,
-            item: AppServerThreadItem::CollabAgentToolCall {
+        ServerNotification::ItemCompleted(ItemCompletedNotification::new(
+            "thread-1".to_string(),
+            "turn-1".to_string(),
+            AppServerThreadItemPayload::CollabAgentToolCall {
                 id: "wait-1".to_string(),
                 tool: AppServerCollabAgentTool::Wait,
                 status: AppServerCollabAgentToolCallStatus::Completed,
@@ -1524,7 +1647,9 @@ async fn live_app_server_collab_wait_items_render_history() {
                     ),
                 ]),
             },
-        }),
+            /*started_at_ms*/ None,
+            /*completed_at_ms*/ 0,
+        )),
         /*replay_kind*/ None,
     );
 
@@ -1545,11 +1670,10 @@ async fn live_app_server_collab_spawn_completed_renders_requested_model_and_effo
         ThreadId::from_string("019cff70-2599-75e2-af72-b91781b41a8e").expect("valid thread id");
 
     chat.handle_server_notification(
-        ServerNotification::ItemStarted(ItemStartedNotification {
-            thread_id: "thread-1".to_string(),
-            turn_id: "turn-1".to_string(),
-            started_at_ms: 0,
-            item: AppServerThreadItem::CollabAgentToolCall {
+        ServerNotification::ItemStarted(ItemStartedNotification::new(
+            "thread-1".to_string(),
+            "turn-1".to_string(),
+            AppServerThreadItemPayload::CollabAgentToolCall {
                 id: "spawn-1".to_string(),
                 tool: AppServerCollabAgentTool::SpawnAgent,
                 status: AppServerCollabAgentToolCallStatus::InProgress,
@@ -1560,16 +1684,16 @@ async fn live_app_server_collab_spawn_completed_renders_requested_model_and_effo
                 reasoning_effort: Some(ReasoningEffortConfig::High),
                 agents_states: HashMap::new(),
             },
-        }),
+            /*started_at_ms*/ 0,
+        )),
         /*replay_kind*/ None,
     );
 
     chat.handle_server_notification(
-        ServerNotification::ItemCompleted(ItemCompletedNotification {
-            thread_id: "thread-1".to_string(),
-            turn_id: "turn-1".to_string(),
-            completed_at_ms: 0,
-            item: AppServerThreadItem::CollabAgentToolCall {
+        ServerNotification::ItemCompleted(ItemCompletedNotification::new(
+            "thread-1".to_string(),
+            "turn-1".to_string(),
+            AppServerThreadItemPayload::CollabAgentToolCall {
                 id: "spawn-1".to_string(),
                 tool: AppServerCollabAgentTool::SpawnAgent,
                 status: AppServerCollabAgentToolCallStatus::Completed,
@@ -1586,7 +1710,9 @@ async fn live_app_server_collab_spawn_completed_renders_requested_model_and_effo
                     },
                 )]),
             },
-        }),
+            /*started_at_ms*/ None,
+            /*completed_at_ms*/ 0,
+        )),
         /*replay_kind*/ None,
     );
 
@@ -1721,7 +1847,8 @@ async fn live_app_server_turn_completion_repairs_dropped_message_deltas() {
         /*error*/ None,
     );
     completed_turn.items_view = xdcode_app_server_protocol::TurnItemsView::Summary;
-    completed_turn.items = vec![AppServerThreadItem::AgentMessage {
+    completed_turn.items = vec![ThreadItem::untimed(AppServerThreadItemPayload::AgentMessage {
+        moderation: None,
         id: "msg-1".to_string(),
         text: concat!(
             "The transport kept this.\nAnd dropped this.\n\n",
@@ -1735,7 +1862,7 @@ async fn live_app_server_turn_completion_repairs_dropped_message_deltas() {
             title: "Which way?".into(),
             options: None,
         }]),
-    }];
+    })];
     chat.handle_server_notification(
         ServerNotification::TurnCompleted(TurnCompletedNotification {
             thread_id: "thread-1".to_string(),
@@ -1748,6 +1875,7 @@ async fn live_app_server_turn_completion_repairs_dropped_message_deltas() {
         .filter_map(|event| match event {
             AppEvent::ConsolidateAgentMessage {
                 source,
+                phase: Some(MessagePhase::FinalAnswer),
                 scrollback_reflow,
                 ..
             } => {
@@ -1847,8 +1975,10 @@ async fn live_app_server_stream_recovery_restores_previous_status_header() {
         ServerNotification::Error(ErrorNotification {
             error: AppServerTurnError {
                 misalignment: None,
-                message: "Reconnecting... 1/5".to_string(),
-                xdcode_error_info: Some(XdcodeErrorInfo::Other),
+                message: "Reconnecting... 2/5".to_string(),
+                xdcode_error_info: Some(XdcodeErrorInfo::ResponseStreamDisconnected {
+                    http_status_code: Some(429),
+                }),
                 additional_details: None,
             },
             will_retry: true,
@@ -1858,6 +1988,11 @@ async fn live_app_server_stream_recovery_restores_previous_status_header() {
         /*replay_kind*/ None,
     );
     drain_insert_history(&mut rx);
+
+    insta::assert_snapshot!(
+        chat.bottom_pane.status_widget().unwrap().header(),
+        @"Server is busy, reconnecting 2/5"
+    );
 
     chat.handle_server_notification(
         ServerNotification::AgentMessageDelta(
@@ -1913,46 +2048,63 @@ async fn live_app_server_errors_render_upstream_message() {
 
 #[tokio::test]
 async fn live_app_server_server_overloaded_error_renders_error() {
-    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    for (message, error_info) in [
+        ("server overloaded", XdcodeErrorInfo::ServerOverloaded),
+        (
+            "server overloaded",
+            XdcodeErrorInfo::PolicyCapacityUnavailable,
+        ),
+        ("", XdcodeErrorInfo::ServerOverloaded),
+        ("", XdcodeErrorInfo::PolicyCapacityUnavailable),
+    ] {
+        let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
 
-    chat.handle_server_notification(
-        ServerNotification::TurnStarted(TurnStartedNotification {
-            thread_id: "thread-1".to_string(),
-            turn: AppServerTurn {
-                id: "turn-1".to_string(),
-                root_turn_id: None,
-                items_view: xdcode_app_server_protocol::TurnItemsView::Full,
-                items: Vec::new(),
-                status: AppServerTurnStatus::InProgress,
-                error: None,
-                started_at: Some(0),
-                completed_at: None,
-                duration_ms: None,
-            },
-        }),
-        /*replay_kind*/ None,
-    );
-    drain_insert_history(&mut rx);
+        chat.handle_server_notification(
+            ServerNotification::TurnStarted(TurnStartedNotification {
+                thread_id: "thread-1".to_string(),
+                turn: AppServerTurn {
+                    id: "turn-1".to_string(),
+                    root_turn_id: None,
+                    items_view: xdcode_app_server_protocol::TurnItemsView::Full,
+                    items: Vec::new(),
+                    status: AppServerTurnStatus::InProgress,
+                    error: None,
+                    started_at: Some(0),
+                    completed_at: None,
+                    duration_ms: None,
+                },
+            }),
+            /*replay_kind*/ None,
+        );
+        drain_insert_history(&mut rx);
 
-    chat.handle_server_notification(
-        ServerNotification::Error(ErrorNotification {
-            error: AppServerTurnError {
-                misalignment: None,
-                message: "server overloaded".to_string(),
-                xdcode_error_info: Some(XdcodeErrorInfo::ServerOverloaded),
-                additional_details: None,
-            },
-            will_retry: false,
-            thread_id: "thread-1".to_string(),
-            turn_id: "turn-1".to_string(),
-        }),
-        /*replay_kind*/ None,
-    );
+        chat.handle_server_notification(
+            ServerNotification::Error(ErrorNotification {
+                error: AppServerTurnError {
+                    misalignment: None,
+                    message: message.to_string(),
+                    xdcode_error_info: Some(error_info),
+                    additional_details: None,
+                },
+                will_retry: false,
+                thread_id: "thread-1".to_string(),
+                turn_id: "turn-1".to_string(),
+            }),
+            /*replay_kind*/ None,
+        );
 
-    let cells = drain_insert_history(&mut rx);
-    assert_eq!(cells.len(), 1);
-    assert_eq!(lines_to_single_string(&cells[0]), "■ server overloaded\n");
-    assert!(!chat.bottom_pane.is_task_running());
+        let cells = drain_insert_history(&mut rx);
+        assert_eq!(cells.len(), 1);
+        let rendered = lines_to_single_string(&cells[0]);
+        insta::allow_duplicates! {
+            if message.is_empty() {
+                insta::assert_snapshot!(rendered, @"■ Xdcode is currently experiencing high load.");
+            } else {
+                insta::assert_snapshot!(rendered, @"■ server overloaded");
+            }
+        }
+        assert!(!chat.bottom_pane.is_task_running());
+    }
 }
 
 #[tokio::test]
@@ -2095,7 +2247,7 @@ async fn live_app_server_manual_thread_name_updates_status_surfaces() {
         ThreadId::from_string("123e4567-e89b-12d3-a456-426614174000").expect("thread id");
     chat.thread_id = Some(thread_id);
 
-    chat.expect_manual_thread_name(thread_id, "review-fix".to_string());
+    chat.display_thread_name(thread_id, "review-fix".to_string());
 
     chat.handle_server_notification(
         ServerNotification::ThreadNameUpdated(
@@ -2164,7 +2316,7 @@ async fn live_app_server_manual_thread_name_is_visible_before_notification() {
     let thread_id = ThreadId::new();
     chat.thread_id = Some(thread_id);
 
-    chat.expect_manual_thread_name(thread_id, "Manual title".to_string());
+    chat.display_thread_name(thread_id, "Manual title".to_string());
 
     assert_eq!(chat.thread_name(), Some("Manual title".to_string()));
     assert!(drain_insert_history(&mut rx).is_empty());

@@ -772,6 +772,16 @@ function Test-PackageContentsAreComplete {
         "xdcode-resources\xdcode-command-runner.exe",
         "xdcode-resources\xdcode-windows-sandbox-setup.exe"
     )
+    try {
+        $metadataPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath((Join-Path $PackageDir "xdcode-package.json"))
+        $metadata = [System.IO.File]::ReadAllText($metadataPath)
+        # Older canonical packages do not advertise or contain the executor.
+        if ([regex]::IsMatch($metadata, '"execServer"\s*:')) {
+            $expectedFiles += "bin\xdcode-exec-server.exe"
+        }
+    } catch {
+        return $false
+    }
     foreach ($name in $expectedFiles) {
         if (-not (Test-Path -LiteralPath (Join-Path $PackageDir $name) -PathType Leaf)) {
             return $false

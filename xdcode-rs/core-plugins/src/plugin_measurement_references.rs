@@ -11,8 +11,10 @@ use std::sync::Arc;
 use tempfile::TempDir;
 use tokio::sync::Mutex;
 use tokio::sync::watch;
+use xdcode_features::RuntimeAuthMode;
 use xdcode_login::XdcodeAuth;
 use xdcode_plugin::PluginId;
+use xdcode_runtime_agent_instance::RuntimeAuthSlot;
 use xdcode_utils_path_uri::PathConvention;
 
 const MAX_CACHED_REFERENCES: usize = 4;
@@ -84,6 +86,7 @@ impl RemotePluginMeasurementCache {
         config: &PluginsConfigInput,
         auth: &XdcodeAuth,
         target: &PluginMeasurementTarget,
+        runtime_auth: Option<(RuntimeAuthSlot, RuntimeAuthMode)>,
     ) -> anyhow::Result<Option<Arc<PluginMeasurementReference>>> {
         if !config.plugins_enabled || !config.remote_plugin_enabled || !auth.uses_xdcode_backend() {
             return Ok(None);
@@ -92,7 +95,9 @@ impl RemotePluginMeasurementCache {
         // authoritative for enabled state, including default installations.
         // GLOBAL plugins have already passed server-side admission; local
         // marketplace product policy and skill capability loading are separate.
-        let service = config.remote_plugin_service_config();
+        let service = config
+            .remote_plugin_service_config(runtime_auth)
+            .for_current_account();
         let Some((remote_id, bundle)) = fetch_measurement_reference_bundle(&service, auth, target)
             .await
             .map_err(|_| anyhow::anyhow!("plugin measurement catalog lookup failed"))?

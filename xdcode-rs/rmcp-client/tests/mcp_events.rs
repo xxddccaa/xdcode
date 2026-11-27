@@ -27,6 +27,7 @@ use tokio::sync::mpsc;
 use tokio::time::timeout;
 use xdcode_api::AuthError;
 use xdcode_api::AuthProvider;
+use xdcode_api::SharedAuthProvider;
 use xdcode_config::types::AuthKeyringBackendKind;
 use xdcode_config::types::OAuthCredentialsStoreMode;
 use xdcode_exec_server::Environment;
@@ -160,6 +161,7 @@ async fn plugin_runtime_event_streams_are_isolated_and_cancel_locally() -> anyho
     let base_url = format!("http://{}", listener.local_addr()?);
     let server = tokio::spawn(async move { axum::serve(listener, router).await });
     let auth = Arc::new(RevocableAuth::default());
+    let request_auth: SharedAuthProvider = auth.clone();
     let client = RmcpClient::new_streamable_http_client(
         "test-streamable-http",
         &format!("{base_url}/mcp"),
@@ -169,7 +171,7 @@ async fn plugin_runtime_event_streams_are_isolated_and_cancel_locally() -> anyho
         OAuthCredentialsStoreMode::File,
         AuthKeyringBackendKind::default(),
         Environment::default_for_tests().get_http_client(),
-        Some(auth.clone()),
+        Some(Arc::new(request_auth)),
     )
     .await?;
     initialize_client(&client).await?;

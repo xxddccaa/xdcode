@@ -13,15 +13,18 @@ path = "src/lib.rs"
 workspace = true
 
 [dependencies]
-xdcode-http-client = { workspace = true }
+xdcode-features = { workspace = true }
 xdcode-app-server-protocol = { workspace = true }
 xdcode-git-utils = { workspace = true }
+xdcode-http-client = { workspace = true }
+xdcode-runtime-agent-instance = { workspace = true }
 xdcode-login = { workspace = true }
 xdcode-model-provider = { workspace = true }
 xdcode-plugin = { workspace = true }
 xdcode-protocol = { workspace = true }
 xdcode-state = { workspace = true }
 xdcode-utils-path-uri = { workspace = true }
+http = { workspace = true }
 os_info = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
@@ -33,5 +36,7 @@ tokio = { workspace = true, features = [
 tracing = { workspace = true, features = ["log"] }
 
 [dev-dependencies]
+xdcode-model-provider-info = { workspace = true }
+wiremock = { workspace = true }
 xdcode-utils-absolute-path = { workspace = true }
 pretty_assertions = { workspace = true }

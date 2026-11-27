@@ -33,17 +33,20 @@ async fn stdio_sharing_follows_protocol_and_enablement_for_loaded_chats() -> Res
         let xdcode_home = TempDir::new()?;
         let lease_log = xdcode_home.path().join("leases.jsonl");
         let command = toml::Value::String(stdio_server_bin()?);
+        // Exercise both pool-driven protocol selection and modern connections without pooling.
         let mut config = format!("[features]\nmcp_2026_07_28 = {modern_without_sharing}\n");
         for name in ["alpha", "beta"] {
             config.push_str(&format!(
                 "[mcp_servers.{name}]\ncommand = {command}\nenabled_tools = [\"echo\"]\n\
                  [mcp_servers.{name}.env]\nMCP_TEST_DYNAMIC_SERVER_METADATA = \"1\"\n"
             ));
+            // Exercise lease accounting on the shared server in the mixed-protocol case.
             if name == "alpha" && !modern {
                 let log = toml::Value::String(lease_log.to_string_lossy().into_owned());
                 config.push_str(&format!("MCP_TEST_LEASE_EVENTS_FILE = {log}\n"));
             }
             if name == "beta" && modern {
+                // An experimental-only advertisement must leave this server usable without leases.
                 config.push_str("XDCODE_MCP_PROTOCOL_VERSION = \"2026-07-28\"\n");
                 config.push_str("MCP_TEST_EXPERIMENTAL_LEASE_ONLY = \"1\"\n");
             } else if name == "beta" {
@@ -58,7 +61,7 @@ async fn stdio_sharing_follows_protocol_and_enablement_for_loaded_chats() -> Res
             .with_xdcode_home(xdcode_home.path())
             .build_initialized()
             .await?;
-        set_sharing(&mut app, true).await?;
+        set_sharing(&mut app, /*enabled*/ true).await?;
         let first = app.start_thread(ThreadStartParams::default()).await?.thread;
         let mut first_processes = call_servers(&mut app, &first.id).await?;
         assert_ne!(first_processes["alpha"], first_processes["beta"]);
@@ -152,6 +155,7 @@ async fn call_servers(
             .request(|request_id| ClientRequest::McpServerToolCall {
                 request_id,
                 params: McpServerToolCallParams {
+                    environment_id: None,
                     thread_id: thread_id.to_string(),
                     server: name.to_string(),
                     tool: "echo".to_string(),
@@ -185,7 +189,7 @@ async fn unload_thread(app: &mut TestAppServer, thread_id: &str) -> Result<()> {
         }
     );
     let closed: ThreadClosedNotification = timeout(
-        Duration::from_secs(10),
+        Duration::from_secs(/*secs*/ 10),
         app.read_notification("thread/closed"),
     )
     .await??;

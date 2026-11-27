@@ -1,4 +1,4 @@
-//! Install implicit preset, selection, and side-pane shortcuts for free leader chords.
+//! Install implicit backend, preset, selection, and side-pane shortcuts for free leader chords.
 //! Explicit bindings, including an explicit unbind, always take priority.
 //! Implicit chords fit within the shared leader expansion limit.
 
@@ -29,7 +29,9 @@ pub(in crate::keymap) fn register(
     use KeyCode::Char;
     use KeymapContext::Chat;
     use KeymapContext::Global;
+    use KeymapContext::Pager;
     for (context, name, completion, spec) in [
+        (Global, "change_host", Char('b'), "b"),
         (Global, "select_transcript", Char('['), "["),
         (Chat, "open_presets", Char('p'), "p"),
         (Global, "focus_main_composer", Char('c'), "c"),
@@ -54,6 +56,8 @@ pub(in crate::keymap) fn register(
         (Global, "sidebar_up", Char('k'), "k"),
         (Global, "sidebar_down", KeyCode::Down, "down"),
         (Global, "sidebar_down", Char('j'), "j"),
+        (Pager, "mark_markdown", Char('v'), "v"),
+        (Global, "choose_cloud_environment", Char('e'), "e"),
     ] {
         if remaining == 0 {
             break;
@@ -82,6 +86,7 @@ pub(in crate::keymap) fn register(
             if !resolved.chords.bindings.iter().any(|existing| {
                 binding.overlaps(existing.action) && existing.chord == binding.chord
             }) && !runtime_action_bindings(resolved)
+                // Owned transcript navigation also runs beside the composer.
                 .filter(|single| {
                     binding.overlaps(single.id) || single.id.context == KeymapContext::Pager
                 })

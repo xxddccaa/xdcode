@@ -61,8 +61,8 @@ fn expected_changes() -> HashMap<PathBuf, FileChange> {
     ])
 }
 
-fn patch_item() -> ThreadItem {
-    ThreadItem::FileChange {
+fn patch_item() -> ThreadItemPayload {
+    ThreadItemPayload::FileChange {
         id: ITEM_ID.to_string(),
         changes: changes(),
         status: PatchApplyStatus::InProgress,
@@ -89,12 +89,12 @@ async fn enqueue_pending_patch(app: &mut App, thread_id: ThreadId) -> Result<()>
         .await?;
     app.enqueue_thread_notification(
         thread_id,
-        ServerNotification::ItemStarted(ItemStartedNotification {
-            thread_id: thread_id.to_string(),
-            turn_id: TURN_ID.to_string(),
-            started_at_ms: 0,
-            item: patch_item(),
-        }),
+        ServerNotification::ItemStarted(ItemStartedNotification::new(
+            thread_id.to_string(),
+            TURN_ID.to_string(),
+            patch_item(),
+            /*started_at_ms*/ 0,
+        )),
     )
     .await?;
     let request = request(thread_id);
@@ -180,7 +180,7 @@ async fn active_patch_approval_pager_preserves_changes_and_accepts_once() -> Res
         sidebar::SidebarContent::Chooser,
         sidebar::PaneFocus::Sidebar,
     );
-    let narrow = Size::new(80, 24);
+    let narrow = Size::new(/*width*/ 80, /*height*/ 24);
     assert!(side_frame(&mut app, &mut tui, narrow)?.contains("Open in sidebar"));
     drain_pending_patch(&mut app, &mut tui).await?;
     app.handle_tui_event(
@@ -336,19 +336,23 @@ async fn active_patch_approval_preserves_deferred_startup_protection() -> Result
     assert!(app.startup_pending_protected_request);
 
     app.chat_widget.handle_server_notification(
-        ServerNotification::ItemCompleted(xdcode_app_server_protocol::ItemCompletedNotification {
-            thread_id: thread_id.to_string(),
-            turn_id: TURN_ID.to_string(),
-            completed_at_ms: 0,
-            item: ThreadItem::AgentMessage {
-                id: "agent-1".to_string(),
-                text: "streaming".to_string(),
-                phase: None,
-                memory_citation: None,
-                delivery: None,
-                questions: None,
-            },
-        }),
+        ServerNotification::ItemCompleted(
+            xdcode_app_server_protocol::ItemCompletedNotification::new(
+                thread_id.to_string(),
+                TURN_ID.to_string(),
+                ThreadItemPayload::AgentMessage {
+                    moderation: None,
+                    id: "agent-1".to_string(),
+                    text: "streaming".to_string(),
+                    phase: None,
+                    memory_citation: None,
+                    delivery: None,
+                    questions: None,
+                },
+                /*started_at_ms*/ None,
+                /*completed_at_ms*/ 0,
+            ),
+        ),
         /*replay_kind*/ None,
     );
     assert_eq!(open_patch(&mut app, &mut rx).changes, expected_changes());

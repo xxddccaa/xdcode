@@ -18,7 +18,7 @@ async fn managed_daemon_menu_requires_confirmation_and_offers_only_restart() {
     };
     app.chat_widget.remote_connection = Some(RemoteConnectionStatus {
         address: "local".into(),
-        version: "v0.163.0".into(),
+        version: Some("v0.163.0".into()),
         is_local_daemon: true,
         is_managed_daemon: true,
     });
@@ -67,7 +67,7 @@ async fn unverified_remote_and_offline_connections_cannot_request_restart() {
     ] {
         app.chat_widget.remote_connection = Some(RemoteConnectionStatus {
             address: "test".into(),
-            version: "v0.163.0".into(),
+            version: Some("v0.163.0".into()),
             is_local_daemon,
             is_managed_daemon,
         });

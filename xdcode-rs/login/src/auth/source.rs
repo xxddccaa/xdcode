@@ -17,6 +17,16 @@ pub(super) fn same_source(previous: Option<&XdcodeAuth>, current: Option<&Xdcode
     {
         return false;
     }
+    let previous_subject = previous.api_workload_identity();
+    let current_subject = current.api_workload_identity();
+    if previous_subject != current_subject {
+        return false;
+    }
+    if let (XdcodeAuth::AgentIdentity(previous), XdcodeAuth::AgentIdentity(current)) =
+        (previous, current)
+    {
+        return previous.record() == current.record();
+    }
     let (Ok(previous_token), Ok(current_token)) = (previous.get_token(), current.get_token())
     else {
         return false;
@@ -24,30 +34,34 @@ pub(super) fn same_source(previous: Option<&XdcodeAuth>, current: Option<&Xdcode
     if previous_token == current_token {
         return true;
     }
-    match previous {
-        XdcodeAuth::Chatgpt(_) | XdcodeAuth::ChatgptAuthTokens(_) => {
-            if previous_token.split('.').count() != 3 || current_token.split('.').count() != 3 {
-                return false;
-            }
-            let (Ok(previous), Ok(current)) = (
-                decode_jwt_payload::<OAuthSource>(&previous_token),
-                decode_jwt_payload::<OAuthSource>(&current_token),
-            ) else {
-                // Sessionless credentials must refresh during bootstrap before a
-                // source-bound runtime can be registered. Never guess continuity.
-                return false;
-            };
-            !previous.iss.trim().is_empty()
-                && !previous.session_id.trim().is_empty()
-                && previous == current
-        }
-        XdcodeAuth::ApiKey(_)
-        | XdcodeAuth::PersonalAccessToken(_)
-        | XdcodeAuth::Headers(_)
-        | XdcodeAuth::AgentIdentity(_)
-        | XdcodeAuth::BedrockApiKey(_)
-        | XdcodeAuth::BedrockAccessKeys(_) => false,
+    let platform_wif = previous_subject.is_some();
+    if !platform_wif
+        && !matches!(
+            previous,
+            XdcodeAuth::Chatgpt(_) | XdcodeAuth::ChatgptAuthTokens(_)
+        )
+    {
+        return false;
     }
+    match (
+        parse_oauth_source(&previous_token),
+        parse_oauth_source(&current_token),
+    ) {
+        (Some(previous), Some(current)) => previous == current,
+        _ => false,
+    }
+}
+
+pub(super) fn has_session_claim(token: &str) -> bool {
+    parse_oauth_source(token).is_some()
+}
+
+fn parse_oauth_source(token: &str) -> Option<OAuthSource> {
+    if token.split('.').count() != 3 {
+        return None;
+    }
+    let source = decode_jwt_payload::<OAuthSource>(token).ok()?;
+    (!source.iss.trim().is_empty() && !source.session_id.trim().is_empty()).then_some(source)
 }
 
 #[derive(Deserialize, PartialEq, Eq)]
@@ -74,4 +88,7 @@ struct OAuthIdentity {
     wif_external_issuer: Option<String>,
     wif_principal_kind: Option<String>,
     wif_product: Option<String>,
+    wif_runtime_authorization_version: Option<u32>,
+    wif_provider_revision: Option<String>,
+    wif_mapping_revision: Option<String>,
 }

@@ -20,13 +20,20 @@ http = { workspace = true }
 url = { workspace = true }
 xdcode-backend-openapi-models = { path = "../xdcode-backend-openapi-models" }
 xdcode-api = { workspace = true }
+xdcode-features = { workspace = true }
 xdcode-http-client = { workspace = true }
+xdcode-utils-absolute-path = { workspace = true }
 xdcode-login = { workspace = true }
 xdcode-model-provider = { workspace = true }
+xdcode-runtime-agent-instance = { workspace = true }
 xdcode-protocol = { workspace = true }
+xdcode-response-debug-context = { workspace = true }
 tokio = { workspace = true, features = ["time"] }
+uuid = { workspace = true, features = ["v4"] }
 
 [dev-dependencies]
+base64 = { workspace = true }
 pretty_assertions = "1"
+tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt"] }
 wiremock = { workspace = true }

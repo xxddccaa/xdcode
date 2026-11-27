@@ -150,12 +150,15 @@ async fn unreadable_ancestor_recovers_from_another_copy_of_the_same_rollout() {
     let owner = ThreadId::new();
     let root = ThreadId::new();
     let child = ThreadId::new();
-    let original = write_rollout(&home, owner, None, 5);
+    let original = write_rollout(
+        &home, owner, /*history_base*/ None, /*next_ordinal*/ 5,
+    );
+    // Reverted rollout filenames contain the owner's stable thread ID and a distinct rollout ID.
     let name = format!("rollout-2026-07-16T00-00-00-{owner}_{root}.jsonl");
     let active = original.with_file_name(&name);
     fs::rename(original, &active).expect("name reverted rollout");
-    let end = history_position(&active, root, 3);
-    let child_path = write_rollout(&home, child, Some(end), 2);
+    let end = history_position(&active, root, /*end_ordinal_exclusive*/ 3);
+    let child_path = write_rollout(&home, child, Some(end), /*next_ordinal*/ 2);
     let archived_dir = home.join("archived_sessions");
     fs::create_dir_all(&archived_dir).expect("create archive");
     let archived = archived_dir.join(name);
@@ -185,6 +188,7 @@ async fn unreadable_ancestor_recovers_from_another_copy_of_the_same_rollout() {
         );
     };
     assert_original_error().await;
+    // History pages read projected rows and only need the ancestor header for its bounds.
     let page = store
         .resolve_rollout_lineage_for_history_page(child)
         .await
@@ -250,12 +254,13 @@ async fn unreadable_ancestor_recovers_from_another_copy_of_the_same_rollout() {
     };
     assert_archive_projected(end.end_byte_offset).await;
 
+    // The ancestor's own projection can advance beyond the child's inherited prefix.
     super::super::thread_history_materialization::materialize_to_sqlite(&store, root, &archived)
         .await
         .expect("project the rest of the archive");
     let projected = fs::metadata(&archived).expect("archive size").len();
     let prefix = &contents.as_bytes()[..end.end_byte_offset as usize];
-    let compressed_prefix = zstd::encode_all(prefix, 0).expect("compress prefix");
+    let compressed_prefix = zstd::encode_all(prefix, /*level*/ 0).expect("compress prefix");
     fs::write(&compressed, compressed_prefix).expect("replace active copy with a shorter stream");
     fs::write(&archived, prefix).expect("shorten archive to the inherited prefix");
     assert_archive_projected(projected).await;
@@ -291,25 +296,37 @@ async fn indexed_ancestor_must_be_managed_and_owned_by_the_indexed_thread() {
     let state = store.state_db().await.expect("SQLite store");
     let root = ThreadId::new();
     let child = ThreadId::new();
-    let active = write_rollout(&home, root, None, 3);
-    let archived = write_rollout_under(home.join("archived_sessions"), root, None, 4);
-    let external = write_rollout(external_home.path(), root, None, 3);
-    let end = history_position(&active, root, 3);
-    write_rollout(&home, child, Some(end), 2);
+    let active = write_rollout(
+        &home, root, /*history_base*/ None, /*next_ordinal*/ 3,
+    );
+    let archived = write_rollout_under(
+        home.join("archived_sessions"),
+        root,
+        /*history_base*/ None,
+        /*next_ordinal*/ 4,
+    );
+    let external = write_rollout(
+        external_home.path(),
+        root,
+        /*history_base*/ None,
+        /*next_ordinal*/ 3,
+    );
+    let end = history_position(&active, root, /*end_ordinal_exclusive*/ 3);
+    write_rollout(&home, child, Some(end), /*next_ordinal*/ 2);
     let assert_lookup = async |indexed: &Path, expected: &Path| {
-        let mut metadata = xdcode_state::ThreadMetadataBuilder::new(
+        let metadata = xdcode_state::ThreadMetadataBuilder::new(
             root,
             indexed.to_owned(),
             chrono::Utc::now(),
             xdcode_protocol::protocol::SessionSource::Cli,
-        );
-        metadata.history_mode = ThreadHistoryMode::Paginated;
+        )
+        .with_history_mode(ThreadHistoryMode::Paginated);
         state
             .upsert_thread(&metadata.build("test-provider"))
             .await
             .expect("index ancestor");
         let existing = store
-            .resolve_rollout_lineage(child, None)
+            .resolve_rollout_lineage(child, /*initial_path*/ None)
             .await
             .expect("resolve ancestor");
         let reference = store
@@ -332,7 +349,7 @@ async fn indexed_ancestor_must_be_managed_and_owned_by_the_indexed_thread() {
     let compressed = archived.with_extension("jsonl.zst");
     fs::write(
         &compressed,
-        zstd::encode_all(contents.as_bytes(), 0).expect("compress archive"),
+        zstd::encode_all(contents.as_bytes(), /*level*/ 0).expect("compress archive"),
     )
     .expect("write complete compressed copy");
     fs::remove_file(&archived).expect("remove plain archive");
@@ -398,7 +415,7 @@ async fn indexed_ancestor_must_be_managed_and_owned_by_the_indexed_thread() {
         fs::copy(&external, &active).expect("restore active rollout");
         fs::write(
             &compressed,
-            zstd::encode_all(contents.as_bytes(), 0).expect("compress archive"),
+            zstd::encode_all(contents.as_bytes(), /*level*/ 0).expect("compress archive"),
         )
         .expect("restore compressed archive");
         std::os::unix::fs::symlink(&external, &archived).expect("link plain sibling outside home");

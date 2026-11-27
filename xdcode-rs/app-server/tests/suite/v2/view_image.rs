@@ -12,7 +12,7 @@ use tempfile::TempDir;
 use tokio::time::timeout;
 use xdcode_app_server_protocol::ClientRequest;
 use xdcode_app_server_protocol::ItemCompletedNotification;
-use xdcode_app_server_protocol::ThreadItem;
+use xdcode_app_server_protocol::ThreadItemPayload;
 use xdcode_app_server_protocol::ThreadResumeParams;
 use xdcode_app_server_protocol::ThreadResumeResponse;
 use xdcode_app_server_protocol::ThreadStartParams;
@@ -143,7 +143,8 @@ async fn fresh_context_subagent_inherits_disabled_view_image_and_mcp_tools() -> 
             mcp.read_notification("item/completed"),
         )
         .await??;
-        if matches!(&completed.item, ThreadItem::McpToolCall { id, .. } if id == MCP_CALL_ID) {
+        if matches!(&completed.item.payload, ThreadItemPayload::McpToolCall { id, .. } if id == MCP_CALL_ID)
+        {
             assert_ne!(completed.thread_id, thread.id);
             break completed.thread_id;
         }

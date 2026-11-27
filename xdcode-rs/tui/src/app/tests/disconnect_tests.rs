@@ -17,6 +17,12 @@ use xdcode_app_server_protocol::JSONRPCErrorError;
 use xdcode_app_server_protocol::JSONRPCMessage;
 use xdcode_app_server_protocol::JSONRPCRequest;
 
+pub(super) fn normalize_reconnect_status(popup: &str) -> String {
+    let status =
+        regex_lite::Regex::new(r"(?m)^[•◦] (Reconnecting to server…|Reconnect failed — check the endpoint, then relaunch) \([\dhms ]+\)").unwrap();
+    normalize_snapshot_paths(status.replace(popup, "• ${1} (<elapsed>)").into_owned())
+}
+
 #[tokio::test]
 async fn lost_mutation_reply_preserves_work_without_resubmitting() -> Result<()> {
     let (mut app, mut events, mut ops) = make_test_app_with_channels().await;
@@ -145,7 +151,7 @@ async fn lost_mutation_reply_preserves_work_without_resubmitting() -> Result<()>
                     .unwrap()
                     .display_lines(/*width*/ 80)
             ),
-            render_bottom_popup(&app.chat_widget, /*width*/ 80)
+            normalize_reconnect_status(&render_bottom_popup(&app.chat_widget, /*width*/ 80))
         )
     );
     let mut keymap = xdcode_config::types::TuiKeymap::default();
@@ -438,7 +444,7 @@ where
             "model/list" => Some(json!({"result": {"data": [], "nextCursor": null}})),
             "collaborationMode/list" => Some(json!({"result": {"data": []}})),
             "configRequirements/read" => Some(json!({"result": {"requirements": null}})),
-            "config/read" => Some(json!({"error": {"code": -32601, "message": "unsupported"}})),
+            "config/read" => Some(json!({"result": {"config": {}, "origins": {}, "layers": []}})),
             _ => respond(request).await,
         };
         let Some(mut response) = response else {
@@ -501,10 +507,11 @@ async fn lost_initial_thread_reply_keeps_startup_draft_offline() -> Result<()> {
             )
             .await;
         }
+        let backend_id = session.backend_id();
         app.handle_event(
             &mut tui,
             &mut session,
-            AppEvent::StartupThreadStarted { result },
+            AppEvent::StartupThreadStarted { backend_id, result },
         )
         .await?;
         assert!(app.reconnect.offline);
@@ -616,14 +623,9 @@ async fn rejected_initial_thread_start_reconnects_and_submits_prompt_once() -> R
             TuiEvent::Paste("startup draft".into()),
         )
         .await?;
-        let reconnect_status =
-            regex_lite::Regex::new(r"^[•◦] (Reconnecting to server… )\([\dhms ]+\)")?;
         assert_snapshot!(
             "rejected_startup_reconnecting",
-            reconnect_status.replace(
-                &render_bottom_popup(&app.chat_widget, /*width*/ 80),
-                "• ${1}(<elapsed>)",
-            )
+            normalize_reconnect_status(&render_bottom_popup(&app.chat_widget, /*width*/ 80))
         );
 
         let mut launch_choices = crate::app_server_session::StartupLaunchChoices::default();

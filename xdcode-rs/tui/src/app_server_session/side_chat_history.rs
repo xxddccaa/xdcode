@@ -1,10 +1,13 @@
-//! Discovers local side chats from their own rollouts and reads their visible labels.
+//! Discovers local side chats from their own rollouts and reads titles and prompts from child history.
 
 use super::*;
+use crate::chatwidget::ChatWidget;
+use futures::StreamExt;
+use itertools::Itertools;
 use std::io;
 use std::path::Path;
 use xdcode_app_server_protocol::SortDirection;
-use xdcode_app_server_protocol::ThreadItem;
+use xdcode_app_server_protocol::ThreadItemPayload;
 use xdcode_app_server_protocol::ThreadItemsListResponse;
 use xdcode_context_fragments::ContextualUserFragment;
 use xdcode_context_fragments::SIDE_BOUNDARY_TITLE;
@@ -19,6 +22,8 @@ pub(super) async fn side_context_checkpoint(path: Option<&Path>) -> io::Result<O
         return Ok(None);
     };
     let mut reader = xdcode_rollout::open_rollout_line_reader(path).await?;
+    // The two bootstrap items are written before the first child turn. Inspect
+    // only the child's own records, even when its parent has side context.
     let mut has_policy = false;
     while let Some(line) = reader.next_line().await? {
         let record = xdcode_rollout::parse_rollout_line(&line)?;
@@ -64,27 +69,32 @@ impl From<ThreadId> for SideChat {
 }
 
 pub(crate) fn side_chat_prompt_preview(content: &[UserInput]) -> Option<&str> {
+    side_chat_prompt_parts(content)?
+        .next()?
+        .lines()
+        .next()
+        .map(str::trim)
+}
+
+fn side_chat_prompt_parts(content: &[UserInput]) -> Option<impl Iterator<Item = &str>> {
     if crate::chatwidget::realtime_delegation_input(content).is_some() {
         return None;
     }
-    content
-        .iter()
-        .find_map(|input| match input {
-            UserInput::Text { text, .. } => {
-                xdcode_protocol::protocol::strip_user_message_prefix(text)
-                    .lines()
-                    .next()
-                    .map(str::trim)
-            }
+    let mut text = content.iter().filter_map(|input| {
+        let UserInput::Text { text, .. } = input else {
+            return None;
+        };
+        let text = xdcode_protocol::protocol::strip_user_message_prefix(text);
+        (!text.is_empty()).then_some(text)
+    });
+    let first = text.next().or_else(|| {
+        content.iter().find_map(|input| match input {
+            UserInput::Image { .. } | UserInput::LocalImage { .. } => Some("[Image]"),
+            UserInput::Audio { .. } | UserInput::LocalAudio { .. } => Some("[Audio]"),
             _ => None,
         })
-        .or_else(|| {
-            content.iter().find_map(|input| match input {
-                UserInput::Image { .. } | UserInput::LocalImage { .. } => Some("[Image]"),
-                UserInput::Audio { .. } | UserInput::LocalAudio { .. } => Some("[Audio]"),
-                _ => None,
-            })
-        })
+    })?;
+    Some(std::iter::once(first).chain(text))
 }
 
 pub(super) fn is_attached_thread_store_unsupported(err: &color_eyre::Report) -> bool {
@@ -115,6 +125,8 @@ impl AppServerSession {
         }
         let query = ThreadListParams {
             attached_to_thread_id: Some(parent.to_string()),
+            include_attached_threads: false,
+            current_account_only: true,
             archived: Some(false),
             model_providers: Some(Vec::new()),
             sort_direction: Some(SortDirection::Asc),
@@ -130,11 +142,14 @@ impl AppServerSession {
             ancestor_thread_id: None,
             search_term: None,
             originators: None,
+            included_thread_ids: None,
             excluded_thread_ids: None,
         };
         if matches!(self.request_handle, AppServerRequestHandle::InProcess(_)) {
             return Ok(Some(query));
         }
+        // Older local daemons can silently ignore unknown fields. Require the
+        // validation error for these incompatible filters before using them.
         let probe = ThreadListParams {
             parent_thread_id: query.attached_to_thread_id.clone(),
             limit: Some(1),
@@ -186,6 +201,8 @@ impl AppServerSession {
                     continue;
                 }
             };
+            // Older servers write the inherited name during fork, before the TUI installs the
+            // side-chat boundary. A later name write is an explicit rename, even to the same text.
             let name = thread.name.filter(|name| {
                 if let Some(entry) = indexed_names.get(&id)
                     && entry.thread_name == *name
@@ -197,7 +214,7 @@ impl AppServerSession {
                 true
             });
             let preview = if name.is_none() {
-                self.first_side_chat_prompt(id)
+                self.side_chat_prompt(id, SortDirection::Asc)
                     .await
                     .unwrap_or_else(|error| {
                         tracing::debug!(%id, %error, "failed to load side-chat prompt");
@@ -219,6 +236,8 @@ impl AppServerSession {
         if self.can_list_saved_side_chats(parent)
             && let Some(mut query) = self.attached_side_chat_query(parent).await?
         {
+            // Resolve the complete list before deleting anything. Archived and partially
+            // initialized side chats also block the app-server's parent delete.
             let mut attached = self.list_attached_threads(query.clone()).await?;
             query.archived = Some(true);
             attached.extend(self.list_attached_threads(query).await?);
@@ -228,6 +247,8 @@ impl AppServerSession {
                 let path = thread.path.as_deref().ok_or_else(|| {
                     color_eyre::eyre::eyre!("No rollout found for attached thread {child}")
                 })?;
+                // The thread list omits fork origins. Verify the child's own metadata
+                // before passing its ID to the delete API.
                 let meta = read_session_meta_line(path)
                     .await
                     .wrap_err_with(|| format!("failed to verify attached thread {child}"))?
@@ -279,22 +300,78 @@ impl AppServerSession {
         }
     }
 
-    async fn first_side_chat_prompt(&mut self, id: ThreadId) -> Result<String> {
+    pub(crate) async fn latest_side_chat_prompts(
+        &self,
+        ids: Vec<ThreadId>,
+    ) -> HashMap<ThreadId, String> {
+        // Bound the number of paginated reads in flight when a tall chooser shows many chats.
+        futures::stream::iter(ids)
+            .map(|id| async move {
+                let mut view = self.request_view();
+                let prompt = view
+                    .side_chat_prompt(id, SortDirection::Desc)
+                    .await
+                    .unwrap_or_else(|error| {
+                        tracing::debug!(%id, %error, "failed to load side-chat prompt");
+                        String::new()
+                    });
+                (id, prompt)
+            })
+            .buffer_unordered(4)
+            .collect()
+            .await
+    }
+
+    async fn side_chat_prompt(&mut self, id: ThreadId, order: SortDirection) -> Result<String> {
+        // The summary preview can come from inherited model context. Item pages only contain
+        // the child's visible history, including for chats saved by older clients.
         let mut cursor = None;
         let mut cursors = HashSet::new();
         loop {
-            let mut params = thread_items_page_params(id, None, cursor, 16);
-            params.sort_direction = Some(SortDirection::Asc);
+            let mut params =
+                thread_items_page_params(id, /*turn_id*/ None, cursor, /*limit*/ 16);
+            params.sort_direction = Some(order);
             let request_id = self.next_request_id();
             let page: ThreadItemsListResponse = self
                 .request_handle
                 .request_typed(ClientRequest::ThreadItemsList { request_id, params })
                 .await?;
-            if let Some(preview) = page.data.iter().find_map(|entry| match &entry.item {
-                ThreadItem::UserMessage { content, .. } => side_chat_prompt_preview(content),
-                _ => None,
-            }) {
-                return Ok(preview.to_owned());
+            if let Some(prompt) = page
+                .data
+                .iter()
+                .find_map(|entry| match &entry.item.payload {
+                    ThreadItemPayload::UserMessage { content, .. } => match order {
+                        SortDirection::Asc => side_chat_prompt_preview(content).map(str::to_owned),
+                        SortDirection::Desc => {
+                            if crate::chatwidget::realtime_delegation_input(content).is_some() {
+                                return None;
+                            }
+                            let mut prompt =
+                                ChatWidget::user_message_display_from_inputs(content).message;
+                            if prompt.trim().is_empty() {
+                                prompt =
+                                    content
+                                        .iter()
+                                        .find_map(|input| match input {
+                                            UserInput::Image { .. }
+                                            | UserInput::LocalImage { .. } => Some("[Image]"),
+                                            UserInput::Audio { .. }
+                                            | UserInput::LocalAudio { .. } => Some("[Audio]"),
+                                            _ => None,
+                                        })?
+                                        .to_owned();
+                            }
+                            Some(
+                                crate::history_cell::sanitize_user_text(prompt.into())
+                                    .split_whitespace()
+                                    .join(" "),
+                            )
+                        }
+                    },
+                    _ => None,
+                })
+            {
+                return Ok(prompt);
             }
             let Some(next) = page.next_cursor else {
                 return Ok(String::new());

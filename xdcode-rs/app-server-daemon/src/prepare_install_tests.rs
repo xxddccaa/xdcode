@@ -4,6 +4,7 @@ use super::prepare_from_package;
 use super::validate_package;
 use crate::settings::DaemonSettings;
 use pretty_assertions::assert_eq;
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -261,6 +262,8 @@ async fn broken_selection_is_not_a_missing_installation() {
             .to_string()
             .contains("repair the existing installation")
     );
+    let start_error = daemon.start(&BTreeMap::new()).await.unwrap_err();
+    assert_eq!(start_error.failure_reason(), "install");
     assert_eq!(
         std::fs::read_link(current).unwrap(),
         PathBuf::from("missing-release")

@@ -64,6 +64,7 @@ pub(super) async fn run_main_inner(
         .take_auto_review_config_overrides(&mut cli.config_overrides);
 
     // Map the legacy --search flag to the canonical web_search mode.
+    let overrides_before_search = cli.config_overrides.raw_overrides.len();
     if cli.web_search {
         cli.config_overrides
             .raw_overrides
@@ -220,6 +221,14 @@ pub(super) async fn run_main_inner(
         std::env::var_os(xdcode_exec_server::XDCODE_EXEC_SERVER_URL_ENV_VAR).as_deref(),
     );
     let reuse_implicit_local_daemon = daemon_exclusion.is_none();
+    let search_forces_embedded = cli.web_search
+        && daemon_startup::config_exclusion(
+            &cli_kv_overrides[..overrides_before_search],
+            &launch_loader_overrides,
+            strict_config,
+            cli.bypass_hook_trust,
+        )
+        .is_none();
     let search_only_config_override = !workload_identity_selected
         && cli.web_search
         && startup_preflight::has_only_search_config_override(&cli_kv_overrides)
@@ -304,6 +313,20 @@ pub(super) async fn run_main_inner(
             err
         }
     })?;
+    if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
+        xdcode_cloud_config::ensure_config_server_login(
+            embedded_network_policy.bind_bootstrap_auth(bootstrap_auth_config(
+                &xdcode_home,
+                &presentation.bootstrap_config,
+            )?),
+            presentation
+                .bootstrap_config
+                .config_layer_stack
+                .requirements_toml(),
+            xdcode_cloud_config::ConfigServerLoginMethod::Browser,
+        )
+        .await?;
+    }
     // Keep normal terminal signals available until local configuration is ready. Once raw
     // mode begins, StartupDraft immediately takes ownership of input.
     let (initialized_terminal, terminal_restore_guard) = tokio::task::spawn_blocking(|| {
@@ -352,6 +375,7 @@ pub(super) async fn run_main_inner(
         workload_identity_selected,
         std::env::var_os(xdcode_exec_server::XDCODE_EXEC_SERVER_URL_ENV_VAR).as_deref(),
     )?;
+    let cloud_preview_available = app_server_target.uses_embedded_network_policy();
     let remote_cwd_override = cli
         .cwd
         .clone()
@@ -507,10 +531,11 @@ pub(super) async fn run_main_inner(
         cloud_config_bundle
     } else {
         startup_draft
-            .run_until(cloud_config_bundle_loader_for_storage(
+            .run_until(managed_config_bundle_loader_for_storage(
                 embedded_network_policy.bind_bootstrap_auth(
                     app_server_target.auth_config_for_cloud_loader(config.auth_config()),
                 ),
+                config.config_layer_stack.requirements_toml(),
                 /*enable_xdcode_api_key_env*/ false,
             ))
             .await??
@@ -551,12 +576,17 @@ pub(super) async fn run_main_inner(
         && !app_server_target.uses_remote_workspace();
     if auto_start_daemon
         && daemon_exclusion.is_none()
-        && should_show_bedrock_setup_wizard(
-            LoginStatus::NotAuthenticated,
-            config.model_provider.requires_hosted_auth,
-            &config,
-            &AppServerTarget::Embedded,
-        )
+        && [Feature::GcpSetupWizard, Feature::GatewaySetupWizard]
+            .into_iter()
+            .any(|feature| {
+                should_show_provider_setup_wizard(
+                    LoginStatus::NotAuthenticated,
+                    config.model_provider.requires_hosted_auth,
+                    &config,
+                    &AppServerTarget::Embedded,
+                    feature,
+                )
+            })
         && startup_draft
             .run_until(
                 config
@@ -568,8 +598,13 @@ pub(super) async fn run_main_inner(
             .flatten()
             .is_none()
     {
-        // The Bedrock wizard configures its provider through the embedded server.
-        daemon_exclusion = Some("Bedrock sign-in");
+        // These wizards use credentials from the launch environment and rebuild the
+        // embedded server with the selected provider after onboarding.
+        daemon_exclusion = Some(if config.features.enabled(Feature::GcpSetupWizard) {
+            "GCP sign-in"
+        } else {
+            daemon_startup::GATEWAY_SIGN_IN_EXCLUSION
+        });
         app_server_target = AppServerTarget::Embedded;
     }
     if auto_start_daemon
@@ -587,9 +622,10 @@ pub(super) async fn run_main_inner(
                 // responsive while it checks the running server or prepares an installation.
                 // Preserve saved daemon settings until any mismatch is confirmed in recovery.
                 let result =
-                    xdcode_app_server_daemon::start_with_features(&Default::default()).await;
+                    xdcode_app_server_daemon::start_with_features_classified(&Default::default())
+                        .await;
                 daemon_telemetry::record_start(&config, &result).await;
-                match result {
+                match result.map_err(|err| err.error) {
                     Ok(output) => Ok(Some(output)),
                     #[cfg(windows)]
                     Err(err) if err.is::<xdcode_app_server_daemon::DetachedLaunchRestricted>() => {
@@ -697,6 +733,11 @@ pub(super) async fn run_main_inner(
         .as_ref()
         .and_then(xdcode_otel::OtelProvider::metrics)
         .cloned();
+    let statusline_metrics = crate::statusline_metrics::StatuslineMetrics::new(
+        &config,
+        metrics.clone(),
+        &otel_originator,
+    );
     if let Some(metrics) = &metrics {
         let _ = xdcode_otel::record_process_start_once(metrics, otel_originator.as_str());
         let telemetry =
@@ -705,6 +746,7 @@ pub(super) async fn run_main_inner(
     }
     let selection_reason = match (&app_server_target, daemon_exclusion) {
         (AppServerTarget::Remote { .. }, _) => "explicit_remote",
+        (AppServerTarget::Cloud, _) => "cloud",
         _ if cli.agents_overview => "agents",
         _ if elevated_warning.is_some() => "elevated_windows",
         (_, Some("--no-daemon")) => "explicit_no_daemon",
@@ -733,22 +775,17 @@ pub(super) async fn run_main_inner(
             },
         ),
     ]);
-    // Record the first connection attempt's actual mode, including embedded fallback; never reconnects.
-    let launch_telemetry = move |target: &AppServerTarget, connected: bool| {
+    let selected_local_daemon = matches!(app_server_target, AppServerTarget::LocalDaemon { .. });
+    let launch_telemetry = move |app_server_mode| {
         let Some(metrics) = metrics else {
             return Vec::new();
-        };
-        let app_server_mode = match (connected, target) {
-            (false, _) => "unconfirmed",
-            (true, AppServerTarget::Embedded) => "in_process",
-            (true, AppServerTarget::LocalDaemon { .. }) => "local_daemon",
-            (true, AppServerTarget::Remote { .. }) => "remote",
         };
         // Use a fixed category, not the versioned or user-provided terminal identifier.
         let terminal_info = xdcode_terminal_detection::terminal_info();
         let terminal_name = match terminal_info.name {
             TerminalName::AppleTerminal => "apple_terminal",
             TerminalName::Ghostty => "ghostty",
+            TerminalName::Rex => "rex",
             TerminalName::Iterm2 => "iterm2",
             TerminalName::WarpTerminal => "warp",
             TerminalName::VsCode => "vscode",
@@ -773,6 +810,44 @@ pub(super) async fn run_main_inner(
             ("multiplexer", multiplexer),
         ]);
         let _ = metrics.counter("xdcode.tui.start", /*inc*/ 1, &launch_tags);
+        if app_server_mode == "in_process" {
+            let reason = match daemon_exclusion {
+                _ if elevated_warning.is_some() => "windows_elevated",
+                Some("--no-daemon") => "explicit_no_daemon",
+                Some("--profile") => "profile",
+                Some("--oss") => "oss",
+                Some("--strict-config") => "strict_config",
+                Some("--dangerously-bypass-hook-trust") => "bypass_hook_trust",
+                Some("workload identity") => "workload_identity",
+                Some("executor selection (XDCODE_EXEC_SERVER_URL)") => "exec_server_url",
+                Some("custom configuration loader") => "custom_config_loader",
+                Some(
+                    "command-line configuration overrides (-c, --enable, --disable, or --search)",
+                ) => {
+                    if search_forces_embedded {
+                        "search"
+                    } else {
+                        "config_override"
+                    }
+                }
+                Some("GCP sign-in") => "gcp_sign_in",
+                Some(daemon_startup::GATEWAY_SIGN_IN_EXCLUSION) => "gateway_sign_in",
+                Some(daemon_startup::WSL_DRVFS_EXCLUSION) => "wsl_drvfs",
+                Some("this Windows launcher") => "windows_detach_restricted",
+                Some("daemon feature settings") => "daemon_compatibility",
+                None if selection_reason == "auto_start_disabled" => {
+                    "auto_start_disabled_no_daemon"
+                }
+                None if selected_local_daemon => "daemon_connection_failed",
+                None if selection_reason == "agents" => "agents_no_daemon_discovered",
+                Some(_) | None => "unclassified",
+            };
+            let _ = metrics.counter(
+                "xdcode.tui.embedded_start",
+                /*inc*/ 1,
+                &[("reason", reason)],
+            );
+        }
         launch_tags.retain(|(key, _)| !matches!(*key, "terminal_columns" | "terminal_rows"));
         launch_tags
     };
@@ -808,7 +883,7 @@ pub(super) async fn run_main_inner(
             if let Some(worktree) = managed_worktree.as_ref() {
                 worktree.report_startup_failure();
             }
-            launch_telemetry.record(&app_server_target, /*connected*/ false);
+            drop(launch_telemetry);
             if let Some(otel) = otel {
                 let _ = otel
                     .shutdown_with_timeout(INTERACTIVE_OTEL_SHUTDOWN_TIMEOUT)
@@ -829,7 +904,7 @@ pub(super) async fn run_main_inner(
             if let Some(worktree) = managed_worktree.as_ref() {
                 worktree.report_startup_failure();
             }
-            launch_telemetry.record(&app_server_target, /*connected*/ false);
+            drop(launch_telemetry);
             if let Some(otel) = otel {
                 let _ = otel
                     .shutdown_with_timeout(INTERACTIVE_OTEL_SHUTDOWN_TIMEOUT)
@@ -922,6 +997,13 @@ pub(super) async fn run_main_inner(
         .with(otel_logger_layer)
         .with(otel_tracing_layer)
         .try_init();
+    if let Some(error) = state_db.as_ref().and_then(|db| db.diagnostic_logs_error()) {
+        tracing::warn!(
+            event.name = "diagnostic_database_unavailable",
+            error,
+            "diagnostic database unavailable"
+        );
+    }
 
     if let Err(err) = screen_reader_result {
         tracing::warn!("Could not save screen-reader detection: {err}");
@@ -936,6 +1018,7 @@ pub(super) async fn run_main_inner(
         app_server_target,
         remote_cwd_override,
         config,
+        statusline_metrics,
         manually_selected_oss_provider,
         overrides,
         cli_kv_overrides,
@@ -945,6 +1028,7 @@ pub(super) async fn run_main_inner(
         state_db,
         environment_manager,
         embedded_network_policy,
+        cloud_preview_available,
         managed_worktree.clone(),
         daemon_startup_warning,
         managed_daemon,

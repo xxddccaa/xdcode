@@ -7,6 +7,9 @@
 #![cfg(target_os = "windows")]
 #![allow(clippy::expect_used)]
 
+#[path = "windows_sandbox/repository_skills_tests.rs"]
+mod repository_skills_tests;
+
 use anyhow::Context;
 use core_test_support::PathExt;
 use core_test_support::responses::ev_assistant_message;
@@ -56,11 +59,11 @@ use xdcode_protocol::protocol::Op;
 use xdcode_protocol::protocol::ReviewDecision;
 use xdcode_protocol::user_input::UserInput;
 use xdcode_sandboxing::SandboxCommand;
-use xdcode_sandboxing::SandboxDirectSpawnTransformRequest;
+use xdcode_sandboxing::SandboxExecutables;
 use xdcode_sandboxing::SandboxManager;
+use xdcode_sandboxing::SandboxSelection;
 use xdcode_sandboxing::SandboxTransformRequest;
 use xdcode_sandboxing::SandboxType;
-use xdcode_sandboxing::WindowsSandboxProxySettingsMode;
 use xdcode_utils_path_uri::PathUri;
 use xdcode_windows_sandbox_test_support::WindowsSandboxAccountTestGuard;
 
@@ -501,32 +504,28 @@ async fn windows_elevated_temp_only_core_and_direct_spawn_enforce_carveouts() ->
         let command = format!("echo CHILD-TEMP:{child_var} & {command}");
         let (exit_code, stdout, stderr) = if direct_spawn {
             let cwd_uri = PathUri::from_abs_path(&cwd);
-            let request = SandboxManager::new().transform_for_direct_spawn(
-                SandboxDirectSpawnTransformRequest {
-                    workspace_roots: std::slice::from_ref(&cwd),
-                    windows_sandbox_proxy_settings_mode: WindowsSandboxProxySettingsMode::Preserve,
-                    transform: SandboxTransformRequest {
-                        command: SandboxCommand {
-                            program: "cmd.exe".into(),
-                            args: vec!["/D".into(), "/C".into(), command],
-                            cwd: cwd_uri.clone(),
-                            env,
-                            managed_network: None,
-                            additional_permissions: None,
-                        },
-                        permissions: &permission_profile,
-                        workspace_roots: None,
-                        sandbox: SandboxType::WindowsRestrictedToken,
-                        enforce_managed_network: false,
-                        environment_id: None,
-                        network: None,
-                        sandbox_policy_cwd: &cwd_uri,
-                        sandbox_exe: Some(xdcode.as_path()),
-                        use_legacy_landlock: false,
-                        windows_sandbox_level: WindowsSandboxLevel::Elevated,
+            // Exec-server spawns the Windows sandbox wrapper returned by transform for filesystem
+            // helpers. Use cmd.exe as the inner command to probe file access through that wrapper.
+            let request = SandboxManager::for_file_system_helpers()
+                .transform(SandboxTransformRequest {
+                    command: SandboxCommand {
+                        program: "cmd.exe".into(),
+                        args: vec!["/D".into(), "/C".into(), command],
+                        cwd: cwd_uri.clone(),
+                        env,
+                        managed_network: None,
+                        additional_permissions: None,
                     },
-                },
-            )?;
+                    permissions: &permission_profile,
+                    workspace_roots: Some(std::slice::from_ref(&cwd_uri)),
+                    selection: SandboxSelection::Explicit(SandboxType::WindowsRestrictedToken),
+                    network: Default::default(),
+                    sandbox_policy_cwd: &cwd_uri,
+                    executables: SandboxExecutables::Launcher(Some(xdcode.as_path())),
+                    use_legacy_landlock: false,
+                    windows_sandbox_level: WindowsSandboxLevel::Elevated,
+                })?
+                .into_command_request()?;
             let output = Command::new(&request.command[0])
                 .args(&request.command[1..])
                 .current_dir(request.cwd.to_abs_path()?)

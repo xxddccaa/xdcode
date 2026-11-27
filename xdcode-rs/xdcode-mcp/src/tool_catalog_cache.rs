@@ -443,6 +443,7 @@ impl ToolCatalogTransportIdentity {
         else {
             return None;
         };
+        // An unmarked helper can expose different tools after a legacy fallback.
         if matches!(
             connection_identity,
             Some((_, McpProtocolMode::DiscoverLocalStdio, _))

@@ -67,15 +67,15 @@ fn under_development_features_are_disabled_by_default() {
 
 #[test]
 fn selected_main_experiments_require_independent_opt_in_and_can_be_disabled() {
+    let defaults = Features::with_defaults();
+    assert!(defaults.enabled(Feature::TuiWorkspace));
+    assert!(defaults.enabled(Feature::McpLazyStdioStartup));
     let experiments = [
-        Feature::TuiWorkspace,
         Feature::McpConnectionSharing,
-        Feature::McpLazyStdioStartup,
         Feature::AgentMessageBoard,
         Feature::AgentMessageBoardMcp,
         Feature::SkillCatalogDeltas,
     ];
-    let defaults = Features::with_defaults();
     for experiment in experiments {
         assert!(!defaults.enabled(experiment), "{}", experiment.key());
         let configured = FeaturesToml::from(BTreeMap::from([(experiment.key().to_string(), true)]));
@@ -178,13 +178,16 @@ fn xdcode_apps_mcp_protocol_can_be_enabled_independently_of_generic_mcp() {
 }
 
 #[test]
-fn default_enabled_features_are_stable() {
+fn default_enabled_features_have_shipped() {
     for spec in crate::FEATURES {
         // Instant interrupts are enabled by default while retaining their development stage.
         if spec.default_enabled && spec.id != Feature::InstantInterrupt {
             assert!(
-                matches!(spec.stage, Stage::Stable | Stage::Removed),
-                "feature `{}` is enabled by default but is not stable/removed ({:?})",
+                matches!(
+                    spec.stage,
+                    Stage::Stable | Stage::Deprecated | Stage::Removed
+                ),
+                "feature `{}` is enabled by default at stage {:?}",
                 spec.key,
                 spec.stage
             );
@@ -285,6 +288,46 @@ fn guardian_v3_feature_config_resolves_base_and_profile_toggles() {
 }
 
 #[test]
+fn guardian_v3_prompt_settings_do_not_implicitly_enable_the_feature() {
+    let features: FeaturesToml = toml::from_str(
+        r#"
+[guardianv3]
+message_board_in_memory = true
+[guardianv3.housekeeper]
+routing_instructions = "Group related deployment evidence."
+batch_timeout_ms = 15000
+[guardianv3.reviewer]
+retrieval_instructions = "Search before assessing deployments."
+"#,
+    )
+    .expect("Guardian V3 settings should deserialize");
+
+    assert!(features.entries().is_empty());
+    assert_eq!(
+        features.guardianv3,
+        Some(FeatureToml::Config(crate::GuardianV3ConfigToml {
+            enabled: None,
+            message_board_in_memory: Some(true),
+            housekeeper: Some(crate::GuardianV3HousekeeperConfigToml {
+                routing_instructions: Some("Group related deployment evidence.".to_owned()),
+                batch_timeout_ms: std::num::NonZeroU32::new(15_000),
+            }),
+            reviewer: Some(crate::GuardianV3ReviewerConfigToml {
+                retrieval_instructions: Some("Search before assessing deployments.".to_owned()),
+            }),
+            max_instruction_tokens: None,
+        }))
+    );
+}
+
+#[test]
+fn guardian_v3_rejects_a_zero_batch_timeout() {
+    assert!(
+        toml::from_str::<FeaturesToml>("[guardianv3.housekeeper]\nbatch_timeout_ms = 0").is_err()
+    );
+}
+
+#[test]
 fn guardian_thread_context_is_ignored_with_a_migration_notice() {
     let enabled_context = "[guardianv2]\nthread_context = true";
     let disabled_context = "[guardianv2]\nthread_context = false";
@@ -365,6 +408,10 @@ max_recent_non_user_entries = 12
     assert_eq!(
         features.guardianv2,
         Some(FeatureToml::Config(crate::GuardianV2ConfigToml {
+            async_elastic_budgeting: None,
+            async_elastic_sections: None,
+            sync_elastic_budgeting: None,
+            sync_elastic_sections: None,
             transcript_mode: None,
             async_classifier_mode: None,
             async_classifier_conversation_token_limit: Some(120_000),
@@ -651,6 +698,28 @@ fn from_sources_applies_base_profile_and_overrides() {
 }
 
 #[test]
+fn code_mode_host_grpc_is_recognized_and_ignored() {
+    assert!(crate::is_known_feature_key("code_mode_host_grpc"));
+    for enabled in [false, true] {
+        let config: FeaturesToml = toml::from_str(&format!("code_mode_host_grpc = {enabled}"))
+            .expect("legacy transport setting should deserialize");
+        let mut features = Features::with_defaults();
+        features.apply_toml(&config);
+        assert_eq!(
+            features.enabled_features(),
+            Features::with_defaults().enabled_features()
+        );
+        assert_eq!(
+            features
+                .legacy_feature_usages()
+                .map(|usage| usage.feature)
+                .collect::<Vec<_>>(),
+            vec![Feature::CodeModeHostGrpc]
+        );
+    }
+}
+
+#[test]
 fn from_sources_ignores_removed_image_detail_original_feature_key() {
     let features_toml = FeaturesToml::from(BTreeMap::from([(
         "image_detail_original".to_string(),
@@ -887,6 +956,7 @@ non_code_mode_only = true
             hide_spawn_agent_metadata: Some(true),
             expose_spawn_agent_model_overrides: Some(true),
             wait_agent_enabled: Some(false),
+            interrupt_at_item_boundary: None,
             disable_native_tools: Some(true),
             disable_direct_message: Some(true),
             message_board_in_memory: Some(true),
@@ -1013,5 +1083,23 @@ fn retired_worktree_and_voice_config_overrides_are_ignored() {
             FeatureOverrides::default(),
         );
         assert_eq!(features, Features::with_defaults());
+    }
+}
+
+#[test]
+fn model_change_suppression_config_preserves_omission_and_explicit_values() {
+    for (input, expected) in [
+        ("", false),
+        ("suppress_model_change_announcements = false", false),
+        ("suppress_model_change_announcements = true", true),
+    ] {
+        let config: FeaturesToml = toml::from_str(input).unwrap();
+        let mut features = Features::with_defaults();
+        features.apply_toml(&config);
+        assert_eq!(
+            features.enabled(Feature::SuppressModelChangeAnnouncements),
+            expected,
+            "{input}"
+        );
     }
 }

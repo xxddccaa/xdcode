@@ -169,6 +169,7 @@ async fn failed_fork_recovers_only_its_own_turn() -> anyhow::Result<()> {
     let test = test_xdcode_exec();
     let last_message = test.cwd_path().join("last-message");
     let mut events = vec![responses::ev_response_created("parent")];
+    // The parent's final answer must survive recovery across multiple item pages.
     for index in 0..120 {
         events.push(responses::ev_assistant_message(
             &format!("msg-{index}"),

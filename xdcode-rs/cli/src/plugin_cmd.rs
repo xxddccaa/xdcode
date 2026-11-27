@@ -15,6 +15,7 @@ use xdcode_app_server_protocol::PluginInstallPolicy;
 use xdcode_core::config::Config;
 use xdcode_core::config::find_xdcode_home;
 use xdcode_core::plugins_manager_for_config;
+use xdcode_core::plugins_manager_for_config_with_runtime;
 use xdcode_core_plugins::ConfiguredMarketplace;
 use xdcode_core_plugins::PROVIDER_BUNDLED_MARKETPLACE_NAME;
 use xdcode_core_plugins::PluginInstallOutcome;
@@ -140,13 +141,13 @@ pub async fn run_plugin_add(
     overrides: Vec<(String, toml::Value)>,
     args: AddPluginArgs,
 ) -> Result<()> {
-    let context = load_plugin_command_context(overrides).await?;
     let AddPluginArgs {
         plugin,
         marketplace_name,
         json,
     } = args;
     let selection = parse_plugin_selection(plugin, marketplace_name)?;
+    let context = load_plugin_command_context(overrides, Some(&selection.marketplace_name)).await?;
     let outcome = if selection.marketplace_name == REMOTE_GLOBAL_MARKETPLACE_NAME {
         anyhow::bail!("Hosted plugin installation is unavailable in xdcode");
     } else {
@@ -212,7 +213,7 @@ pub async fn run_plugin_list(
     overrides: Vec<(String, toml::Value)>,
     args: ListPluginsArgs,
 ) -> Result<()> {
-    let context = load_plugin_command_context(overrides).await?;
+    let context = load_plugin_command_context(overrides, args.marketplace_name.as_deref()).await?;
     let remote_listing = fetch_remote_marketplaces(
         &context,
         args.marketplace_name.as_deref(),
@@ -643,13 +644,13 @@ pub async fn run_plugin_remove(
     overrides: Vec<(String, toml::Value)>,
     args: RemovePluginArgs,
 ) -> Result<()> {
-    let context = load_plugin_command_context(overrides).await?;
     let RemovePluginArgs {
         plugin,
         marketplace_name,
         json,
     } = args;
     let selection = parse_plugin_selection(plugin, marketplace_name)?;
+    let context = load_plugin_command_context(overrides, Some(&selection.marketplace_name)).await?;
 
     if selection.marketplace_name == REMOTE_GLOBAL_MARKETPLACE_NAME {
         anyhow::bail!("Hosted plugin management is unavailable in xdcode");
@@ -700,6 +701,7 @@ struct PluginCommandContext {
 
 async fn load_plugin_command_context(
     overrides: Vec<(String, toml::Value)>,
+    marketplace_name: Option<&str>,
 ) -> Result<PluginCommandContext> {
     let xdcode_home = find_xdcode_home().context("failed to resolve XDCODE_HOME")?;
     let config = Config::load_with_cli_overrides(overrides)
@@ -707,15 +709,20 @@ async fn load_plugin_command_context(
         .context("failed to load configuration")?;
     let plugins_input = config.plugins_config_input();
     let auth_manager = load_cli_auth_manager(&config).await?;
-    let manager = Arc::new(plugins_manager_for_config(
-        &config,
-        Arc::clone(&auth_manager),
-    ));
+    let auth = auth_manager.auth().await;
+    let uses_remote_catalog = plugins_input.plugins_enabled
+        && auth.as_ref().is_some_and(XdcodeAuth::uses_xdcode_backend)
+        && marketplace_name.is_none_or(|name| name == REMOTE_GLOBAL_MARKETPLACE_NAME);
+    let manager = Arc::new(if uses_remote_catalog {
+        plugins_manager_for_config_with_runtime(&config, Arc::clone(&auth_manager)).await?
+    } else {
+        plugins_manager_for_config(&config, Arc::clone(&auth_manager))
+    });
     Ok(PluginCommandContext {
         xdcode_home: xdcode_home.to_path_buf(),
         plugins_input,
         manager,
-        auth: auth_manager.auth().await,
+        auth,
     })
 }
 

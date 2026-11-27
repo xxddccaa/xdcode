@@ -26,7 +26,7 @@ use xdcode_protocol::protocol::AskForApproval::OnRequest;
 fn saved_rules(rules: &[(&str, Decision)]) -> anyhow::Result<Policy> {
     let mut policy = Policy::empty();
     for &(host, decision) in rules {
-        policy.add_network_rule(host, Https, decision, None)?;
+        policy.add_network_rule(host, Https, decision, /*justification*/ None)?;
     }
     Ok(policy)
 }
@@ -274,12 +274,7 @@ allow_local_binding = {allow_local_binding}
 {domains}
 "#
     );
-    let mut test_config = toml::Value::try_from(crate::test_support::custom_provider_config())?;
-    xdcode_config::merge_toml_values(&mut test_config, &toml::from_str::<toml::Value>(&source)?);
-    std::fs::write(
-        home.path().join("config.toml"),
-        toml::to_string(&test_config)?,
-    )?;
+    std::fs::write(home.path().join("config.toml"), source)?;
     let config = ConfigBuilder::without_managed_config_for_tests()
         .xdcode_home(home.path().to_path_buf())
         .without_project_context()
@@ -302,9 +297,9 @@ allow_local_binding = {allow_local_binding}
             profile,
             ManagedProxyRouting::DedicatedListeners,
             LocalBindingPolicy::DefaultFalse,
-            None,
-            None,
-            false,
+            /*policy_decider*/ None,
+            /*blocked_request_observer*/ None,
+            /*enable_network_approval_flow*/ false,
             NetworkProxyAuditMetadata::default(),
         )
         .await?;

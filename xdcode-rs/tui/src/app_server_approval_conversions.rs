@@ -3,7 +3,7 @@
 //! The TUI mostly keeps app-server approval types intact. These helpers cover
 //! the remaining cases where the UI consumes a private file-change display
 //! model or needs to translate a granted permission response for outbound
-//! submission.
+//! submission. Server labels include registration scope without changing routing names.
 
 use crate::diff_model::FileChange;
 use std::collections::HashMap;
@@ -13,6 +13,13 @@ use xdcode_app_server_protocol::FileUpdateChange;
 use xdcode_app_server_protocol::GrantedPermissionProfile;
 use xdcode_app_server_protocol::PatchChangeKind;
 use xdcode_protocol::request_permissions::RequestPermissionProfile as CoreRequestPermissionProfile;
+
+pub(crate) fn mcp_server_label(server_name: &str, environment_id: Option<&str>) -> String {
+    match environment_id {
+        Some(environment_id) => format!("{server_name} (environment {environment_id})"),
+        None => server_name.to_string(),
+    }
+}
 
 pub(crate) fn granted_permission_profile_from_request(
     value: CoreRequestPermissionProfile,

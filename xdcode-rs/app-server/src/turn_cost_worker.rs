@@ -13,14 +13,15 @@ use xdcode_backend_client::Client as BackendClient;
 use xdcode_backend_client::RequestError;
 use xdcode_config::types::OtelExporterKind;
 use xdcode_core::config::Config;
+use xdcode_features::RuntimeAuthMode;
 use xdcode_login::AuthManager;
 use xdcode_model_provider::SharedModelProvider;
-use xdcode_model_provider::create_model_provider;
 use xdcode_otel::SessionTelemetry;
 use xdcode_protocol::ThreadId;
 use xdcode_protocol::auth::AuthMode;
 use xdcode_protocol::protocol::Event;
 use xdcode_protocol::protocol::EventMsg;
+use xdcode_runtime_agent_instance::RuntimeAuthManager;
 
 const POLL_INTERVAL: Duration = Duration::from_secs(150);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
@@ -81,6 +82,7 @@ struct WorkerRuntime {
     config: Arc<Config>,
     backend: TurnCostBackend,
     turns: HashMap<String, TurnCostEntry>,
+    runtime_auth: Option<(Arc<RuntimeAuthManager>, RuntimeAuthMode)>,
 }
 
 #[derive(Clone)]
@@ -98,7 +100,11 @@ enum BackendAvailability {
 }
 
 impl TurnCostWorker {
-    pub(crate) fn spawn(config: Arc<Config>, auth_manager: Arc<AuthManager>) -> Option<Self> {
+    pub(crate) fn spawn(
+        config: Arc<Config>,
+        auth_manager: Arc<AuthManager>,
+        runtime_auth: Option<(Arc<RuntimeAuthManager>, RuntimeAuthMode)>,
+    ) -> Option<Self> {
         let has_otel_log_exporter = matches!(
             config.otel.exporter,
             OtelExporterKind::OtlpHttp { .. } | OtelExporterKind::OtlpGrpc { .. }
@@ -116,10 +122,13 @@ impl TurnCostWorker {
         let backend = if is_hosted_provider {
             TurnCostBackend::Provider(Arc::clone(&auth_manager))
         } else {
-            TurnCostBackend::ModelProvider(create_model_provider(
-                config.model_provider.clone(),
-                Some(Arc::clone(&auth_manager)),
-            ))
+            TurnCostBackend::ModelProvider(
+                xdcode_model_provider::ProviderAuthContext {
+                    credentials: Arc::clone(&auth_manager),
+                    runtime_auth: runtime_auth.clone(),
+                }
+                .model_provider(config.model_provider.clone()),
+            )
         };
         let (sender, receiver) = mpsc::channel(OBSERVATION_CHANNEL_CAPACITY);
         let shutdown = CancellationToken::new();
@@ -127,6 +136,7 @@ impl TurnCostWorker {
             config: Arc::clone(&config),
             backend: backend.clone(),
             turns: HashMap::new(),
+            runtime_auth,
         };
         let worker_shutdown = shutdown.clone();
         let task = tokio::spawn(async move {
@@ -423,11 +433,15 @@ impl WorkerRuntime {
                     .model_provider
                     .to_api_provider(Some(AuthMode::ApiKey))
                     .map_err(|error| RequestError::Other(error.into()))?;
-                let client = BackendClient::from_auth(
-                    self.config.chatgpt_base_url.clone(),
+                let client = BackendClient::from_auth_with_runtime(
+                    self.config.chatgpt_backend_url().resolve(&auth),
                     &auth,
                     http_client_factory,
-                );
+                    self.runtime_auth.as_ref(),
+                    &provider.headers,
+                )
+                .await
+                .map_err(RequestError::Other)?;
                 client
                     .query_api_key_turn_costs(turn_ids, &provider.headers)
                     .await
@@ -448,17 +462,20 @@ impl WorkerRuntime {
                         return Ok(None);
                     }
                 }
-                let provider = model_provider
-                    .api_provider()
-                    .await
-                    .map_err(|error| RequestError::Other(error.into()))?;
-                let auth = model_provider
-                    .api_auth()
-                    .await
-                    .map_err(|error| RequestError::Other(error.into()))?;
+                let resolved = xdcode_model_provider::resolve_request(
+                    model_provider.as_ref(),
+                    /*scope*/ None,
+                    /*routing*/ None,
+                    http_client_factory,
+                )
+                .await
+                .map_err(|error| RequestError::Other(error.into()))?;
+                let provider = resolved.api_provider;
                 let endpoint = provider.url_for_path("analytics/xdcode/turn-costs");
-                let client = BackendClient::new(provider.base_url.clone(), http_client_factory)
-                    .with_auth_provider(auth);
+                let client =
+                    BackendClient::new(provider.base_url.clone(), resolved.http_client_factory)
+                        .with_auth_provider(resolved.api_auth)
+                        .map_err(RequestError::Other)?;
                 client
                     .query_api_key_turn_costs_at(&endpoint, turn_ids, &provider.headers)
                     .await

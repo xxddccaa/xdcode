@@ -9,10 +9,10 @@ use std::sync::Arc;
 use tokio::sync::Notify;
 use windows_sys::Win32::Foundation::HANDLE;
 use windows_sys::Win32::Security::ImpersonateLoggedOnUser;
-use xdcode_cloud_config::cloud_config_bundle_loader_for_storage_without_cache;
+use xdcode_cloud_config::chatgpt_config_bundle_loader_for_storage_without_cache;
 use xdcode_config::ConfigLoadOptions;
 use xdcode_config::ConfigRequirements;
-use xdcode_config::WindowsSandboxImplementationToml;
+use xdcode_config::types::WindowsSandboxModeToml;
 use xdcode_core::config::bootstrap_auth_config;
 use xdcode_core::config::load_config_toml_with_layer_stack;
 use xdcode_windows_sandbox::WindowsSandboxProvisioningSettings;
@@ -75,7 +75,7 @@ pub(crate) fn validate_provisioning_request(
                 .context("load bootstrap configuration")?;
                 // Use the default cloud-policy endpoint unless managed requirements override it.
                 bootstrap_config.config_toml.chatgpt_base_url = None;
-                let cloud_config_bundle = cloud_config_bundle_loader_for_storage_without_cache(
+                let cloud_config_bundle = chatgpt_config_bundle_loader_for_storage_without_cache(
                     bootstrap_auth_config(xdcode_home, &bootstrap_config)
                         .context("resolve cloud configuration authentication")?,
                     /*enable_xdcode_api_key_env*/ false,

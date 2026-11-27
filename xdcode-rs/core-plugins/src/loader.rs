@@ -106,7 +106,7 @@ enum PluginLoadScope<'a> {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum NonCuratedCacheRefreshMode {
+pub(crate) enum NonCuratedCacheRefreshMode {
     IfVersionChanged,
     ForceReinstall,
 }
@@ -195,6 +195,8 @@ async fn load_plugins_from_layer_stack_with_scope(
     let mut plugins = Vec::with_capacity(configured_plugins.len());
     let mut seen_mcp_server_names = HashMap::<String, String>::new();
     let scope = &scope;
+    // Overlap independent filesystem/skill loads, but consume them in configured-name order:
+    // that order determines duplicate MCP precedence and startup hook warning order.
     let mut pending_plugins = stream::iter(configured_plugins)
         .map(|(configured_name, plugin)| async move {
             let loaded_plugin = load_plugin(configured_name.clone(), &plugin, store, scope).await;
@@ -396,6 +398,7 @@ pub fn remote_installed_plugins_to_config(
                     release_id: None,
                     auto_provision: None,
                     mcp_servers: HashMap::new(),
+                    apps: HashMap::new(),
                 },
             ))
         })
@@ -531,67 +534,24 @@ pub(crate) fn refresh_non_curated_plugin_cache(
     additional_roots: &[AbsolutePathBuf],
     configured_plugin_keys: &[String],
 ) -> Result<bool, String> {
-    collapse_non_curated_cache_refresh(refresh_non_curated_plugin_cache_detailed(
+    collapse_non_curated_cache_refresh(refresh_non_curated_plugin_cache_with_mode(
         xdcode_home,
         additional_roots,
-        configured_plugin_keys,
-        PluginGitMode::Automatic,
-    ))
-}
-
-pub(crate) fn refresh_non_curated_plugin_cache_detailed(
-    xdcode_home: &Path,
-    additional_roots: &[AbsolutePathBuf],
-    configured_plugin_keys: &[String],
-    git_mode: PluginGitMode,
-) -> Result<NonCuratedCacheRefreshOutcome, String> {
-    refresh_non_curated_plugin_cache_with_mode(
-        xdcode_home,
-        additional_roots,
-        configured_plugin_keys,
+        configured_plugin_keys.iter().map(String::as_str),
         NonCuratedCacheRefreshMode::IfVersionChanged,
-        git_mode,
-    )
-}
-
-#[cfg(test)]
-pub(crate) fn refresh_non_curated_plugin_cache_force_reinstall(
-    xdcode_home: &Path,
-    additional_roots: &[AbsolutePathBuf],
-    configured_plugin_keys: &[String],
-) -> Result<bool, String> {
-    collapse_non_curated_cache_refresh(refresh_non_curated_plugin_cache_force_reinstall_detailed(
-        xdcode_home,
-        additional_roots,
-        configured_plugin_keys,
         PluginGitMode::Automatic,
     ))
 }
 
-pub(crate) fn refresh_non_curated_plugin_cache_force_reinstall_detailed(
+pub(crate) fn refresh_non_curated_plugin_cache_with_mode<'a>(
     xdcode_home: &Path,
     additional_roots: &[AbsolutePathBuf],
-    configured_plugin_keys: &[String],
-    git_mode: PluginGitMode,
-) -> Result<NonCuratedCacheRefreshOutcome, String> {
-    refresh_non_curated_plugin_cache_with_mode(
-        xdcode_home,
-        additional_roots,
-        configured_plugin_keys,
-        NonCuratedCacheRefreshMode::ForceReinstall,
-        git_mode,
-    )
-}
-
-fn refresh_non_curated_plugin_cache_with_mode(
-    xdcode_home: &Path,
-    additional_roots: &[AbsolutePathBuf],
-    configured_plugin_keys: &[String],
+    configured_plugin_keys: impl IntoIterator<Item = &'a str>,
     mode: NonCuratedCacheRefreshMode,
     git_mode: PluginGitMode,
 ) -> Result<NonCuratedCacheRefreshOutcome, String> {
     let mut configured_non_curated_plugin_ids = configured_plugin_keys
-        .iter()
+        .into_iter()
         .filter_map(|plugin_key| match PluginId::parse(plugin_key) {
             Ok(plugin_id)
                 if !is_hosted_provider_curated_marketplace_name(&plugin_id.marketplace_name) =>

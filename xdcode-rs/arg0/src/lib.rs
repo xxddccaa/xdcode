@@ -13,7 +13,7 @@ use xdcode_async_utils::THREAD_STACK_SIZE_BYTES;
 use xdcode_exec_server::XDCODE_ARG0_EXEC_HELPER_ARG1;
 use xdcode_exec_server::XDCODE_FS_HELPER_ARG1;
 use xdcode_install_context::InstallContext;
-use xdcode_sandboxing::landlock::XDCODE_LINUX_SANDBOX_ARG0;
+use xdcode_sandboxing::linux::XDCODE_LINUX_SANDBOX_ARG0;
 use xdcode_utils_home_dir::find_xdcode_home;
 #[cfg(target_os = "windows")]
 use xdcode_windows_sandbox::XDCODE_WINDOWS_SANDBOX_ARG1;
@@ -275,7 +275,9 @@ const ILLEGAL_ENV_VAR_PREFIX: &str = "XDCODE_";
 /// with names starting with `XDCODE_`.
 fn load_dotenv() {
     if let Ok(xdcode_home) = find_xdcode_home()
-        && let Ok(iter) = dotenvy::from_path_iter(xdcode_home.join(".env"))
+        && let dotenv_path = xdcode_home.join(".env")
+        && dotenv_path.is_file()
+        && let Ok(iter) = dotenvy::from_path_iter(dotenv_path)
     {
         set_filtered(iter);
     }
@@ -286,7 +288,13 @@ fn set_filtered<I>(iter: I)
 where
     I: IntoIterator<Item = Result<(String, String), dotenvy::Error>>,
 {
-    for (key, value) in iter.into_iter().flatten() {
+    for result in iter {
+        let (key, value) = match result {
+            Ok(entry) => entry,
+            // read_line consumes invalid UTF-8 lines. Other read errors may repeat.
+            Err(dotenvy::Error::Io(err)) if err.kind() != std::io::ErrorKind::InvalidData => break,
+            Err(_) => continue,
+        };
         if !key.to_ascii_uppercase().starts_with(ILLEGAL_ENV_VAR_PREFIX) {
             // It is safe to call set_var() because our process is
             // single-threaded at this point in its execution.

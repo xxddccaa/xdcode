@@ -1,7 +1,8 @@
 use super::SandboxCommand;
-#[cfg(windows)]
-use super::SandboxDirectSpawnTransformRequest;
+use super::SandboxExecutables;
 use super::SandboxManager;
+use super::SandboxNetwork;
+use super::SandboxSelection;
 use super::SandboxTransformRequest;
 use super::SandboxType;
 use super::SandboxablePreference;
@@ -116,16 +117,20 @@ fn unsandboxed_transform_preserves_foreign_cwd_and_unrestricted_file_system_poli
             },
             permissions: &permissions,
             workspace_roots: None,
-            sandbox: SandboxType::None,
-            enforce_managed_network: false,
-            environment_id: Some("remote"),
-            network: None,
+            selection: SandboxSelection::Explicit(SandboxType::None),
+            network: SandboxNetwork::new(
+                /*enforce_managed_network*/ false,
+                /*proxy*/ None,
+                Some("remote"),
+            ),
             sandbox_policy_cwd: &cwd_uri,
-            sandbox_exe: None,
+            executables: SandboxExecutables::Launcher(None),
             use_legacy_landlock: false,
             windows_sandbox_level: WindowsSandboxLevel::Disabled,
         })
-        .expect("transform");
+        .expect("transform")
+        .into_command_request()
+        .expect("command request");
 
     assert_eq!(exec_request.cwd, cwd_uri);
     assert_eq!(exec_request.sandbox_policy_cwd, cwd_uri);
@@ -177,16 +182,15 @@ fn symlinked_workspace_reports_seatbelt_preparation_error() {
             },
             permissions: &permissions,
             workspace_roots: None,
-            sandbox: SandboxType::MacosSeatbelt,
-            enforce_managed_network: false,
-            environment_id: None,
-            network: None,
+            selection: SandboxSelection::Explicit(SandboxType::MacosSeatbelt),
+            network: Default::default(),
             sandbox_policy_cwd: &workspace_uri,
-            sandbox_exe: None,
+            executables: SandboxExecutables::Launcher(None),
             use_legacy_landlock: false,
             windows_sandbox_level: WindowsSandboxLevel::Disabled,
         })
-        .expect_err("symlinked workspace should be rejected");
+        .err()
+        .expect("symlinked workspace should be rejected");
 
     assert!(matches!(
         &error,
@@ -232,16 +236,16 @@ fn transform_additional_permissions_enable_network_for_external_sandbox() {
             },
             permissions: &permissions,
             workspace_roots: None,
-            sandbox: SandboxType::None,
-            enforce_managed_network: false,
-            environment_id: None,
-            network: None,
+            selection: SandboxSelection::Explicit(SandboxType::None),
+            network: Default::default(),
             sandbox_policy_cwd: &cwd_uri,
-            sandbox_exe: None,
+            executables: SandboxExecutables::Launcher(None),
             use_legacy_landlock: false,
             windows_sandbox_level: WindowsSandboxLevel::Disabled,
         })
-        .expect("transform");
+        .expect("transform")
+        .into_command_request()
+        .expect("command request");
 
     assert_eq!(
         exec_request.permission_profile,
@@ -273,7 +277,7 @@ fn transform_additional_permissions_preserves_denied_entries() {
         &FileSystemSandboxPolicy::restricted(vec![
             FileSystemSandboxEntry::new(
                 FileSystemPath::Special {
-                    value: FileSystemSpecialPath::project_roots(None),
+                    value: FileSystemSpecialPath::project_roots(/*subpath*/ None),
                 },
                 FileSystemAccessMode::Read,
             ),
@@ -320,16 +324,18 @@ fn transform_additional_permissions_preserves_denied_entries() {
             },
             permissions: &permissions,
             workspace_roots: Some(roots),
-            sandbox: SandboxType::None,
-            enforce_managed_network: false,
-            network: None,
-            environment_id: None,
+            selection: SandboxSelection::Explicit(SandboxType::None),
+            network: Default::default(),
             sandbox_policy_cwd: &cwd_uri,
-            sandbox_exe: None,
+            executables: SandboxExecutables::Launcher(None),
             use_legacy_landlock: false,
             windows_sandbox_level: WindowsSandboxLevel::RestrictedToken,
         };
-        let exec_request = manager.transform(request).expect("transform");
+        let exec_request = manager
+            .transform(request)
+            .expect("transform")
+            .into_command_request()
+            .expect("command request");
         assert_eq!(
             exec_request.permission_profile,
             PermissionProfile::from_runtime_permissions(
@@ -383,118 +389,65 @@ fn managed_mitm_ca_bundle_becomes_readable_for_restricted_sandbox() {
     );
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
+fn sandbox_transform_request(cwd: &PathUri, sandbox: SandboxType) -> SandboxTransformRequest<'_> {
+    SandboxTransformRequest {
+        command: SandboxCommand {
+            program: "true".into(),
+            args: Vec::new(),
+            cwd: cwd.clone(),
+            env: HashMap::new(),
+            managed_network: None,
+            additional_permissions: None,
+        },
+        permissions: &PermissionProfile::Disabled,
+        workspace_roots: None,
+        selection: SandboxSelection::Explicit(sandbox),
+        network: Default::default(),
+        sandbox_policy_cwd: cwd,
+        executables: SandboxExecutables::Launcher(None),
+        use_legacy_landlock: false,
+        windows_sandbox_level: WindowsSandboxLevel::Disabled,
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn windows_token_filesystem_helper_is_unavailable_on_unix() {
+    let cwd = PathUri::from_abs_path(&AbsolutePathBuf::current_dir().expect("current dir"));
+    let request = SandboxTransformRequest {
+        permissions: &PermissionProfile::read_only(),
+        workspace_roots: Some(std::slice::from_ref(&cwd)),
+        windows_sandbox_level: WindowsSandboxLevel::RestrictedToken,
+        ..sandbox_transform_request(&cwd, SandboxType::WindowsRestrictedToken)
+    };
+
+    assert!(matches!(
+        SandboxManager::for_file_system_helpers().transform(request),
+        Err(super::SandboxTransformError::SandboxUnavailable)
+    ));
+}
+
+#[cfg(unix)]
 fn transform_linux_seccomp_request(
     xdcode_linux_sandbox_exe: &std::path::Path,
-    mode: crate::LinuxSandboxPidNamespace,
-) -> super::SandboxExecRequest {
-    let manager = SandboxManager::new().with_linux_sandbox_pid_namespace(mode);
-    let cwd = AbsolutePathBuf::current_dir().expect("current dir");
-    let cwd_uri = PathUri::from_abs_path(&cwd);
-    let permissions = PermissionProfile::Disabled;
+    manager: SandboxManager,
+) -> super::WrappedSandboxCommand {
+    let cwd = PathUri::from_abs_path(&AbsolutePathBuf::current_dir().expect("current dir"));
     manager
         .transform(SandboxTransformRequest {
-            command: SandboxCommand {
-                program: "true".into(),
-                args: Vec::new(),
-                cwd: cwd_uri.clone(),
-                env: HashMap::new(),
-                managed_network: None,
-                additional_permissions: None,
-            },
-            permissions: &permissions,
-            workspace_roots: None,
-            sandbox: SandboxType::LinuxSeccomp,
-            enforce_managed_network: false,
-            environment_id: None,
-            network: None,
-            sandbox_policy_cwd: &cwd_uri,
-            sandbox_exe: Some(xdcode_linux_sandbox_exe),
-            use_legacy_landlock: false,
-            windows_sandbox_level: WindowsSandboxLevel::Disabled,
+            executables: SandboxExecutables::Launcher(Some(xdcode_linux_sandbox_exe)),
+            ..sandbox_transform_request(&cwd, SandboxType::LinuxSeccomp)
         })
         .expect("transform")
 }
 
 #[cfg(target_os = "linux")]
 #[test]
-fn wsl1_rejects_linux_bubblewrap_path() {
-    let restricted_policy = FileSystemSandboxPolicy::restricted(vec![FileSystemSandboxEntry {
-        path: FileSystemPath::Special {
-            value: FileSystemSpecialPath::Root,
-        },
-        access: FileSystemAccessMode::Read,
-        missing_path_behavior: None,
-    }]);
-
-    assert!(matches!(
-        super::ensure_linux_bubblewrap_is_supported(
-            &restricted_policy,
-            /*use_legacy_landlock*/ false,
-            /*allow_network_for_proxy*/ false,
-            /*is_wsl1*/ true,
-        ),
-        Err(super::SandboxTransformError::Wsl1UnsupportedForBubblewrap)
-    ));
-    assert!(matches!(
-        super::ensure_linux_bubblewrap_is_supported(
-            &FileSystemSandboxPolicy::unrestricted(),
-            /*use_legacy_landlock*/ false,
-            /*allow_network_for_proxy*/ true,
-            /*is_wsl1*/ true,
-        ),
-        Err(super::SandboxTransformError::Wsl1UnsupportedForBubblewrap)
-    ));
-    assert!(matches!(
-        super::ensure_linux_bubblewrap_is_supported(
-            &FileSystemSandboxPolicy::unrestricted(),
-            /*use_legacy_landlock*/ true,
-            /*allow_network_for_proxy*/ true,
-            /*is_wsl1*/ true,
-        ),
-        Err(super::SandboxTransformError::Wsl1UnsupportedForBubblewrap)
-    ));
-}
-
-#[cfg(target_os = "linux")]
-#[test]
-fn wsl1_allows_non_bubblewrap_linux_paths() {
-    assert!(
-        super::ensure_linux_bubblewrap_is_supported(
-            &FileSystemSandboxPolicy::unrestricted(),
-            /*use_legacy_landlock*/ false,
-            /*allow_network_for_proxy*/ false,
-            /*is_wsl1*/ true,
-        )
-        .is_ok()
-    );
-
-    let restricted_policy = FileSystemSandboxPolicy::restricted(vec![FileSystemSandboxEntry {
-        path: FileSystemPath::Special {
-            value: FileSystemSpecialPath::Root,
-        },
-        access: FileSystemAccessMode::Read,
-        missing_path_behavior: None,
-    }]);
-    assert!(
-        super::ensure_linux_bubblewrap_is_supported(
-            &restricted_policy,
-            /*use_legacy_landlock*/ true,
-            /*allow_network_for_proxy*/ false,
-            /*is_wsl1*/ true,
-        )
-        .is_ok()
-    );
-}
-
-#[cfg(target_os = "linux")]
-#[test]
 fn transform_linux_seccomp_preserves_helper_path_in_arg0_when_available() {
     let xdcode_linux_sandbox_exe = std::path::PathBuf::from("/tmp/xdcode-linux-sandbox");
-    let exec_request = transform_linux_seccomp_request(
-        &xdcode_linux_sandbox_exe,
-        crate::LinuxSandboxPidNamespace::default(),
-    );
+    let exec_request =
+        transform_linux_seccomp_request(&xdcode_linux_sandbox_exe, SandboxManager::new()).request;
 
     assert_eq!(
         exec_request.arg0,
@@ -516,7 +469,11 @@ fn transform_linux_seccomp_uses_helper_alias_when_launcher_is_not_helper_path() 
             "--inherit-pid-namespace",
         ),
     ] {
-        let exec_request = transform_linux_seccomp_request(&xdcode_linux_sandbox_exe, mode);
+        let exec_request = transform_linux_seccomp_request(
+            &xdcode_linux_sandbox_exe,
+            SandboxManager::new().with_linux_sandbox_pid_namespace(mode),
+        )
+        .request;
         assert_eq!(exec_request.arg0, Some("xdcode-linux-sandbox".to_string()));
         assert_eq!(exec_request.command[1], first_helper_arg);
     }
@@ -524,12 +481,193 @@ fn transform_linux_seccomp_uses_helper_alias_when_launcher_is_not_helper_path() 
 
 #[cfg(unix)]
 #[tokio::test]
-async fn linux_unix_socket_grant_uses_effective_managed_policy() -> anyhow::Result<()> {
+async fn inherited_terminal_preserves_native_linux_helper_and_uses_its_dispatch_name()
+-> anyhow::Result<()> {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::symlink;
+
+    let dir = tempfile::tempdir()?;
+    let alias = OsStr::new(crate::linux::XDCODE_LINUX_SANDBOX_ARG0);
+    let alias_path = dir.path().join(alias);
+    for (helper, expected_arg0) in [
+        (alias_path.clone(), alias_path.as_os_str()),
+        (dir.path().join("xdcode"), alias),
+        #[cfg(target_os = "linux")]
+        (
+            dir.path().join(OsStr::from_bytes(b"cli-\xff")).join(alias),
+            alias,
+        ),
+    ] {
+        std::fs::create_dir_all(helper.parent().expect("helper directory"))?;
+        symlink("/bin/sh", &helper)?;
+        let mut wrapped =
+            transform_linux_seccomp_request(&helper, SandboxManager::for_inherited_terminal(&[]));
+        let facts = wrapped.integrity_request(Default::default());
+        assert_eq!(facts.launcher, Some(helper.as_os_str()));
+        // Run a shell probe with the executable and argv[0] produced by the Linux backend.
+        let probe = ["-c", r#"printf '%s' "$0""#];
+        wrapped.request.command.truncate(1);
+        let mut child = wrapped.into_direct_command()?;
+        assert_eq!(child.get_program(), helper.as_os_str());
+        let output = child.args(probe).output()?;
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(output.stdout, expected_arg0.as_bytes());
+
+        let mut wrapped = transform_linux_seccomp_request(&helper, SandboxManager::new());
+        wrapped
+            .request
+            .command
+            .splice(1.., probe.map(str::to_owned));
+        let mut child = wrapped
+            .spawn(crate::SpawnOptions {
+                tty: true,
+                stdin_open: true,
+                inherited_fds: xdcode_utils_pty::ChildFds::Inherited(&[]),
+            })
+            .await?;
+        let mut output = Vec::new();
+        while let Some(bytes) = child.stdout_rx.recv().await {
+            output.extend(bytes);
+        }
+        assert_eq!(
+            (child.exit_rx.await?, output),
+            (0, expected_arg0.as_bytes().to_vec())
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn native_launch_preserves_borrowed_proxy_credentials() -> anyhow::Result<()> {
+    use xdcode_network_proxy::CREDENTIAL_BROKER_ACTIVE_ENV_KEY;
+    use xdcode_network_proxy::ManagedProxyRouting;
+    use xdcode_network_proxy::NetworkProxy;
+    use xdcode_network_proxy::NetworkProxyConfig;
+    use xdcode_network_proxy::NetworkProxyState;
+    use xdcode_network_proxy::RemoteNetworkProxyConfig;
+    use xdcode_network_proxy::RemoteNetworkProxyLaunchConfig;
+    use xdcode_utils_path_uri::Platform;
+
+    let config = RemoteNetworkProxyConfig::from_effective_config(&NetworkProxyConfig {
+        enabled: true,
+        enable_socks5: false,
+        ..Default::default()
+    })?;
+    let state = NetworkProxyState::from_remote_launch_config(
+        RemoteNetworkProxyLaunchConfig::new(config),
+        Platform::native(),
+        &Default::default(),
+        &HashMap::new(),
+    )?;
+    let proxy = NetworkProxy::builder()
+        .state(state.into())
+        .managed_proxy_routing(ManagedProxyRouting::SharedIngress)
+        .build()
+        .await?;
+    let handle = proxy.run().await?;
+    let dir = tempfile::tempdir()?;
+    let access_key = dir.path().join("access-key");
+    let secret_key = dir.path().join("secret-key");
+    std::fs::write(&access_key, "aws-test-access-key")?;
+    std::fs::write(&secret_key, "aws-test-secret-key")?;
+    let mut config = proxy.current_cfg().await?;
+    config.set_credential_broker_enabled(/*enabled*/ true);
+    config.mitm_hooks = serde_json::from_value(serde_json::json!([{
+        "host": "s3.amazonaws.com",
+        "match": {"schemes": ["https"], "ports": [443], "methods": ["GET"], "path_prefixes": ["/"]},
+        "actions": {"aws_sigv4": {
+            "placeholder_access_key_id": "A", "region": "us-east-1", "service": "s3",
+            "access_key_id": {"file": access_key}, "secret_access_key": {"file": secret_key}
+        }}
+    }]))?;
+    proxy
+        .replace_config_state(xdcode_network_proxy::build_config_state(
+            config,
+            Default::default(),
+            Platform::native(),
+        )?)
+        .await?;
+    let cwd = PathUri::from_abs_path(&AbsolutePathBuf::current_dir()?);
+    let environment_id = Some("native");
+    let token = format!("ghp_{}", "x".repeat(36));
+    let raw = HashMap::from([
+        ("GH_HOST".into(), "github.enterprise.example".into()),
+        ("GH_ENTERPRISE_TOKEN".into(), token.clone()),
+        (CREDENTIAL_BROKER_ACTIVE_ENV_KEY.into(), "1".into()),
+        (
+            "XDCODE_NETWORK_PROXY_BROKERED_CREDENTIALS".into(),
+            "[]".into(),
+        ),
+    ]);
+    let prepared = proxy.prepare_for_optional_environment(raw.clone(), environment_id)?;
+    assert_ne!(prepared.env["GH_ENTERPRISE_TOKEN"], token);
+    assert_eq!(prepared.env["AWS_ACCESS_KEY_ID"], "A");
+
+    let mut stale = prepared.env.clone();
+    stale.insert("GH_HOST".into(), "https://bad.example/path".into());
+    stale.insert(
+        "XDCODE_NETWORK_PROXY_BROKERED_CREDENTIALS".into(),
+        "[]".into(),
+    );
+    let mut powershell = prepared.env.clone();
+    proxy.restore_and_disable_brokered_credentials(&mut powershell, &mut []);
+    assert!(!powershell.contains_key(CREDENTIAL_BROKER_ACTIVE_ENV_KEY));
+    assert_eq!(powershell["GH_ENTERPRISE_TOKEN"], token);
+    assert_eq!(powershell["AWS_ACCESS_KEY_ID"], "A");
+
+    let context = Some(prepared.sandbox_context);
+    for (env, context, expected) in [
+        (&raw, None, &prepared.env),
+        (&stale, context.clone(), &stale),
+        (&powershell, context, &powershell),
+    ] {
+        let request = SandboxManager::new()
+            .transform(SandboxTransformRequest {
+                command: SandboxCommand {
+                    program: "echo".into(),
+                    args: vec![],
+                    cwd: cwd.clone(),
+                    env: env.clone(),
+                    managed_network: context,
+                    additional_permissions: None,
+                },
+                permissions: &PermissionProfile::Disabled,
+                workspace_roots: None,
+                selection: SandboxSelection::Explicit(SandboxType::None),
+                network: SandboxNetwork::new(
+                    /*enforce_managed_network*/ false,
+                    Some(&proxy),
+                    environment_id,
+                ),
+                sandbox_policy_cwd: &cwd,
+                executables: SandboxExecutables::Launcher(None),
+                use_legacy_landlock: false,
+                windows_sandbox_level: WindowsSandboxLevel::Disabled,
+            })?
+            .into_command_request()?;
+        assert!(request.network.is_some());
+        assert_eq!(request.network_environment_id.as_deref(), environment_id);
+        assert_eq!(&request.env, expected);
+    }
+    handle.shutdown().await
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn linux_helper_uses_effective_managed_policy() -> anyhow::Result<()> {
+    for transparent_tcp in [false, true] {
+        check_linux_managed_policy(transparent_tcp).await?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+async fn proxy_allowing_all_unix_sockets() -> anyhow::Result<xdcode_network_proxy::NetworkProxy> {
     use std::sync::Arc;
     use xdcode_network_proxy::ConfigReloader;
     use xdcode_network_proxy::ConfigReloaderFuture;
     use xdcode_network_proxy::ConfigState;
-    use xdcode_network_proxy::ManagedNetworkSandboxContext;
     use xdcode_network_proxy::NetworkProxy;
     use xdcode_network_proxy::NetworkProxyConfig;
     use xdcode_network_proxy::NetworkProxyConstraints;
@@ -560,14 +698,91 @@ async fn linux_unix_socket_grant_uses_effective_managed_policy() -> anyhow::Resu
         NetworkProxyConstraints::default(),
         xdcode_utils_path_uri::Platform::native(),
     )?;
-    let network = NetworkProxy::builder()
+    NetworkProxy::builder()
         .state(Arc::new(NetworkProxyState::with_reloader(
             state,
             Arc::new(TestConfigReloader),
         )))
         .managed_by_xdcode(/*managed_by_xdcode*/ false)
         .build()
-        .await?;
+        .await
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn seatbelt_uses_prepared_route_over_live_proxy() -> anyhow::Result<()> {
+    use std::net::TcpListener;
+    use std::os::unix::net::UnixListener;
+    use xdcode_network_proxy::ManagedNetworkSandboxContext;
+
+    let proxy = proxy_allowing_all_unix_sockets().await?;
+    let dir = tempfile::tempdir_in("/tmp")?;
+    let cwd = AbsolutePathBuf::from_absolute_path(canonicalize(dir.path())?)?;
+    let allowed = cwd.join("allowed.sock");
+    let unrelated = cwd.join("unrelated.sock");
+    let _allowed_listener = UnixListener::bind(&allowed)?;
+    let _unrelated_listener = UnixListener::bind(&unrelated)?;
+    let listener = TcpListener::bind(("127.0.0.1", 0))?;
+    let port = listener.local_addr()?.port();
+    let route = ManagedNetworkSandboxContext {
+        loopback_ports: vec![port],
+        allow_unix_sockets: vec![allowed.to_string_lossy().into_owned()],
+        ..Default::default()
+    };
+    let probe = r#"
+import socket, sys
+try:
+    socket.socket(socket.AF_UNIX).connect(sys.argv[1])
+except PermissionError:
+    pass
+else:
+    raise AssertionError("unrelated Unix socket was reachable")
+socket.socket(socket.AF_UNIX).connect(sys.argv[2])
+socket.create_connection(("127.0.0.1", int(sys.argv[3]))).close()
+"#;
+    let cwd = PathUri::from_abs_path(&cwd);
+    let launch = SandboxManager::new().transform(SandboxTransformRequest {
+        command: SandboxCommand {
+            program: "/usr/bin/python3".into(),
+            args: vec![
+                "-c".into(),
+                probe.into(),
+                unrelated.to_string_lossy().into_owned(),
+                allowed.to_string_lossy().into_owned(),
+                port.to_string(),
+            ],
+            cwd: cwd.clone(),
+            env: HashMap::new(),
+            managed_network: Some(route),
+            additional_permissions: None,
+        },
+        permissions: &PermissionProfile::read_only(),
+        workspace_roots: Some(&[]),
+        selection: SandboxSelection::Explicit(SandboxType::MacosSeatbelt),
+        network: SandboxNetwork::new(
+            /*enforce_managed_network*/ true,
+            Some(&proxy),
+            /*environment_id*/ None,
+        ),
+        sandbox_policy_cwd: &cwd,
+        executables: SandboxExecutables::Launcher(None),
+        use_legacy_landlock: false,
+        windows_sandbox_level: WindowsSandboxLevel::Disabled,
+    })?;
+    let output = launch.into_direct_command()?.output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+async fn check_linux_managed_policy(transparent_tcp: bool) -> anyhow::Result<()> {
+    use xdcode_network_proxy::ManagedNetworkSandboxContext;
+
+    let network = proxy_allowing_all_unix_sockets().await?;
     let prepared =
         network.prepare_for_optional_environment(HashMap::new(), /*environment_id*/ None)?;
     let allow_all = prepared.sandbox_context;
@@ -578,7 +793,7 @@ async fn linux_unix_socket_grant_uses_effective_managed_policy() -> anyhow::Resu
     let denied = ManagedNetworkSandboxContext::default();
     let cwd = AbsolutePathBuf::current_dir()?;
     let cwd_uri = PathUri::from_abs_path(&cwd);
-    let manager = SandboxManager::new();
+    let manager = SandboxManager::new().with_linux_sandbox_transparent_tcp(transparent_tcp);
     for (label, context, live_proxy, enforce_managed_network, expected) in [
         (
             "missing policy stays managed with restrictive defaults",
@@ -617,7 +832,7 @@ async fn linux_unix_socket_grant_uses_effective_managed_policy() -> anyhow::Resu
         ),
         ("no managed network", Some(allow_all), true, false, None),
     ] {
-        let request = manager.transform(SandboxTransformRequest {
+        let prepared = manager.transform(SandboxTransformRequest {
             command: SandboxCommand {
                 program: "true".into(),
                 args: Vec::new(),
@@ -628,29 +843,39 @@ async fn linux_unix_socket_grant_uses_effective_managed_policy() -> anyhow::Resu
             },
             permissions: &PermissionProfile::Disabled,
             workspace_roots: None,
-            sandbox: SandboxType::LinuxSeccomp,
-            enforce_managed_network,
-            environment_id: None,
-            network: live_proxy.then_some(&network),
+            selection: SandboxSelection::Explicit(SandboxType::LinuxSeccomp),
+            network: SandboxNetwork::new(
+                enforce_managed_network,
+                live_proxy.then_some(&network),
+                /*environment_id*/ None,
+            ),
             sandbox_policy_cwd: &cwd_uri,
-            sandbox_exe: Some(std::path::Path::new("/tmp/xdcode-linux-sandbox")),
+            executables: SandboxExecutables::Launcher(Some(std::path::Path::new(
+                "/tmp/xdcode-linux-sandbox",
+            ))),
             use_legacy_landlock: false,
             windows_sandbox_level: WindowsSandboxLevel::Disabled,
         })?;
-        let transported_context = request
-            .command
+        let command = prepared.into_command_request()?.command;
+        assert_eq!(
+            command.iter().any(|arg| arg == "--transparent-tcp"),
+            transparent_tcp && expected.is_some(),
+            "{label}"
+        );
+        let transported_context = command
             .windows(2)
             .find(|args| args[0] == "--managed-network")
             .map(|args| serde_json::from_str::<ManagedNetworkSandboxContext>(&args[1]))
             .transpose()?;
         assert_eq!(transported_context, expected, "{label}");
     }
+
     Ok(())
 }
 
 #[cfg(target_os = "windows")]
 #[test]
-fn transform_for_direct_spawn_windows_preserves_only_wrapper_setup_environment() {
+fn windows_wrapper_preserves_only_setup_environment() {
     let mut env = HashMap::from([
         ("Path".to_string(), r"C:\Windows\System32".to_string()),
         ("username".to_string(), "wrong-user".to_string()),
@@ -710,7 +935,7 @@ fn wrapper_runtime_selection_uses_the_parent_not_environment_overrides() {
 
 #[cfg(target_os = "windows")]
 #[test]
-fn transform_for_direct_spawn_windows_materializes_inner_helper() {
+fn windows_file_system_wrapper_materializes_inner_helper() {
     let xdcode_home = tempfile::TempDir::new().expect("xdcode home");
     let helper_dir = tempfile::TempDir::new().expect("helper dir");
     let configured_helper = helper_dir.path().join("configured-xdcode-helper.exe");
@@ -746,49 +971,38 @@ fn transform_for_direct_spawn_windows_materializes_inner_helper() {
         ]),
         NetworkSandboxPolicy::Restricted,
     );
-    let other_workspace = tempfile::TempDir::new().expect("other workspace");
-    let other_workspace_root = AbsolutePathBuf::from_absolute_path(
-        canonicalize(other_workspace.path()).expect("canonical other workspace"),
+    let policy = super::PreparedLaunchPolicy::resolve(
+        permissions,
+        &cwd_uri,
+        Some(std::slice::from_ref(&cwd_uri)),
+        &[],
+        &super::SandboxOperation::FileSystemHelper,
     )
-    .expect("absolute other workspace");
-    let workspace_roots = [cwd, other_workspace_root];
-    let manager = SandboxManager::new();
-    let prepare = |roots, policy_cwd| {
-        manager
-            .transform_for_direct_spawn_with_xdcode_home(
-                SandboxDirectSpawnTransformRequest {
-                    workspace_roots: workspace_roots.as_slice(),
-                    windows_sandbox_proxy_settings_mode:
-                        xdcode_windows_sandbox::WindowsSandboxProxySettingsMode::Preserve,
-                    transform: SandboxTransformRequest {
-                        command: SandboxCommand {
-                            program: configured_helper.as_os_str().to_owned(),
-                            args: vec!["--xdcode-run-as-fs-helper".to_string()],
-                            cwd: cwd_uri.clone(),
-                            env: HashMap::from([(
-                                "Path".to_string(),
-                                r"C:\Windows\System32".to_string(),
-                            )]),
-                            managed_network: None,
-                            additional_permissions: None,
-                        },
-                        permissions: &permissions,
-                        workspace_roots: roots,
-                        sandbox: SandboxType::WindowsRestrictedToken,
-                        enforce_managed_network: false,
-                        environment_id: None,
-                        network: None,
-                        sandbox_policy_cwd: policy_cwd,
-                        sandbox_exe: Some(configured_helper.as_path()),
-                        use_legacy_landlock: false,
-                        windows_sandbox_level: WindowsSandboxLevel::RestrictedToken,
-                    },
-                },
-                Some(xdcode_home.path()),
-            )
-            .expect("transform for direct spawn")
+    .expect("resolve helper policy");
+    let mut exec_request = super::SandboxExecRequest {
+        native_program: None,
+        sandbox_override: super::SandboxOverride::NoOverride,
+        command: vec![
+            configured_helper.display().to_string(),
+            "--xdcode-run-as-fs-helper".to_string(),
+        ],
+        cwd: cwd_uri.clone(),
+        sandbox_policy_cwd: cwd_uri,
+        env: HashMap::from([("Path".to_string(), r"C:\Windows\System32".to_string())]),
+        network: None,
+        network_environment_id: None,
+        sandbox: SandboxType::WindowsRestrictedToken,
+        windows_sandbox_level: WindowsSandboxLevel::RestrictedToken,
+        permission_profile: policy.permissions,
+        arg0: None,
     };
-    let exec_request = prepare(None, &cwd_uri);
+    super::wrap_windows_file_system_helper(
+        &mut exec_request,
+        &policy.workspace_roots,
+        xdcode_home.path(),
+        Some(&configured_helper),
+    )
+    .expect("wrap filesystem helper");
 
     let inner_env_json = exec_request
         .command
@@ -834,50 +1048,6 @@ fn transform_for_direct_spawn_windows_materializes_inner_helper() {
         exec_request.command[separator_index + 2],
         "--xdcode-run-as-fs-helper"
     );
-    let explicit_root = PathUri::from_abs_path(&workspace_roots[1]);
-    for (request, expected_roots, expected_writes) in [
-        (&exec_request, &workspace_roots[..], None),
-        (
-            &prepare(Some(&[]), &cwd_uri),
-            &workspace_roots[..1],
-            Some([false, false]),
-        ),
-        (
-            &prepare(Some(std::slice::from_ref(&explicit_root)), &explicit_root),
-            &workspace_roots[1..],
-            Some([false, true]),
-        ),
-    ] {
-        assert_eq!(
-            request
-                .command
-                .windows(2)
-                .filter_map(|args| {
-                    (args[0] == "--workspace-root").then_some(std::path::PathBuf::from(&args[1]))
-                })
-                .collect::<Vec<_>>(),
-            expected_roots
-                .iter()
-                .map(|root| root.as_path().to_path_buf())
-                .collect::<Vec<_>>()
-        );
-        if let Some(expected_writes) = expected_writes {
-            let profile_json = request
-                .command
-                .windows(2)
-                .find(|args| args[0] == "--permission-profile")
-                .expect("serialized wrapper policy");
-            let policy = serde_json::from_str::<PermissionProfile>(&profile_json[1])
-                .expect("decode wrapper policy")
-                .file_system_sandbox_policy();
-            assert_eq!(
-                workspace_roots
-                    .each_ref()
-                    .map(|root| policy.can_write_local_path_with_cwd(root, &workspace_roots[0])),
-                expected_writes
-            );
-        }
-    }
     assert_eq!(
         materialized_helper
             .parent()
@@ -885,4 +1055,33 @@ fn transform_for_direct_spawn_windows_materializes_inner_helper() {
         Some(std::ffi::OsStr::new(".sandbox-bin"))
     );
     assert!(materialized_helper.exists());
+}
+
+#[test]
+fn restricted_token_preserves_read_only_carveouts_at_a_volume_root() -> anyhow::Result<()> {
+    let cwd = AbsolutePathBuf::current_dir()?;
+    let root = AbsolutePathBuf::from_absolute_path(cwd.ancestors().last().expect("volume root"))?;
+    // Exercise policy preparation without installing ACLs on the test host.
+    let read_only = root.join("xdcode-test-read-only");
+    let mut file_system = FileSystemSandboxPolicy::workspace_write(
+        &[],
+        /*exclude_tmpdir_env_var*/ true,
+        /*exclude_slash_tmp*/ true,
+    );
+    file_system.entries.push(FileSystemSandboxEntry::new(
+        read_only.clone().into(),
+        FileSystemAccessMode::Read,
+    ));
+    let profile =
+        PermissionProfile::from_runtime_permissions(&file_system, NetworkSandboxPolicy::Restricted);
+    let overrides = crate::resolve_windows_restricted_token_filesystem_overrides(
+        SandboxType::WindowsRestrictedToken,
+        &profile,
+        &root,
+        WindowsSandboxLevel::RestrictedToken,
+    )
+    .expect("prepare volume-root workspace")
+    .expect("read-only child");
+    assert_eq!(overrides.additional_deny_write_paths, [read_only]);
+    Ok(())
 }

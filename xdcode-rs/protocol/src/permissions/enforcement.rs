@@ -83,6 +83,7 @@ impl FileSystemSandboxPolicy {
                 resolved.writable_roots = Self::writable_roots(cwd, &entries, matching, projection);
             }
         }
+        // If the matcher couldn't be prepared, withhold grants but keep explicit denials.
         resolved.unreadable_roots =
             Self::unreadable_roots(cwd, &entries, matching.as_ref(), projection);
         Ok(resolved)

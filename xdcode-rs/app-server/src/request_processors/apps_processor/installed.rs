@@ -4,6 +4,7 @@ use xdcode_connectors::ConnectorRuntimeTool;
 use xdcode_connectors::connector_runtime_context_key;
 use xdcode_connectors::connector_tool_is_synthetic;
 use xdcode_connectors::installed_connector_runtime;
+use xdcode_extension_api::McpServerContributionContext;
 use xdcode_mcp::MCP_TOOL_XDCODE_APPS_META_KEY;
 use xdcode_mcp::McpRuntime;
 use xdcode_mcp::McpRuntimeInput;
@@ -58,12 +59,14 @@ impl AppsRequestProcessor {
                     None,
                 ),
             };
-            let auth = self.auth_manager.auth().await;
+            let mcp_manager = thread.as_ref().map(|thread| thread.mcp_manager())
+                .unwrap_or_else(|| self.thread_manager.mcp_manager());
+            let auth_manager = mcp_manager.auth_manager();
+            let auth = auth_manager.auth().await;
             let runtime_enabled = config
                 .features
                 .apps_enabled_for_auth(auth.as_ref().is_some_and(XdcodeAuth::uses_xdcode_backend));
 
-            let mcp_manager = self.thread_manager.mcp_manager();
             let cache_key = connector_runtime_context_key(auth.as_ref());
             let previous_snapshot = mcp_manager
                 .xdcode_apps_tools_cache()
@@ -77,16 +80,17 @@ impl AppsRequestProcessor {
                         snapshot_age = Some(Duration::ZERO);
                         return Ok(snapshot.tools);
                     }
-                    let mcp_config = mcp_manager.runtime_config(&config).await;
+                    let mcp_config = mcp_manager.runtime_config(McpServerContributionContext::global(&config)).await;
                     let mut mcp_servers = effective_mcp_servers(&mcp_config, auth.as_ref());
-                    mcp_servers.retain(|name, _| name == XDCODE_APPS_MCP_SERVER_NAME);
+                    let xdcode_apps_server = xdcode_mcp::McpServerKey::unscoped(XDCODE_APPS_MCP_SERVER_NAME);
+                    mcp_servers.retain(|key, _| key == &xdcode_apps_server);
                     let mcp_config = Arc::new(mcp_config.for_threadless_operations(&mcp_servers));
                     anyhow::ensure!(
                         !mcp_servers.is_empty(),
                         "host-owned MCP server '{XDCODE_APPS_MCP_SERVER_NAME}' is not enabled"
                     );
                     let startup_timeout = mcp_servers
-                        .get(XDCODE_APPS_MCP_SERVER_NAME)
+                        .get(&xdcode_apps_server)
                         .and_then(|server| server.config().startup_timeout_sec)
                         .unwrap_or(CONNECTOR_RUNTIME_REFRESH_TIMEOUT);
                     let runtime_context = McpRuntimeContext::new(
@@ -96,9 +100,11 @@ impl AppsRequestProcessor {
                     let cancellation_token = CancellationToken::new();
                     let xdcode_apps_auth_manager =
                         host_owned_xdcode_apps_enabled(&mcp_config, auth.as_ref())
-                            .then(|| Arc::clone(&self.auth_manager));
+                            .then(|| Arc::clone(&auth_manager));
+                    self.thread_manager.runtime_auth_for_mcp_manager(&config, &mcp_manager)?;
                     let runtime = McpRuntime::new(McpRuntimeInput {
                         network_policy_metadata: None,
+                        runtime_auth: mcp_manager.runtime_auth_for_config(&config),
                         startup_policy: McpStartupPolicy::Eager,
                         config: Arc::clone(&mcp_config),
                         plugins_available: false,

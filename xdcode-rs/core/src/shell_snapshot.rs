@@ -21,11 +21,13 @@ use tokio::time::timeout;
 use tracing::Instrument;
 use tracing::info_span;
 use xdcode_exec_server::Environment;
+use xdcode_network_proxy::CHILD_ONLY_CA_ENV_KEYS;
 use xdcode_network_proxy::CREDENTIAL_BROKER_ACTIVE_ENV_KEY;
 use xdcode_network_proxy::CredentialBrokerContext;
 use xdcode_network_proxy::NetworkProxy;
 use xdcode_network_proxy::brokered_credential_marker_env_keys;
 use xdcode_network_proxy::brokered_credential_value_env_keys;
+use xdcode_network_proxy::is_managed_mitm_ca_trust_bundle_path;
 use xdcode_otel::SessionTelemetry;
 use xdcode_protocol::ThreadId;
 use xdcode_protocol::config_types::ShellEnvironmentPolicy;
@@ -693,6 +695,15 @@ async fn capture_snapshot(
         .network_proxy
         .apply_to_env_for_snapshot(&mut env);
     let mut snapshot_allowed_env = env.clone();
+    // The launcher supplies fresh CA defaults on replay. Retain overrides from shell startup.
+    for key in CHILD_ONLY_CA_ENV_KEYS {
+        if original_env
+            .get(key)
+            .is_some_and(|value| is_managed_mitm_ca_trust_bundle_path(value))
+        {
+            snapshot_allowed_env.remove(key);
+        }
+    }
     // The live broker regenerates this marker; captured dummies can belong to another scope.
     snapshot_allowed_env.remove("XDCODE_NETWORK_PROXY_BROKERED_CREDENTIALS");
     for key in &provider_context_keys {

@@ -15,6 +15,8 @@ impl TestXdcodeExecBuilder {
                 .expect("should find binary for xdcode-exec"),
         );
         cmd.current_dir(self.cwd.path())
+            // A suite can run many CLI processes. Each only needs a small runtime.
+            .env("TOKIO_WORKER_THREADS", "2")
             .env("XDCODE_HOME", self.home.path())
             .env("XDCODE_SQLITE_HOME", self.home.path())
             .env(XDCODE_API_KEY_ENV_VAR, "dummy");

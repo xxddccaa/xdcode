@@ -11,6 +11,7 @@ xdcode_rust_crate(
         "//xdcode-rs/bwrap:bwrap",
         "//xdcode-rs/code-mode-host:xdcode-code-mode-host",
         "//xdcode-rs/linux-sandbox:xdcode-linux-sandbox",
+        "//xdcode-rs/message-board-mcp:xdcode-message-board-mcp",
         "//xdcode-rs/rmcp-client:test_stdio_server",
         "//xdcode-rs/rmcp-client:test_streamable_http_server",
         "//xdcode-rs/cli:xdcode",
@@ -18,7 +19,10 @@ xdcode_rust_crate(
         "//xdcode-rs/windows-sandbox-rs:xdcode-windows-managed-deny-probe",
         "//xdcode-rs/windows-sandbox-rs:xdcode-windows-sandbox-setup",
     ],
-    integration_compile_data_extra = glob(["assets/**"]),
+    integration_compile_data_extra = glob(["assets/**"]) + [
+        "//xdcode-rs/message-board:tests/common/mod.rs",
+        "//xdcode-rs/prompts:templates/permissions/approval_policy/on_request_rule_request_permission.md",
+    ],
     integration_test_timeout = "long",
     run_tests_with_wine_exec = True,
     rustc_env = {
@@ -27,17 +31,30 @@ xdcode_rust_crate(
         "CARGO_MANIFEST_DIR": "xdcode-rs/core",
     },
     test_data_extra = [
+        "//xdcode-rs/message-board-mcp:package-files",
         "config.schema.json",
     ] + glob(["src/**/snapshots/**"]) + [
     ],
     test_shard_counts = {
         "core-all-test": 16,
-        "core-unit-tests": 8,
+        "core-unit-tests": 16,
     },
     test_tags = ["no-sandbox"],
     test_threads = select({
         "@platforms//os:macos": 1,
         "//conditions:default": 0,
     }),
+    unit_test_srcs = glob([
+        "src/**/*_test.rs",
+        "src/**/*_tests.rs",
+        "src/**/tests.rs",
+        "src/**/tests/**/*.rs",
+    ]) + [
+        "src/apps/render.rs",
+        "src/config/schema.rs",
+        "src/context/world_state/test_support.rs",
+        "src/guardian/test_host.rs",
+        "src/plugins/test_support.rs",
+    ],
     unit_test_timeout = "long",
 )

@@ -1,9 +1,8 @@
 ---
 source: cli/tests/doctor_enterprise_network.rs
-assertion_line: 246
 expression: stdout
 ---
-Xdcode Doctor v0.165.0
+Xdcode Doctor v0.0.0
 
 Notes
    [XX] config       config could not be loaded - Fix the reported config error, then rerun xdcode doctor.

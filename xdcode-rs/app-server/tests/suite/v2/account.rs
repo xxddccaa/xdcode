@@ -9,6 +9,12 @@ use app_test_support::DEFAULT_CLIENT_NAME;
 use app_test_support::encode_id_token;
 use app_test_support::write_chatgpt_auth;
 use app_test_support::write_models_cache;
+use axum::Router;
+use axum::body::Body;
+use axum::http::HeaderMap;
+use axum::http::Uri;
+use axum::http::header::HOST;
+use axum::routing::get;
 use chrono::Duration as ChronoDuration;
 use chrono::Utc;
 use core_test_support::responses;
@@ -20,8 +26,11 @@ use std::sync::Arc;
 use std::time::Duration;
 use tempfile::TempDir;
 use test_case::test_case;
+use tokio::net::TcpListener;
 use tokio::sync::Notify;
 use tokio::time::timeout;
+use tokio_util::sync::CancellationToken;
+use tokio_util::task::AbortOnDropHandle;
 use url::Url;
 use wiremock::Mock;
 use wiremock::MockServer;
@@ -225,6 +234,7 @@ async fn assert_account_updated(
     assert_eq!(
         payload,
         AccountUpdatedNotification {
+            reason: None,
             auth_mode,
             plan_type: None,
         }
@@ -377,6 +387,69 @@ async fn logout_account_removes_auth_and_notifies(enterprise_cleanup_failure: bo
     let account: GetAccountResponse =
         timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(get_id)).await??;
     assert_eq!(account.account, None);
+    Ok(())
+}
+
+#[tokio::test]
+async fn logout_account_requires_a_successful_auth_reload() -> Result<()> {
+    let oauth_server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/oauth/revoke"))
+        .and(wiremock::matchers::body_partial_json(
+            json!({"token": "refresh-b"}),
+        ))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&oauth_server)
+        .await;
+    let xdcode_home = TempDir::new()?;
+    create_config_toml(xdcode_home.path(), CreateConfigTomlParams::default())?;
+    write_chatgpt_auth(
+        xdcode_home.path(),
+        ChatGptAuthFixture::new("access-a").refresh_token("refresh-a"),
+        AuthCredentialsStoreMode::File,
+    )?;
+    let refresh_url = format!("{}/oauth/token", oauth_server.uri());
+    let mut mcp = TestAppServer::builder()
+        .with_xdcode_home(xdcode_home.path())
+        .without_auto_env()
+        .with_env_overrides(&[
+            ("PROVIDER_API_KEY", None),
+            (REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR, Some(&refresh_url)),
+        ])
+        .build_initialized_with_timeout(DEFAULT_READ_TIMEOUT)
+        .await?;
+
+    let auth_file = xdcode_home.path().join("auth.json");
+    let unreadable = "{";
+    std::fs::write(&auth_file, unreadable)?;
+    let id = mcp.send_logout_account_request().await?;
+    let error = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_error_message(RequestId::Integer(id)),
+    )
+    .await??;
+    assert_eq!(error.error.code, -32603);
+    assert_eq!(std::fs::read_to_string(&auth_file)?, unreadable);
+    assert!(
+        oauth_server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .all(|request| request.url.path() != "/oauth/revoke"),
+    );
+
+    // Once storage is readable, logout must revoke the newly loaded account.
+    write_chatgpt_auth(
+        xdcode_home.path(),
+        ChatGptAuthFixture::new("access-b").refresh_token("refresh-b"),
+        AuthCredentialsStoreMode::File,
+    )?;
+    let id = mcp.send_logout_account_request().await?;
+    let _: LogoutAccountResponse = timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(id)).await??;
+    assert!(!auth_file.exists());
+    oauth_server.verify().await;
     Ok(())
 }
 
@@ -559,10 +632,12 @@ async fn set_auth_token_updates_account_and_notifies() -> Result<()> {
     assert_eq!(
         account,
         GetAccountResponse {
+            user_id: None,
             workspace_routing: expected_workspace_routing(WORKSPACE_ID_EMBEDDED),
             account: Some(Account::Chatgpt {
                 email: Some("embedded@example.com".to_string()),
                 plan_type: AccountPlanType::Pro,
+                workspace_name: None,
             }),
             requires_hosted_auth: true,
         }
@@ -637,10 +712,12 @@ async fn account_read_refresh_token_is_noop_in_external_mode() -> Result<()> {
     assert_eq!(
         account,
         GetAccountResponse {
+            user_id: None,
             workspace_routing: expected_workspace_routing(WORKSPACE_ID_EMBEDDED),
             account: Some(Account::Chatgpt {
                 email: Some("embedded@example.com".to_string()),
                 plan_type: AccountPlanType::Pro,
+                workspace_name: None,
             }),
             requires_hosted_auth: true,
         }
@@ -1231,11 +1308,14 @@ async fn login_account_api_key_succeeds_and_notifies() -> Result<()> {
     Ok(())
 }
 
-#[test_case("amazonBedrock"; "api_key")]
-#[test_case("amazonBedrockAccessKeys"; "access_keys")]
+#[test_case("amazonBedrock", "amazon-bedrock"; "legacy_api_key")]
+#[test_case("amazonBedrockAccessKeys", "amazon-bedrock"; "legacy_access_keys")]
+#[test_case("amazonBedrock", "amazon-bedrock-runtime"; "runtime_api_key")]
+#[test_case("amazonBedrockAccessKeys", "amazon-bedrock-runtime"; "runtime_access_keys")]
 #[tokio::test]
 async fn login_amazon_bedrock_replaces_primary_auth_and_persists_provider(
     credential_type: &str,
+    provider_id: &str,
 ) -> Result<()> {
     let managed_access_keys = credential_type == "amazonBedrockAccessKeys";
     let xdcode_home = TempDir::new()?;
@@ -1245,9 +1325,9 @@ async fn login_amazon_bedrock_replaces_primary_auth_and_persists_provider(
     std::fs::write(
         &config_path,
         format!(
-            "{original_config}\n[model_providers.amazon-bedrock]\n\
+            "{original_config}\n[model_providers.{provider_id}]\n\
              http_headers = {{ X-Existing = \"preserved\" }}\n\
-             [model_providers.amazon-bedrock.aws]\n\
+             [model_providers.{provider_id}.aws]\n\
              profile = \"stale-profile\"\n\
              region = \"us-east-1\"\n\
              auth_refresh = {{ command = \"aws\" }}\n"
@@ -1262,7 +1342,11 @@ async fn login_amazon_bedrock_replaces_primary_auth_and_persists_provider(
     let mut mcp = TestAppServer::builder()
         .with_xdcode_home(xdcode_home.path())
         .without_auto_env()
-        .with_env_overrides(&[("PROVIDER_API_KEY", None)])
+        .with_env_overrides(&[
+            ("PROVIDER_API_KEY", None),
+            ("PROVIDER_FEDERATION_RULE_ID", None),
+            ("PROVIDER_IDENTITY_TOKEN_FILE", None),
+        ])
         .build_initialized_with_timeout(DEFAULT_READ_TIMEOUT)
         .await?;
     let mut expected_config = read_config_toml(xdcode_home.path())?;
@@ -1271,17 +1355,17 @@ async fn login_amazon_bedrock_replaces_primary_auth_and_persists_provider(
         .expect("config should be a table")
         .insert(
             "model_provider".to_string(),
-            toml::Value::String("amazon-bedrock".to_string()),
+            toml::Value::String(provider_id.to_string()),
         );
-    expected_config["model_providers"]["amazon-bedrock"]["aws"]
+    expected_config["model_providers"][provider_id]["aws"]
         .as_table_mut()
         .expect("AWS configuration should be a table")
         .remove("profile");
     if managed_access_keys {
-        expected_config["model_providers"]["amazon-bedrock"]["aws"]["region"] =
+        expected_config["model_providers"][provider_id]["aws"]["region"] =
             toml::Value::String("us-west-2".to_string());
     }
-    let params = if managed_access_keys {
+    let mut params = if managed_access_keys {
         json!({
             "type": credential_type,
             "accessKeyId": " test-id ",
@@ -1296,6 +1380,9 @@ async fn login_amazon_bedrock_replaces_primary_auth_and_persists_provider(
             "region": " us-west-2 ",
         })
     };
+    if provider_id == "amazon-bedrock-runtime" {
+        params["providerId"] = json!(provider_id);
+    }
     let request_id = mcp.send_login_account_request(params).await?;
     let response: JSONRPCResponse = timeout(
         DEFAULT_READ_TIMEOUT,
@@ -1360,6 +1447,7 @@ async fn login_amazon_bedrock_replaces_primary_auth_and_persists_provider(
     assert_eq!(
         read_account(&mut mcp).await?,
         GetAccountResponse {
+            user_id: None,
             workspace_routing: None,
             account: Some(Account::AmazonBedrock {
                 uses_xdcode_managed_credentials: true,
@@ -1375,7 +1463,7 @@ async fn login_amazon_bedrock_replaces_primary_auth_and_persists_provider(
             .expect("config should be a table");
         expected_logout_config_root.remove("model_provider");
         expected_logout_config_root.remove("model");
-        expected_logout_config["model_providers"]["amazon-bedrock"]
+        expected_logout_config["model_providers"][provider_id]
             .as_table_mut()
             .expect("Bedrock provider config should be a table")
             .remove("aws");
@@ -1394,6 +1482,7 @@ async fn login_amazon_bedrock_replaces_primary_auth_and_persists_provider(
         assert_eq!(
             read_account(&mut mcp).await?,
             GetAccountResponse {
+                user_id: None,
                 workspace_routing: None,
                 account: None,
                 requires_hosted_auth: true,
@@ -1436,7 +1525,7 @@ async fn login_amazon_bedrock_rejects_non_bedrock_provider_override_without_chan
     .await??;
     assert_eq!(
         error.error.message,
-        "Amazon Bedrock login cannot select `amazon-bedrock` because session-flags sets `model_provider` to \"mock_provider\""
+        "Cannot configure `model_provider`: Overridden by session flags"
     );
     assert_eq!(load_file_auth(xdcode_home.path())?, expected_auth);
     assert_eq!(read_config_toml(xdcode_home.path())?, expected_config);
@@ -1465,10 +1554,9 @@ async fn login_amazon_bedrock_rejects_non_bedrock_provider_override_without_chan
 
 #[tokio::test]
 async fn login_amazon_bedrock_access_keys_rejects_overridden_aws_configuration() -> Result<()> {
-    for config_override in [
-        r#"model_providers.amazon-bedrock.aws.profile="other-account""#,
-        r#"model_providers.amazon-bedrock.aws.region="eu-west-1""#,
-    ] {
+    for (field, value) in [("profile", "other-account"), ("region", "eu-west-1")] {
+        let key = format!("model_providers.amazon-bedrock.aws.{field}");
+        let config_override = format!(r#"{key}="{value}""#);
         let xdcode_home = TempDir::new()?;
         create_config_toml(xdcode_home.path(), CreateConfigTomlParams::default())?;
         login_with_api_key(
@@ -1483,9 +1571,11 @@ async fn login_amazon_bedrock_access_keys_rejects_overridden_aws_configuration()
             .with_xdcode_home(xdcode_home.path())
             .without_auto_env()
             .with_env_overrides(&[("PROVIDER_API_KEY", None)])
-            .with_args(&["-c", config_override])
+            .with_args(&["-c", &config_override])
             .build_initialized_with_timeout(DEFAULT_READ_TIMEOUT)
             .await?;
+        let config_path = xdcode_home.path().join("config.toml");
+        let expected_config = std::fs::read_to_string(&config_path)?;
 
         let request_id = mcp
             .send_login_account_request(json!({
@@ -1503,9 +1593,10 @@ async fn login_amazon_bedrock_access_keys_rejects_overridden_aws_configuration()
 
         assert_eq!(
             error.error.message,
-            "Amazon Bedrock configuration cannot take effect: Overridden by session flags"
+            format!("Cannot configure `{key}`: Overridden by session flags")
         );
         assert_eq!(load_file_auth(xdcode_home.path())?, expected_auth);
+        assert_eq!(std::fs::read_to_string(&config_path)?, expected_config);
     }
 
     Ok(())
@@ -1608,6 +1699,7 @@ async fn logout_managed_bedrock_restores_default_account(
     assert_eq!(
         read_account(&mut mcp).await?,
         GetAccountResponse {
+            user_id: None,
             workspace_routing: None,
             account: Some(Account::AmazonBedrock {
                 uses_xdcode_managed_credentials: true,
@@ -1659,6 +1751,7 @@ async fn logout_managed_bedrock_restores_default_account(
     assert_eq!(
         read_account(&mut mcp).await?,
         GetAccountResponse {
+            user_id: None,
             workspace_routing: None,
             account: None,
             requires_hosted_auth: true,
@@ -1724,6 +1817,7 @@ async fn logout_aws_managed_bedrock_clears_provider_and_restores_default_account
         assert_eq!(
             read_account(&mut mcp).await?,
             GetAccountResponse {
+                user_id: None,
                 workspace_routing: None,
                 account: Some(Account::AmazonBedrock {
                     uses_xdcode_managed_credentials: false,
@@ -1763,6 +1857,7 @@ async fn logout_aws_managed_bedrock_clears_provider_and_restores_default_account
         assert_eq!(
             read_account(&mut mcp).await?,
             GetAccountResponse {
+                user_id: None,
                 workspace_routing: None,
                 account: None,
                 requires_hosted_auth: true,
@@ -1832,6 +1927,7 @@ async fn logout_managed_bedrock_preserves_changed_provider_without_experimental_
     assert_eq!(
         read_account(&mut mcp).await?,
         GetAccountResponse {
+            user_id: None,
             workspace_routing: None,
             account: None,
             requires_hosted_auth: false,
@@ -1912,6 +2008,7 @@ async fn login_managed_bedrock_updates_active_bedrock_account() -> Result<()> {
     assert_eq!(
         read_account(&mut mcp).await?,
         GetAccountResponse {
+            user_id: None,
             workspace_routing: None,
             account: Some(Account::AmazonBedrock {
                 uses_xdcode_managed_credentials: true,
@@ -2198,6 +2295,20 @@ async fn login_account_chatgpt_device_code_returns_error_when_disabled() -> Resu
 
 #[tokio::test]
 async fn login_account_chatgpt_device_code_succeeds_and_notifies() -> Result<()> {
+    assert_device_login(DeviceLoginStorage::Writable).await
+}
+
+#[tokio::test]
+async fn device_code_login_reports_failed_save_with_client_originator() -> Result<()> {
+    assert_device_login(DeviceLoginStorage::BlockSave).await
+}
+
+enum DeviceLoginStorage {
+    Writable,
+    BlockSave,
+}
+
+async fn assert_device_login(storage: DeviceLoginStorage) -> Result<()> {
     let xdcode_home = TempDir::new()?;
     let mock_server = MockServer::start().await;
     create_config_toml(
@@ -2209,7 +2320,12 @@ async fn login_account_chatgpt_device_code_succeeds_and_notifies() -> Result<()>
         },
     )?;
     write_models_cache(xdcode_home.path()).await?;
-    let collector = super::auth_storage_originator::configure_collector(xdcode_home.path()).await?;
+    let collector = match storage {
+        DeviceLoginStorage::Writable => None,
+        DeviceLoginStorage::BlockSave => {
+            Some(super::auth_storage_originator::configure_collector(xdcode_home.path()).await?)
+        }
+    };
 
     mock_device_code_usercode(&mock_server, /*interval_seconds*/ 0).await;
     mock_device_code_token_success(&mock_server).await;
@@ -2240,6 +2356,11 @@ async fn login_account_chatgpt_device_code_succeeds_and_notifies() -> Result<()>
     })
     .await?;
 
+    if collector.is_some() {
+        // A successful account switch revokes in-flight exports for the old account.
+        // Exercise attribution on the same async device-login save path without switching.
+        std::fs::create_dir(xdcode_home.path().join("auth.json"))?;
+    }
     let request_id = mcp.send_login_account_chatgpt_device_code_request().await?;
     let login: LoginAccountResponse =
         timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(request_id)).await??;
@@ -2264,6 +2385,15 @@ async fn login_account_chatgpt_device_code_succeeds_and_notifies() -> Result<()>
         bail!("unexpected notification: {parsed:?}");
     };
     assert_eq!(payload.login_id, Some(login_id));
+    if let Some(collector) = collector {
+        assert!(!payload.success);
+        assert!(payload.error.is_some());
+        return super::auth_storage_originator::assert_saved_originators(
+            &collector,
+            &["xdcode_vscode"],
+        )
+        .await;
+    }
     assert_eq!(payload.success, true);
     assert_eq!(payload.error, None);
 
@@ -2282,8 +2412,6 @@ async fn login_account_chatgpt_device_code_succeeds_and_notifies() -> Result<()>
         xdcode_home.path().join("auth.json").exists(),
         "auth.json should be created when device code login succeeds"
     );
-    super::auth_storage_originator::assert_saved_originators(&collector, &["xdcode_vscode"])
-        .await?;
     Ok(())
 }
 
@@ -2303,11 +2431,53 @@ async fn login_survives_same_owner_token_refresh(
 ) -> Result<()> {
     let xdcode_home = TempDir::new()?;
     let backend = MockServer::start().await;
+    let release_response = CancellationToken::new();
+    let (chatgpt_base_url, _response_gate) = match refresh_trigger {
+        LoginRefreshTrigger::AuthStatus => {
+            let listener = TcpListener::bind("127.0.0.1:0").await?;
+            let base_url = format!("http://{}/backend-api", listener.local_addr()?);
+            let upstream = backend.uri();
+            let gated_path = delayed_path.to_string();
+            let release = release_response.clone();
+            let client = HttpClientBuilder::new().build_direct()?;
+            // Keep Wiremock's matching and request recording, but hold the response
+            // asynchronously so the token refresh can use the same mock backend.
+            let router = Router::new().fallback(get(move |uri: Uri, mut headers: HeaderMap| {
+                let upstream = upstream.clone();
+                let gated_path = gated_path.clone();
+                let release = release.clone();
+                let client = client.clone();
+                async move {
+                    let hold_response = uri.path() == gated_path
+                        && headers
+                            .get("authorization")
+                            .is_some_and(|value| value == "Bearer access-token-123");
+                    headers.remove(HOST);
+                    let response = client
+                        .get(format!("{upstream}{uri}"))
+                        .headers(headers)
+                        .send()
+                        .await
+                        .expect("mock backend response");
+                    if hold_response {
+                        release.cancelled().await;
+                    }
+                    response.into_http_response().map(Body::new)
+                }
+            }));
+            let task =
+                AbortOnDropHandle::new(tokio::spawn(
+                    async move { axum::serve(listener, router).await },
+                ));
+            (base_url, Some(task))
+        }
+        LoginRefreshTrigger::UnauthorizedConfig => (format!("{}/backend-api", backend.uri()), None),
+    };
     create_config_toml(
         xdcode_home.path(),
         CreateConfigTomlParams {
             requires_hosted_auth: Some(true),
-            chatgpt_base_url: Some(format!("{}/backend-api", backend.uri())),
+            chatgpt_base_url: Some(chatgpt_base_url),
             ..Default::default()
         },
     )?;
@@ -2359,11 +2529,11 @@ async fn login_survives_same_owner_token_refresh(
                 .and(header("authorization", "Bearer access-token-123"))
                 .respond_with(move |_: &wiremock::Request| {
                     request_started.notify_one();
-                    ResponseTemplate::new(match refresh_trigger {
-                        LoginRefreshTrigger::AuthStatus => 200,
-                        LoginRefreshTrigger::UnauthorizedConfig => 401,
-                    })
-                    .set_delay(Duration::from_secs(/*secs*/ 2))
+                    match refresh_trigger {
+                        LoginRefreshTrigger::AuthStatus => ResponseTemplate::new(200),
+                        LoginRefreshTrigger::UnauthorizedConfig => ResponseTemplate::new(401)
+                            .set_delay(Duration::from_secs(/*secs*/ 2)),
+                    }
                     .set_body_json(response.clone())
                 })
                 .with_priority(1)
@@ -2375,6 +2545,7 @@ async fn login_survives_same_owner_token_refresh(
     let issuer = backend.uri();
     let refresh_url = format!("{issuer}/oauth/refresh");
     let mut server = TestAppServer::builder()
+        .with_json_logging("warn,xdcode_login::auth::manager=info,xdcode_app_server=info")
         .with_xdcode_home(xdcode_home.path())
         .with_env_overrides(&[
             ("PROVIDER_API_KEY", None),
@@ -2396,9 +2567,11 @@ async fn login_survives_same_owner_token_refresh(
     };
     timeout(DEFAULT_READ_TIMEOUT, started.notified()).await?;
     let expected_account = GetAccountResponse {
+        user_id: Some("device-user".to_string()),
         account: Some(Account::Chatgpt {
             email: Some("device@example.com".into()),
             plan_type: AccountPlanType::Enterprise,
+            workspace_name: None,
         }),
         requires_hosted_auth: true,
         workspace_routing: expected_workspace_routing(WORKSPACE_ID_DEVICE),
@@ -2411,6 +2584,26 @@ async fn login_survives_same_owner_token_refresh(
                     refresh_token: Some(true),
                 })
                 .await?;
+            // getAuthStatus reloads config before replying, which can wait for
+            // this held response. The reload log records the credential change
+            // after publishing the refreshed auth cache and its generation.
+            let request_id = request.to_string();
+            server
+                .wait_for_matching_json_log_event(
+                    "auth cache refresh in getAuthStatus",
+                    |event| {
+                        event["fields"]["auth_changed_for_refresh"] == true
+                            && event["spans"].as_array().is_some_and(|spans| {
+                                spans.iter().any(|span| {
+                                    span["rpc.method"] == "getAuthStatus"
+                                        && span["rpc.request_id"] == request_id
+                                })
+                            })
+                    },
+                    DEFAULT_READ_TIMEOUT,
+                )
+                .await?;
+            release_response.cancel();
             let refreshed: GetAuthStatusResponse =
                 timeout(DEFAULT_READ_TIMEOUT, server.read_response(request)).await??;
             assert_eq!(
@@ -2444,6 +2637,7 @@ async fn login_survives_same_owner_token_refresh(
     assert_eq!(
         updated,
         AccountUpdatedNotification {
+            reason: None,
             auth_mode: Some(AuthMode::Chatgpt),
             plan_type: Some(AccountPlanType::Enterprise),
         }
@@ -3115,8 +3309,15 @@ async fn get_account_no_auth() -> Result<()> {
     let account: GetAccountResponse =
         timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(request_id)).await??;
 
-    assert_eq!(account.account, None, "expected no account");
-    assert_eq!(account.requires_hosted_auth, true);
+    assert_eq!(
+        account,
+        GetAccountResponse {
+            account: None,
+            user_id: None,
+            requires_hosted_auth: true,
+            workspace_routing: None,
+        }
+    );
     Ok(())
 }
 
@@ -3152,6 +3353,7 @@ async fn get_account_with_api_key() -> Result<()> {
         timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(request_id)).await??;
 
     let expected = GetAccountResponse {
+        user_id: None,
         workspace_routing: None,
         account: Some(Account::ApiKey {}),
         requires_hosted_auth: true,
@@ -3186,6 +3388,7 @@ async fn get_account_when_auth_not_required() -> Result<()> {
         timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(request_id)).await??;
 
     let expected = GetAccountResponse {
+        user_id: None,
         workspace_routing: None,
         account: None,
         requires_hosted_auth: false,
@@ -3227,6 +3430,7 @@ region = "us-west-2"
         timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(request_id)).await??;
 
     let expected = GetAccountResponse {
+        user_id: None,
         workspace_routing: None,
         account: Some(Account::AmazonBedrock {
             uses_xdcode_managed_credentials: false,
@@ -3266,6 +3470,7 @@ command = "print-token"
     assert_eq!(
         read_account(&mut mcp).await?,
         GetAccountResponse {
+            user_id: None,
             workspace_routing: None,
             account: Some(Account::AmazonBedrock {
                 uses_xdcode_managed_credentials: false,
@@ -3305,6 +3510,7 @@ region = "us-west-2"
     assert_eq!(
         read_account(&mut mcp).await?,
         GetAccountResponse {
+            user_id: None,
             workspace_routing: None,
             account: Some(Account::AmazonBedrock {
                 uses_xdcode_managed_credentials: false,
@@ -3371,6 +3577,7 @@ async fn get_account_with_managed_bedrock_provider() -> Result<()> {
     assert_eq!(
         received,
         GetAccountResponse {
+            user_id: None,
             workspace_routing: None,
             account: Some(Account::AmazonBedrock {
                 uses_xdcode_managed_credentials: true,
@@ -3396,6 +3603,7 @@ async fn get_account_with_chatgpt() -> Result<()> {
         ChatGptAuthFixture::new("access-chatgpt")
             .account_id("account-123")
             .email("user@example.com")
+            .chatgpt_user_id("user-123")
             .plan_type("pro"),
         AuthCredentialsStoreMode::File,
     )?;
@@ -3416,10 +3624,12 @@ async fn get_account_with_chatgpt() -> Result<()> {
         timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(request_id)).await??;
 
     let expected = GetAccountResponse {
+        user_id: Some("user-123".to_string()),
         workspace_routing: expected_workspace_routing("account-123"),
         account: Some(Account::Chatgpt {
             email: Some("user@example.com".to_string()),
             plan_type: AccountPlanType::Pro,
+            workspace_name: None,
         }),
         requires_hosted_auth: true,
     };
@@ -3473,10 +3683,12 @@ async fn get_account_with_chatgpt_plan_variants_returns_plan_type(
     assert_eq!(
         received,
         GetAccountResponse {
+            user_id: None,
             workspace_routing: expected_workspace_routing("account-123"),
             account: Some(Account::Chatgpt {
                 email: Some("user@example.com".to_string()),
                 plan_type: expected_plan,
+                workspace_name: None,
             }),
             requires_hosted_auth: true,
         }
@@ -3520,10 +3732,12 @@ async fn get_account_with_chatgpt_without_email() -> Result<()> {
     assert_eq!(
         received,
         GetAccountResponse {
+            user_id: None,
             workspace_routing: expected_workspace_routing("account-123"),
             account: Some(Account::Chatgpt {
                 email: None,
                 plan_type: AccountPlanType::Pro,
+                workspace_name: None,
             }),
             requires_hosted_auth: true,
         }
@@ -3602,6 +3816,7 @@ async fn get_account_omits_chatgpt_after_permanent_refresh_failure() -> Result<(
     assert_eq!(
         received,
         GetAccountResponse {
+            user_id: None,
             workspace_routing: None,
             account: None,
             requires_hosted_auth: true,
@@ -3645,13 +3860,18 @@ async fn get_account_with_chatgpt_missing_plan_claim_returns_unknown() -> Result
         timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(request_id)).await??;
 
     let expected = GetAccountResponse {
+        user_id: None,
         workspace_routing: expected_workspace_routing("account-123"),
         account: Some(Account::Chatgpt {
             email: Some("user@example.com".to_string()),
             plan_type: AccountPlanType::Unknown,
+            workspace_name: None,
         }),
         requires_hosted_auth: true,
     };
     assert_eq!(received, expected);
     Ok(())
 }
+
+#[path = "account_workspace_switching.rs"]
+mod workspace_switching;

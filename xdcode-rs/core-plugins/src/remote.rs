@@ -10,6 +10,7 @@ use crate::store::PLUGINS_CACHE_DIR;
 use crate::store::PluginStore;
 use chrono::DateTime;
 use chrono::Utc;
+use http::HeaderMap;
 use http::Method;
 use http::StatusCode;
 use serde::Deserialize;
@@ -35,6 +36,7 @@ use xdcode_app_server_protocol::PluginInstallPolicySource;
 use xdcode_app_server_protocol::PluginInterface;
 use xdcode_app_server_protocol::ScheduledTaskSummary;
 use xdcode_app_server_protocol::SkillInterface;
+use xdcode_features::RuntimeAuthMode;
 use xdcode_http_client::ClientRouteClass;
 use xdcode_http_client::HttpClientFactory;
 use xdcode_http_client::RequestBuilder;
@@ -48,6 +50,7 @@ use xdcode_plugin::PluginCapabilitySummary;
 use xdcode_plugin::PluginId;
 use xdcode_plugin::app_connector_ids_from_declarations;
 use xdcode_plugin::prompt_safe_plugin_description;
+use xdcode_runtime_agent_instance::RuntimeAuthSlot;
 use xdcode_utils_absolute_path::AbsolutePathBuf;
 
 mod catalog_cache;
@@ -114,6 +117,7 @@ const REMOTE_INSTALLED_PLUGINS_FETCH_TIMEOUT: Duration = Duration::from_secs(60)
 // Allow 20,000 installed plugins without unbounded cursor history.
 const MAX_REMOTE_INSTALLED_PLUGIN_PAGES: usize = 100;
 const RECOMMENDED_PLUGINS_TIMEOUT: Duration = Duration::from_secs(5);
+const TOOLING_STATE_TIMEOUT: Duration = Duration::from_millis(250);
 const REMOTE_PLUGIN_LIST_PAGE_LIMIT: u32 = 200;
 const MAX_RECOMMENDED_PLUGINS: usize = 50;
 const MAX_RECOMMENDED_PLUGIN_NAME_LEN: usize = 64;
@@ -153,13 +157,20 @@ pub struct RemotePluginServiceConfig {
     pub chatgpt_base_url: String,
     pub(crate) product_sku: String,
     pub(crate) http_clients: Arc<dyn HttpClientSelector>,
+    pub(crate) runtime_auth: Option<(RuntimeAuthSlot, RuntimeAuthMode)>,
 }
 
 impl RemotePluginServiceConfig {
+    /// Keeps metadata and subsequent storage requests on the account that starts the operation.
+    pub(crate) fn for_current_account(&self) -> Self {
+        Self {
+            http_clients: self.http_clients.for_current_account(),
+            ..self.clone()
+        }
+    }
+
     /// Creates remote plugin service state from the effective application HTTP configuration.
-    ///
-    /// Keeping the factory mandatory ensures every catalog, mutation, upload, and bundle request
-    /// follows the same outbound proxy policy.
+    /// Every catalog, mutation, upload, and bundle request retains the configured proxy policy.
     pub fn new(
         chatgpt_base_url: String,
         http_client_factory: HttpClientFactory,
@@ -170,11 +181,107 @@ impl RemotePluginServiceConfig {
                 http_client_factory,
                 ClientRouteClass::Api,
             );
+        let http_clients: Arc<dyn HttpClientSelector> = Arc::new(http_clients);
         Self {
             chatgpt_base_url,
             product_sku: product_sku.unwrap_or_else(|| XDCODE_PRODUCT_SKU.to_string()),
-            http_clients: Arc::new(http_clients),
+            http_clients,
+            runtime_auth: None,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_with_runtime_auth(
+        chatgpt_base_url: String,
+        http_client_factory: HttpClientFactory,
+        product_sku: Option<String>,
+        runtime_auth: (RuntimeAuthSlot, RuntimeAuthMode),
+    ) -> Self {
+        if xdcode_http_client::classify_provider_api_url(&chatgpt_base_url)
+            == xdcode_http_client::ProviderDestination::Other
+        {
+            return Self::new(chatgpt_base_url, http_client_factory, product_sku);
+        }
+        Self::new_with_selected_runtime_auth(
+            chatgpt_base_url,
+            http_client_factory,
+            product_sku,
+            runtime_auth,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_with_selected_runtime_auth(
+        chatgpt_base_url: String,
+        http_client_factory: HttpClientFactory,
+        product_sku: Option<String>,
+        runtime_auth: (RuntimeAuthSlot, RuntimeAuthMode),
+    ) -> Self {
+        let mut config = Self::new(
+            chatgpt_base_url,
+            http_client_factory.with_sensitive_header_protection(),
+            product_sku,
+        );
+        config.runtime_auth = Some(runtime_auth);
+        config
+    }
+
+    // Keep runtime registration out of callers' async stack frames.
+    pub(crate) fn authenticated_request<'a>(
+        &'a self,
+        method: Method,
+        url: &'a str,
+        auth: &'a XdcodeAuth,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<RequestBuilder, xdcode_api::AuthError>>
+                + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            if self.runtime_auth.is_some() {
+                xdcode_model_provider::validate_runtime_destination(Some(&self.chatgpt_base_url))
+                    .map_err(|error| xdcode_api::AuthError::Build(error.to_string()))?;
+            }
+            let runtime = self
+                .runtime_auth
+                .as_ref()
+                .map(|(slot, mode)| {
+                    slot.get()
+                        .map(|manager| (Arc::clone(manager), *mode))
+                        .ok_or_else(|| {
+                            xdcode_api::AuthError::Build(
+                                "runtime authentication has not been initialized".to_string(),
+                            )
+                        })
+                })
+                .transpose()?;
+            let resolved = xdcode_model_provider::auth_provider_for_request(
+                auth,
+                runtime.as_ref(),
+                &HeaderMap::new(),
+            )
+            .await?;
+            let request = match &resolved.runtime {
+                Some(runtime) => self
+                    .http_clients
+                    .request_for_account(
+                        method,
+                        url,
+                        runtime.http_client_factory().network_policy(),
+                    )
+                    .ok_or_else(|| {
+                        xdcode_api::AuthError::Build(
+                            "plugin credentials and transport must share the application network policy"
+                                .to_string(),
+                        )
+                    })?,
+                None => self.http_clients.request(method, url),
+            };
+            let headers = resolved.auth.apply_auth_headers(HeaderMap::new()).await?;
+            Ok(request.headers(default_headers()).headers(headers))
+        })
     }
 
     pub(crate) fn http_request(&self, method: Method, url: &str) -> RequestBuilder {
@@ -188,6 +295,13 @@ impl PartialEq for RemotePluginServiceConfig {
     fn eq(&self, other: &Self) -> bool {
         self.chatgpt_base_url == other.chatgpt_base_url
             && self.product_sku == other.product_sku
+            && match (&self.runtime_auth, &other.runtime_auth) {
+                (Some((left, left_mode)), Some((right, right_mode))) => {
+                    Arc::ptr_eq(left, right) && left_mode == right_mode
+                }
+                (None, None) => true,
+                _ => false,
+            }
             && self.http_clients.outbound_proxy_policy()
                 == other.http_clients.outbound_proxy_policy()
     }
@@ -239,11 +353,18 @@ pub struct RemoteMarketplaceFetchOutcome {
     pub catalog_cache_used: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ActiveRemotePluginBundle {
+    pub(crate) directory_version: String,
+    pub(crate) remote_plugin_id: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct RemoteInstalledPlugin {
     pub marketplace_name: String,
     pub id: String,
     pub version: Option<String>,
+    pub(crate) active_bundle: Option<ActiveRemotePluginBundle>,
     pub name: String,
     pub canonical_app_id: Option<String>,
     pub installed_at: Option<DateTime<Utc>>,
@@ -541,8 +662,6 @@ enum RemoteInstalledPluginScope {
 }
 
 impl RemotePluginScope {
-    const CATALOG_CACHE_SCOPES: [Self; 3] = [Self::Global, Self::User, Self::Workspace];
-
     fn api_value(self) -> &'static str {
         match self {
             Self::Global => "GLOBAL",
@@ -784,6 +903,11 @@ struct RemotePluginInstalledItem {
 struct RemotePluginListResponse {
     plugins: Vec<RemotePluginDirectoryItem>,
     pagination: RemotePluginPagination,
+}
+
+#[derive(Deserialize)]
+struct PluginToolingStateResponse {
+    tooling_changed_at: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -1046,7 +1170,36 @@ pub fn invalidate_cached_remote_plugin_catalog_scopes(
     }
 }
 
-#[instrument(level = "trace", skip_all)]
+#[instrument(
+    name = "plugins.recommendations.read_tooling_marker",
+    level = "info",
+    skip_all
+)]
+pub(crate) async fn fetch_tooling_changed_at(
+    config: &RemotePluginServiceConfig,
+    auth: Option<&XdcodeAuth>,
+) -> Result<Option<String>, RemotePluginCatalogError> {
+    let auth = ensure_chatgpt_auth(auth)?;
+    let base_url = config.chatgpt_base_url.trim_end_matches('/');
+    let url = format!("{base_url}/ps/plugins/tooling-state/turtle");
+    let poll = async {
+        let request = authenticated_request(config, Method::GET, &url, auth).await?;
+        let response: PluginToolingStateResponse = send_and_decode(request, &url).await?;
+        Ok(response.tooling_changed_at)
+    };
+    tokio::time::timeout(TOOLING_STATE_TIMEOUT, poll)
+        .await
+        .unwrap_or_else(|_| {
+            tracing::debug!("timed out reading recommendation tooling state");
+            Ok(None)
+        })
+}
+
+#[instrument(
+    name = "plugins.recommendations.fetch_catalog",
+    level = "info",
+    skip_all
+)]
 pub async fn fetch_recommended_plugins(
     config: &RemotePluginServiceConfig,
     auth: Option<&XdcodeAuth>,
@@ -1055,14 +1208,13 @@ pub async fn fetch_recommended_plugins(
     let base_url = config.chatgpt_base_url.trim_end_matches('/');
     let mut url = Url::parse(&format!("{base_url}/ps/plugins/suggested/xdcode"))
         .map_err(RemotePluginCatalogError::InvalidBaseUrl)?;
-    url.query_pairs_mut().append_pair("scope", "GLOBAL");
+    url.query_pairs_mut()
+        .append_pair("scope", "GLOBAL")
+        .append_pair("includeInstalled", "false");
     let url = url.to_string();
-    let request = authenticated_request(
-        config.http_request(Method::GET, &url),
-        auth,
-        &config.product_sku,
-    )?
-    .timeout(RECOMMENDED_PLUGINS_TIMEOUT);
+    let request = authenticated_request(config, Method::GET, &url, auth)
+        .await?
+        .timeout(RECOMMENDED_PLUGINS_TIMEOUT);
     let response: RecommendedPluginsResponse = send_and_decode(request, &url).await?;
     Ok(recommended_plugins_mode(response))
 }
@@ -1165,42 +1317,13 @@ pub(crate) fn has_fresh_cached_remote_plugin_catalog(
     let Ok(auth) = ensure_chatgpt_auth(auth) else {
         return false;
     };
-    catalog_cache::load_cached_directory_plugins(
+    catalog_cache::has_cached_directory_plugins(
         xdcode_home,
         config,
         auth,
         scope,
-        /*collection*/ None,
+        RemotePluginCatalogCacheMode::PreferFreshCache,
     )
-    .is_some_and(|cached| {
-        matches!(
-            cached.freshness,
-            catalog_cache::RemotePluginCatalogCacheFreshness::Fresh
-        )
-    })
-}
-
-pub(crate) fn cached_remote_plugin_catalog_scopes(
-    xdcode_home: &Path,
-    config: &RemotePluginServiceConfig,
-    auth: Option<&XdcodeAuth>,
-) -> BTreeSet<RemotePluginScope> {
-    let Ok(auth) = ensure_chatgpt_auth(auth) else {
-        return BTreeSet::new();
-    };
-    RemotePluginScope::CATALOG_CACHE_SCOPES
-        .into_iter()
-        .filter(|scope| {
-            catalog_cache::load_cached_directory_plugins(
-                xdcode_home,
-                config,
-                auth,
-                *scope,
-                /*collection*/ None,
-            )
-            .is_some()
-        })
-        .collect()
 }
 
 pub fn cached_global_remote_discoverable_plugins(
@@ -1214,6 +1337,7 @@ pub fn cached_global_remote_discoverable_plugins(
         auth,
         RemotePluginScope::Global,
         /*collection*/ None,
+        RemotePluginCatalogCacheMode::PreferCache,
     )
     .map(|cached| cached.plugins)
     .unwrap_or_default()
@@ -1300,9 +1424,32 @@ fn build_remote_marketplace(
     }))
 }
 
+/// Selects whether installed-plugin metadata needs display enrichment.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum InstalledPluginDisplayAssets {
+    /// Resolve image URLs and creator names.
+    #[default]
+    Include,
+    /// Skip display lookups; retain stored display fields and execution metadata.
+    Skip,
+}
+
 pub(crate) async fn fetch_remote_installed_plugins(
     config: &RemotePluginServiceConfig,
     auth: Option<&XdcodeAuth>,
+) -> Result<Vec<RemoteInstalledPlugin>, RemotePluginCatalogError> {
+    fetch_remote_installed_plugins_with_display_assets(
+        config,
+        auth,
+        InstalledPluginDisplayAssets::Include,
+    )
+    .await
+}
+
+pub(crate) async fn fetch_remote_installed_plugins_with_display_assets(
+    config: &RemotePluginServiceConfig,
+    auth: Option<&XdcodeAuth>,
+    display_assets: InstalledPluginDisplayAssets,
 ) -> Result<Vec<RemoteInstalledPlugin>, RemotePluginCatalogError> {
     let auth = ensure_chatgpt_auth(auth)?;
     let mut installed_plugins = fetch_installed_plugins(
@@ -1310,6 +1457,7 @@ pub(crate) async fn fetch_remote_installed_plugins(
         auth,
         RemoteInstalledPluginScope::All,
         /*include_download_urls*/ false,
+        display_assets,
     )
     .await?
     .into_iter()
@@ -1437,11 +1585,7 @@ pub async fn fetch_remote_plugin_skill_detail(
     }
 
     let url = remote_plugin_skill_detail_url(config, plugin_id, skill_name)?;
-    let request = authenticated_request(
-        config.http_request(Method::GET, &url),
-        auth,
-        &config.product_sku,
-    )?;
+    let request = authenticated_request(config, Method::GET, &url, auth).await?;
     let response: RemotePluginSkillDetailResponse = send_and_decode(request, &url).await?;
     if response.plugin_id != plugin_id {
         return Err(RemotePluginCatalogError::UnexpectedPluginId {
@@ -1648,11 +1792,7 @@ async fn install_remote_plugin_inner(
     url.query_pairs_mut()
         .append_pair("includeAppsNeedingAuth", "true");
     let url = url.to_string();
-    let request = authenticated_request(
-        config.http_request(Method::POST, &url),
-        auth,
-        &config.product_sku,
-    )?;
+    let request = authenticated_request(config, Method::POST, &url, auth).await?;
     let request = if let Some(install_attempt_id) = install_attempt_id {
         request.json(&RemotePluginInstallRequest { install_attempt_id })
     } else {
@@ -1745,11 +1885,7 @@ pub async fn uninstall_remote_plugin(
 
     let base_url = config.chatgpt_base_url.trim_end_matches('/');
     let url = format!("{base_url}/ps/plugins/{remote_plugin_id}/uninstall");
-    let request = authenticated_request(
-        config.http_request(Method::POST, &url),
-        auth,
-        &config.product_sku,
-    )?;
+    let request = authenticated_request(config, Method::POST, &url, auth).await?;
     let response: RemotePluginMutationResponse = send_and_decode(request, &url).await?;
     if response.id != remote_plugin_id {
         return Err(RemotePluginCatalogError::UnexpectedPluginId {
@@ -1938,6 +2074,7 @@ fn remote_installed_plugin_to_cache_entry(
         marketplace_name,
         id: plugin.id.clone(),
         version: plugin.release.version.clone(),
+        active_bundle: None,
         name: plugin.name.clone(),
         canonical_app_id: plugin.canonical_app_id.clone(),
         installed_at: installed_plugin.installed_at,
@@ -2091,17 +2228,15 @@ async fn fetch_directory_plugins_for_scope_with_cache(
     collection: Option<&str>,
     cache_mode: RemotePluginCatalogCacheMode,
 ) -> Result<DirectoryPluginsFetchOutcome, RemotePluginCatalogError> {
-    if cache_mode != RemotePluginCatalogCacheMode::ForceRefetch
-        && let Some(xdcode_home) = xdcode_home
+    if let Some(xdcode_home) = xdcode_home
         && let Some(cached) = catalog_cache::load_cached_directory_plugins(
             xdcode_home,
             config,
             auth,
             scope,
             collection,
+            cache_mode,
         )
-        && (cache_mode == RemotePluginCatalogCacheMode::PreferCache
-            || cached.freshness == catalog_cache::RemotePluginCatalogCacheFreshness::Fresh)
     {
         return Ok(DirectoryPluginsFetchOutcome {
             plugins: cached.plugins,
@@ -2202,6 +2337,7 @@ async fn fetch_installed_plugins_for_scope(
         auth,
         RemoteInstalledPluginScope::Single(scope),
         /*include_download_urls*/ false,
+        InstalledPluginDisplayAssets::Include,
     )
     .await
 }
@@ -2211,6 +2347,7 @@ async fn fetch_installed_plugins(
     auth: &XdcodeAuth,
     scope: RemoteInstalledPluginScope,
     include_download_urls: bool,
+    display_assets: InstalledPluginDisplayAssets,
 ) -> Result<Vec<RemotePluginInstalledItem>, RemotePluginCatalogError> {
     // Only a complete inventory is authoritative: every failure discards all fetched pages
     // before callers can publish the snapshot or remove plugins absent from it.
@@ -2225,6 +2362,7 @@ async fn fetch_installed_plugins(
                 scope,
                 page_token.as_deref(),
                 include_download_urls,
+                display_assets,
             )
             .await?;
             plugins.extend(response.plugins);
@@ -2266,11 +2404,7 @@ async fn get_remote_plugin_list_page(
         url.query_pairs_mut().append_pair("pageToken", page_token);
     }
     let url = url.to_string();
-    let request = authenticated_request(
-        config.http_request(Method::GET, &url),
-        auth,
-        &config.product_sku,
-    )?;
+    let request = authenticated_request(config, Method::GET, &url, auth).await?;
     send_and_decode(request, &url).await
 }
 
@@ -2288,11 +2422,7 @@ async fn get_remote_shared_workspace_plugins_page(
         url.query_pairs_mut().append_pair("pageToken", page_token);
     }
     let url = url.to_string();
-    let request = authenticated_request(
-        config.http_request(Method::GET, &url),
-        auth,
-        &config.product_sku,
-    )?;
+    let request = authenticated_request(config, Method::GET, &url, auth).await?;
     send_and_decode(request, &url).await
 }
 
@@ -2302,6 +2432,7 @@ async fn get_remote_plugin_installed_page(
     scope: RemoteInstalledPluginScope,
     page_token: Option<&str>,
     include_download_urls: bool,
+    display_assets: InstalledPluginDisplayAssets,
 ) -> Result<RemotePluginInstalledResponse, RemotePluginCatalogError> {
     let base_url = config.chatgpt_base_url.trim_end_matches('/');
     let mut url = Url::parse(&format!("{base_url}/ps/plugins/installed"))
@@ -2316,15 +2447,15 @@ async fn get_remote_plugin_installed_page(
         url.query_pairs_mut()
             .append_pair("includeDownloadUrls", "true");
     }
+    if display_assets == InstalledPluginDisplayAssets::Skip {
+        url.query_pairs_mut()
+            .append_pair("includeDisplayAssets", "false");
+    }
     if let Some(page_token) = page_token {
         url.query_pairs_mut().append_pair("pageToken", page_token);
     }
     let url = url.to_string();
-    let request = authenticated_request(
-        config.http_request(Method::GET, &url),
-        auth,
-        &config.product_sku,
-    )?;
+    let request = authenticated_request(config, Method::GET, &url, auth).await?;
     send_and_decode(request, &url).await
 }
 
@@ -2359,12 +2490,9 @@ async fn fetch_plugin_detail_with_timeout(
             .append_pair("includeDownloadUrls", "true");
     }
     let url = url.to_string();
-    let request = authenticated_request(
-        config.http_request(Method::GET, &url),
-        auth,
-        &config.product_sku,
-    )?
-    .timeout(timeout);
+    let request = authenticated_request(config, Method::GET, &url, auth)
+        .await?
+        .timeout(timeout);
     send_and_decode(request, &url).await
 }
 
@@ -2399,20 +2527,19 @@ fn ensure_chatgpt_auth(auth: Option<&XdcodeAuth>) -> Result<&XdcodeAuth, RemoteP
     Ok(auth)
 }
 
-fn authenticated_request(
-    request: RequestBuilder,
+async fn authenticated_request(
+    config: &RemotePluginServiceConfig,
+    method: Method,
+    url: &str,
     auth: &XdcodeAuth,
-    product_sku: &str,
 ) -> Result<RequestBuilder, RemotePluginCatalogError> {
-    Ok(request
+    Ok(config
+        .authenticated_request(method, url, auth)
+        .await
+        .map_err(std::io::Error::other)
+        .map_err(RemotePluginCatalogError::AuthToken)?
         .timeout(REMOTE_PLUGIN_CATALOG_TIMEOUT)
-        .headers(
-            xdcode_model_provider::auth_provider_from_auth(auth)
-                .to_auth_headers()
-                .map_err(std::io::Error::other)
-                .map_err(RemotePluginCatalogError::AuthToken)?,
-        )
-        .header(OAI_PRODUCT_SKU_HEADER, product_sku))
+        .header(OAI_PRODUCT_SKU_HEADER, &config.product_sku))
 }
 
 async fn send_and_decode<T: for<'de> Deserialize<'de>>(
@@ -2447,3 +2574,7 @@ async fn send_and_decode<T: for<'de> Deserialize<'de>>(
         source,
     })
 }
+
+#[cfg(test)]
+#[path = "remote_runtime_auth_tests.rs"]
+mod runtime_auth_tests;

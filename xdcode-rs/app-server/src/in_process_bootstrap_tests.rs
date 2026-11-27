@@ -25,6 +25,7 @@ use xdcode_login::ExternalAuth;
 use xdcode_login::ExternalAuthFuture;
 use xdcode_login::ExternalAuthRefreshContext;
 use xdcode_login::XdcodeAuth;
+use xdcode_model_provider::DEFAULT_CHATGPT_BASE_URL;
 use xdcode_protocol::config_types::TrustLevel;
 
 struct BootstrapExternalAuth(XdcodeAuth);
@@ -157,7 +158,7 @@ async fn startup_reloads_the_callers_selected_project() -> anyhow::Result<()> {
     let user_config = home.join("config.toml");
     let trust = std::fs::read_to_string(&user_config)?;
     std::fs::write(
-        user_config,
+        &user_config,
         format!("chatgpt_base_url = '{selected_url}'\n{trust}"),
     )?;
     let project_config = selected.join(".xdcode/config.toml");
@@ -196,6 +197,24 @@ async fn startup_reloads_the_callers_selected_project() -> anyhow::Result<()> {
         selected.canonicalize()?
     );
     assert_eq!(config.chatgpt_base_url, selected_url);
+
+    let marked = XdcodeAuth::from_api_key("sk-proj-fedramp-test-key");
+    for (configured_url, expected_url) in [
+        (None, "https://gov.chatgpt.com/backend-api/"),
+        (Some(DEFAULT_CHATGPT_BASE_URL), DEFAULT_CHATGPT_BASE_URL),
+    ] {
+        let setting = configured_url
+            .map(|url| format!("chatgpt_base_url = '{url}'\n"))
+            .unwrap_or_default();
+        std::fs::write(&user_config, format!("{setting}{trust}"))?;
+        let _auth = configure(
+            &manager,
+            &mut config,
+            /*enable_xdcode_api_key_env*/ false,
+        )
+        .await?;
+        assert_eq!(config.chatgpt_backend_url().resolve(&marked), expected_url);
+    }
 
     std::fs::write(&project_config, "[malformed")?;
     let error = configure(

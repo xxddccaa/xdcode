@@ -1,6 +1,7 @@
 //! Discover bubblewrap dependencies separately from resolving configured policy rules.
 
 use super::dependencies::Dependency;
+use super::dependencies::IntegrityCommand;
 use super::dependencies::xdcode_and_launcher_dependencies;
 use std::ffi::OsString;
 use std::io;
@@ -8,7 +9,6 @@ use std::path::PathBuf;
 use xdcode_protocol::permissions::FileSystemPath;
 use xdcode_protocol::permissions::FileSystemSandboxPolicy;
 use xdcode_protocol::permissions::FileSystemSpecialPath;
-use xdcode_sandboxing::SandboxExecRequest;
 use xdcode_sandboxing::SandboxType;
 use xdcode_shell_command::shell_detect::get_user_home_path;
 use xdcode_utils_absolute_path::AbsolutePathBuf;
@@ -18,7 +18,7 @@ pub(super) const SANDBOX_TYPE: SandboxType = SandboxType::LinuxSeccomp;
 pub(super) const NAME: &str = "bubblewrap";
 
 pub(super) fn critical_dependencies(
-    request: &SandboxExecRequest,
+    request: &IntegrityCommand,
     policy: &FileSystemSandboxPolicy,
     cwd: &AbsolutePathBuf,
 ) -> io::Result<Vec<Dependency>> {
@@ -34,7 +34,7 @@ pub(super) fn critical_dependencies(
         .transpose()
         .map_err(io::Error::other)?;
     let mut dependencies = xdcode_and_launcher_dependencies(request);
-    if let Some(exe) = request.command.first()
+    if let Some(exe) = request.launcher.as_deref()
         && let Some(bwrap) = xdcode_linux_sandbox::find_bundled_bwrap_for_exe(
             &command_cwd.as_path().join(exe),
             command_cwd.as_path(),
@@ -59,7 +59,7 @@ pub(super) fn critical_dependencies(
 }
 
 pub(super) fn prepare_policy(
-    request: &SandboxExecRequest,
+    request: &IntegrityCommand,
     mut policy: FileSystemSandboxPolicy,
     cwd: &AbsolutePathBuf,
 ) -> io::Result<FileSystemSandboxPolicy> {

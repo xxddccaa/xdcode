@@ -1,0 +1,7 @@
+load("//:defs.bzl", "xdcode_rust_crate")
+
+xdcode_rust_crate(
+    name = "plugin-host",
+    crate_name = "xdcode_plugin_host",
+    test_only_binaries = ["xdcode-plugin-test-helper"],
+)

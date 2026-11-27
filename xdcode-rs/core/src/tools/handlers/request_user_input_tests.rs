@@ -17,23 +17,14 @@ use std::sync::Arc;
 use test_case::test_case;
 use tokio::sync::Mutex;
 use xdcode_guardian_context::RenderedVerifiedAnswers;
-use xdcode_protocol::ThreadId;
 use xdcode_protocol::protocol::EventMsg;
-use xdcode_protocol::protocol::SessionSource;
-use xdcode_protocol::protocol::SubAgentSource;
 use xdcode_protocol::request_user_input::RequestUserInputAnswer;
 use xdcode_protocol::request_user_input::RequestUserInputResponse;
 
 #[tokio::test]
-async fn multi_agent_v2_request_user_input_rejects_subagent_threads() {
+async fn request_user_input_rejects_restricted_threads() {
     let (session, mut turn) = make_session_and_context().await;
-    turn.session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-        parent_thread_id: ThreadId::new(),
-        depth: 1,
-        agent_path: None,
-        agent_nickname: None,
-        agent_role: None,
-    });
+    turn.root_capabilities_restricted = true;
     let turn = Arc::new(turn);
 
     let result = RequestUserInputHandler {
@@ -48,6 +39,7 @@ async fn multi_agent_v2_request_user_input_rejects_subagent_threads() {
         call_id: "call-1".to_string(),
         tool_name: xdcode_tools::ToolName::plain(REQUEST_USER_INPUT_TOOL_NAME),
         source: crate::tools::context::ToolCallSource::Direct,
+        native_call: None,
         environments: Default::default(),
         payload: ToolPayload::Function {
             arguments: json!({
@@ -73,7 +65,7 @@ async fn multi_agent_v2_request_user_input_rejects_subagent_threads() {
     .await;
 
     let Err(err) = result else {
-        panic!("sub-agent request_user_input should fail");
+        panic!("restricted request_user_input should fail");
     };
     assert_eq!(
         err,
@@ -127,6 +119,7 @@ async fn request_user_input_sets_non_blocking_outside_plan_mode(
                 call_id: "call-1".to_string(),
                 tool_name: xdcode_tools::ToolName::plain(REQUEST_USER_INPUT_TOOL_NAME),
                 source: crate::tools::context::ToolCallSource::Direct,
+                native_call: None,
                 environments: Default::default(),
                 payload: ToolPayload::Function {
                     arguments: json!({
@@ -249,6 +242,7 @@ async fn request_user_input_sets_blocking_from_turn_mode() {
                 call_id: "call-1".to_string(),
                 tool_name: xdcode_tools::ToolName::plain(REQUEST_USER_INPUT_TOOL_NAME),
                 source: crate::tools::context::ToolCallSource::Direct,
+                native_call: None,
                 environments: Default::default(),
                 payload: ToolPayload::Function {
                     arguments: json!({

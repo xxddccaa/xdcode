@@ -10,12 +10,20 @@ use xdcode_model_provider_info::ModelProviderInfo;
 use xdcode_protocol::error::Result as CoreResult;
 
 use crate::auth::resolve_provider_auth;
+use crate::provider::resolve_api_provider;
 
 pub(crate) fn identity(
     provider_info: &ModelProviderInfo,
     auth: Option<&XdcodeAuth>,
 ) -> CoreResult<String> {
-    let mut api_provider = provider_info.to_api_provider(auth.map(XdcodeAuth::auth_mode))?;
+    // Provider bearer overrides replace the login credential and its account metadata.
+    let auth =
+        if provider_info.env_key.is_some() || provider_info.experimental_bearer_token.is_some() {
+            None
+        } else {
+            auth
+        };
+    let mut api_provider = resolve_api_provider(provider_info, auth)?;
     let mut digest = Sha256::new();
     // Length-prefix every field to avoid ambiguity between adjacent values.
     let mut field = |value: &[u8]| {

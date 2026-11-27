@@ -539,7 +539,7 @@ async fn native_mrtr_shared_calls_isolate_inputs_cancellation_and_timeouts() -> 
                 Some("server/discover") => discover_response(&body),
                 Some("tools/call") if body["params"]["name"] == "slow" => {
                     result_response(&body, json!({"resultType": "complete", "content": []}))
-                        .set_delay(Duration::from_millis(500))
+                        .set_delay(Duration::from_secs(1))
                 }
                 Some("tools/call") if body.pointer("/params/inputResponses").is_none() => {
                     result_response(&body, input_required(native_request()))
@@ -554,7 +554,7 @@ async fn native_mrtr_shared_calls_isolate_inputs_cancellation_and_timeouts() -> 
                 other => panic!("unexpected request: {other:?}"),
             }
         })
-        .expect(5)
+        .expect(/*r*/ 5)
         .mount(&server)
         .await;
     let (tx, mut rx) = mpsc::unbounded_channel();
@@ -576,7 +576,7 @@ async fn native_mrtr_shared_calls_isolate_inputs_cancellation_and_timeouts() -> 
             client
                 .call_tool_with_elicitation(
                     "verified_operation".into(),
-                    None,
+                    /*arguments*/ None,
                     |_| Ok(None),
                     Some(Duration::from_secs(5)),
                     Arc::new(sender),
@@ -586,16 +586,20 @@ async fn native_mrtr_shared_calls_isolate_inputs_cancellation_and_timeouts() -> 
     };
     let first_call = launch("first");
     let (first_caller, first_id, mut first_reply) =
-        timeout(Duration::from_secs(5), rx.recv()).await?.unwrap();
+        timeout(Duration::from_secs(/*secs*/ 5), rx.recv())
+            .await?
+            .unwrap();
     let second_call = launch("second");
     let (second_caller, second_id, second_reply) =
-        timeout(Duration::from_secs(5), rx.recv()).await?.unwrap();
+        timeout(Duration::from_secs(/*secs*/ 5), rx.recv())
+            .await?
+            .unwrap();
     assert_ne!(first_id, second_id);
     assert_eq!((first_caller, second_caller), ("first", "second"));
     let timeout_error = client
         .call_tool_with_elicitation(
             "slow".into(),
-            None,
+            /*arguments*/ None,
             |_| Ok(None),
             Some(Duration::from_millis(100)),
             Arc::new(Box::new(|_, _| panic!("slow call must not ask for input"))),
@@ -614,7 +618,7 @@ async fn native_mrtr_shared_calls_isolate_inputs_cancellation_and_timeouts() -> 
         .send(response(ElicitationAction::Cancel, Value::Null))
         .unwrap();
     assert_eq!(
-        serde_json::to_value(timeout(Duration::from_secs(5), second_call).await???)?,
+        serde_json::to_value(timeout(Duration::from_secs(/*secs*/ 5), second_call).await???)?,
         json!({"resultType": "complete", "content": []})
     );
     client.shutdown().await;

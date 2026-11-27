@@ -40,7 +40,6 @@ use xdcode_protocol::models::ContentItem;
 use xdcode_protocol::models::ResponseItem;
 use xdcode_protocol::protocol::EventMsg;
 use xdcode_protocol::protocol::Op;
-use xdcode_protocol::protocol::WarningEvent;
 use xdcode_protocol::user_input::UserInput;
 
 const AFTER_SECOND_RESUME: &str = "AFTER_SECOND_RESUME";

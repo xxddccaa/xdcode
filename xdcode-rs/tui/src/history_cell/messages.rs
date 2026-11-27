@@ -167,6 +167,19 @@ fn build_user_message_lines_with_elements(
     raw_lines
 }
 
+fn user_message_element_style(style: Style, accent: Color) -> Style {
+    let unresolved_background = match style.bg {
+        Some(Color::Indexed(index)) => index < 16,
+        Some(Color::Rgb(..) | Color::Reset) | None => false,
+        Some(_) => true,
+    };
+    if accent == Color::Reset || unresolved_background {
+        style
+    } else {
+        style.fg(accent)
+    }
+}
+
 impl UserHistoryCell {
     pub(crate) fn with_async_replies(
         mut self,
@@ -187,6 +200,7 @@ impl UserHistoryCell {
     }
 
     pub(crate) fn uses_markdown(&self) -> bool {
+        // Inline elements use byte ranges in the literal prompt.
         matches!(self.presentation, UserMessagePresentation::Typed) && self.text_elements.is_empty()
     }
 
@@ -219,6 +233,20 @@ impl HistoryCell for UserHistoryCell {
     }
 
     fn display_hyperlink_lines(&self, width: u16) -> Vec<HyperlinkLine> {
+        let lines = self.transcript_hyperlink_lines(width);
+        if self.is_spoken() || !self.text_elements.is_empty() {
+            // Native history applies line styles over spans. Keep the prompt fill on the line
+            // while resolving its foreground onto the text, marker, and inline elements.
+            lines
+                .into_iter()
+                .map(HyperlinkLine::resolve_span_styles)
+                .collect()
+        } else {
+            lines
+        }
+    }
+
+    fn transcript_hyperlink_lines(&self, width: u16) -> Vec<HyperlinkLine> {
         let sanitized_message = sanitize_user_text((&self.message).into());
         // Speech transcripts can begin with whitespace; the marker already supplies its separator.
         let message = if self.is_spoken() {
@@ -238,7 +266,7 @@ impl HistoryCell for UserHistoryCell {
             .max(/*other*/ 1);
 
         let style = history_prompt_style();
-        let element_style = style.fg(accent_color_on(style.bg));
+        let element_style = user_message_element_style(style, accent_color_on(style.bg));
 
         let wrapped_images = plain_hyperlink_lines(adaptive_wrap_lines(
             self.image_labels_not_in_message()
@@ -305,8 +333,8 @@ impl HistoryCell for UserHistoryCell {
         lines
     }
 
-    fn transcript_hyperlink_lines(&self, width: u16) -> Vec<HyperlinkLine> {
-        self.display_hyperlink_lines(width)
+    fn compact_hyperlink_lines(&self, width: u16) -> Vec<HyperlinkLine> {
+        self.transcript_hyperlink_lines(width)
     }
 
     fn raw_lines(&self) -> Vec<Line<'static>> {
@@ -330,7 +358,7 @@ fn wrap_user_message(
     style: Style,
     wrap_width: u16,
 ) -> Vec<HyperlinkLine> {
-    let element_style = style.fg(accent_color_on(style.bg));
+    let element_style = user_message_element_style(style, accent_color_on(style.bg));
     if message.is_empty() && text_elements.is_empty() {
         return Vec::new();
     }
@@ -542,6 +570,24 @@ impl HistoryCell for AgentMessageCell {
     }
 }
 
+/// An unfinished Cloud reply's position before it has any visible text.
+#[derive(Debug)]
+pub(crate) struct PendingAgentMessageCell(pub(crate) (String, String));
+
+impl HistoryCell for PendingAgentMessageCell {
+    fn display_lines(&self, _width: u16) -> Vec<Line<'static>> {
+        Vec::new()
+    }
+
+    fn raw_lines(&self) -> Vec<Line<'static>> {
+        Vec::new()
+    }
+
+    fn desired_height(&self, _width: u16) -> u16 {
+        0
+    }
+}
+
 /// A consolidated agent message cell that stores raw markdown source and re-renders from it.
 ///
 /// After a stream finalizes, the `ConsolidateAgentMessage` handler in `App`
@@ -558,8 +604,9 @@ impl HistoryCell for AgentMessageCell {
 /// because resolving their local file links depends on filesystem state that can change later.
 #[derive(Debug)]
 pub(crate) struct AgentMarkdownCell {
-    /// Identifies an interrupted reply that can still receive its authoritative completion.
+    /// Reply identity used for completion replacement and corrected copy ordering.
     pub(crate) interrupted_item: Option<(String, String)>,
+    pub(crate) phase: Option<xdcode_protocol::models::MessagePhase>,
     markdown_source: String,
     copy_source: Option<String>,
     cwd: PathBuf,
@@ -615,12 +662,21 @@ impl AgentMarkdownCell {
             interrupted_item: None,
             markdown_source,
             copy_source: None,
+            phase: None,
             cwd: cwd.to_path_buf(),
             inline_visualization_context,
             rendered_lines,
             spoken_artifacts: false,
             question_titles: Vec::new(),
         }
+    }
+
+    pub(crate) fn with_phase(
+        mut self,
+        phase: Option<xdcode_protocol::models::MessagePhase>,
+    ) -> Self {
+        self.phase = phase;
+        self
     }
 
     pub(crate) fn with_questions(

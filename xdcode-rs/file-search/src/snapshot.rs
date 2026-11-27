@@ -17,6 +17,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 use std::time::Instant;
 
+// A single Nucleo atom returns a u16. Leave room for its full score within each group.
 const NAME_BONUS: u32 = u16::MAX as u32 + 1;
 
 #[derive(Default)]
@@ -35,6 +36,7 @@ impl Ranking {
         walk_complete: bool,
     ) -> Option<Self> {
         let pattern = nucleo.snapshot().pattern().column_pattern(0);
+        // A tick can collect the previous query while the new one is running.
         if pattern.atoms != nucleo.pattern.column_pattern(0).atoms {
             return None;
         }
@@ -93,6 +95,8 @@ impl Ranking {
                     };
                     bonus + u32::from(score)
                 }),
+                // Keep the strongest exact folder. More folders with the same name
+                // compete in path order so they cannot crowd out matching files.
                 MatchType::Directory
                     if !self.found_exact_folder
                         && exact_length
@@ -104,6 +108,7 @@ impl Ranking {
                 MatchType::Directory => None,
             }
             .unwrap_or(matched.score);
+            // The heap head is the lowest score, then the latest path on a tie.
             let candidate = (Reverse(score), self.next);
             if self.best.len() < inner.limit {
                 self.best.push(candidate);
@@ -205,7 +210,7 @@ fn basename(path: Utf32Str<'_>) -> Utf32Str<'_> {
     let len = path
         .chars()
         .rev()
-        .take_while(|character| !std::path::is_separator(*character))
+        .take_while(|c| !std::path::is_separator(*c))
         .count();
     path.slice(path.len() - len..)
 }

@@ -15,6 +15,7 @@ use xdcode_tools::ToolName;
 use xdcode_tools::ToolSearchInfo;
 use xdcode_tools::ToolSpec;
 
+/// Shared namespace description for native tools and host extensions.
 pub const MULTI_AGENT_V2_NAMESPACE_DESCRIPTION: &str =
     "Tools for spawning and managing sub-agents.";
 

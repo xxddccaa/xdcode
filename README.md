@@ -1,13 +1,13 @@
 # xdcode
 
 xdcode 是基于 [OpenAI Codex](https://github.com/openai/codex) 源码的个人维护版本，
-面向终端里的日常编码工作。版本号跟随目标 Codex 版本：目标上游是 Codex 0.167.0，
-就发布 xdcode 0.167.0。每个版本会在对应上游源码的基础上删除不需要的功能，并加入
+面向终端里的日常编码工作。版本号跟随目标 Codex 版本：目标上游是 Codex 0.172.0，
+就发布 xdcode 0.172.0。每个版本会在对应上游源码的基础上删除不需要的功能，并加入
 个人使用需要的增强，因此 xdcode 不是 Codex 的完整发行版。
 
 支持平台：
 
-- Linux x86_64（GNU libc；安装器需要 Python 3.11+）
+- Linux x86_64（GNU libc；安装只需要 bash、curl、tar，不需要 Python）
 - Apple Silicon macOS（使用系统自带工具，不需要 Python、Rust 或 Homebrew）
 - Windows x86_64（PowerShell 安装器）
 
@@ -19,8 +19,7 @@ Intel Mac 和 Linux ARM64 暂不支持。
   多 agent 都在本地运行。
 - **模型自己配置**：连接你自己的 Responses-compatible provider；支持多厂家、多模型，
   在会话中用 `/model` 切换。
-- **个人增强**：统一模型目录、项目和模式记忆、跨厂家共享历史、限流重试、受控的
-  小模型委派。
+- **个人增强**：统一模型目录、项目和模式记忆、跨厂家共享历史、限流重试。
 - **不依赖托管服务**：不需要托管登录、云任务、遥测上传或自动更新；凭据通过你自己的
   环境变量提供。
 
@@ -34,9 +33,10 @@ xdcode --version
 xdcode
 ```
 
-安装器会选择最新发布版本，并自动识别 Linux x86_64 或 Apple Silicon macOS。默认要求
-xdcode 进程已停止；如果确实需要在进程运行时安装，再显式加 `--force`。固定版本用
-`--release v<version>-g<commit>`。
+安装和升级是同一条命令：再次运行就会升级到最新发布版本。安装器自动识别 Linux x86_64
+或 Apple Silicon macOS，校验 SHA-256 后把新版本放进独立目录，再切换 `~/.local/bin/xdcode`。
+正在运行的会话继续使用原来的版本，新会话使用新版本；旧版本、配置和会话都会保留。
+固定版本用 `--release v<version>-g<commit>`。
 
 ### Windows
 
@@ -91,8 +91,8 @@ xdcode
 
 ## 安装细节
 
-- 升级时默认要求 xdcode 进程已停止。`--force` 只跳过活跃进程检查，不会跳过校验和、
-  安装锁或旧版本保留，也不会结束已有会话。
+- 安装器只依赖 bash、curl、tar 和 `sha256sum`／`shasum`，不需要 Python；升级时不会
+  结束已有会话。旧说明里的 `--force` 仍可使用，但已不再需要。
 - 固定发布版本：`--release v<version>-g<commit>`。
 - 需要代理时，通过 `XDCODE_INSTALL_PROXY=<proxy-url>` 传给安装器；Windows 安装器
   使用 `-Proxy <proxy-url>`。不要把本机代理地址写进仓库。
@@ -139,7 +139,7 @@ xdcode 不维护独立于上游的产品版本号；版本号跟随目标 Codex 
 xdcode 描述成 Codex 的完整发行版。
 
 当前源码实际采用的上游提交、已移植内容和未覆盖范围，以 [upstream.json](upstream.json)、
-[0.167.0 维护记录](UPSTREAM_0.167.0.md) 和 [改动记录](MODIFICATIONS.md) 为准。源码更新
+[0.172.0 升级记录](UPSTREAM_0.172.0.md) 和 [改动记录](MODIFICATIONS.md) 为准。源码更新
 不等于已安装程序更新；只有构建并安装新包后才会生效。
 
 ## 许可证与归属

@@ -6,8 +6,8 @@ use super::*;
 use tokio::sync::oneshot;
 use xdcode_protocol::models::ImageDetail;
 use xdcode_protocol::models::ImageReference;
-use xdcode_protocol::models::snapshot_local_user_input;
 use xdcode_protocol::user_input::UserInput as CoreUserInput;
+use xdcode_user_input::snapshot_local_user_input;
 
 static IMAGE_PREPARATION: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 

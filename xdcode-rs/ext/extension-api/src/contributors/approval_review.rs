@@ -32,6 +32,8 @@ pub trait SynchronousApprovalReviewer: Send + Sync {
 
 /// Inputs to Guardian's policy choice. Conversation and scores stay thread-owned.
 pub struct ApprovalDecisionInput<'a> {
+    /// Final serving value for this action. The host still requires fresh review when stale.
+    pub serving_assessment: Option<bool>,
     pub approval_id: &'a str,
     /// Host tool invocation being approved, absent for approvals without a tool call.
     pub tool_call_id: Option<&'a str>,
@@ -40,6 +42,8 @@ pub struct ApprovalDecisionInput<'a> {
     pub action: &'a serde_json::Value,
     pub thread_id: ThreadId,
     pub thread_store: &'a ExtensionData,
+    /// Captured configuration and evidence owned by the requesting turn.
+    pub turn_store: &'a ExtensionData,
     pub category: xdcode_protocol::model_types::GuardianScope,
     pub approval_policy: xdcode_protocol::protocol::AskForApproval,
     pub approvals_reviewer: xdcode_protocol::config_types::ApprovalsReviewer,

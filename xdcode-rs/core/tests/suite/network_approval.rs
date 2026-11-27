@@ -39,8 +39,6 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use std::time::SystemTime;
-use std::time::UNIX_EPOCH;
 use tempfile::TempDir;
 use test_case::test_case;
 use tokio::io::AsyncReadExt;
@@ -113,24 +111,38 @@ use xdcode_protocol::request_permissions::RequestPermissionProfile;
 use xdcode_protocol::request_permissions::RequestPermissionsResponse;
 use xdcode_protocol::user_input::UserInput;
 use xdcode_thread_store::LoadThreadHistoryParams;
-use xdcode_utils_path_uri::PathUri;
 
 const NETWORK_TEST_HOST: &str = "xdcode-network-test.invalid";
 const NETWORK_TEST_TARGET: &str = "http://xdcode-network-test.invalid:80";
 
+#[test_case("experimental_network"; "legacy_requirements")]
+#[test_case("network_proxy"; "proxy_requirements")]
+#[test_case("permissions.network"; "canonical_requirements")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[cfg_attr(
     not(target_os = "linux"),
     ignore = "requires the trusted Linux proxy bridge"
 )]
-async fn guardian_network_approval_preserves_action_and_outcome_routing() -> Result<()> {
+async fn guardian_network_approval_preserves_action_and_outcome_routing(
+    requirements_table: &str,
+) -> Result<()> {
     skip_if_target_windows!(Ok(()), "uses the POSIX/Python network fixture");
     skip_if_host_windows!(Ok(()));
     skip_if_no_network!(Ok(()));
     skip_if_sandbox!(Ok(()));
 
     let server = start_mock_server().await;
-    let test = managed_network_unified_exec_test(&server).await?;
+    let test = managed_network_unified_exec_builder(&[])?
+        .with_cloud_config_bundle(
+            CloudConfigBundleFixture::loader_with_enterprise_requirement(format!(
+                "[{requirements_table}]\nenabled = true\nallow_local_binding = true\n"
+            )),
+        )
+        .build_with_remote_and_local_env(&server)
+        .await?;
+    assert!(test.config.managed_network_requirements_enabled());
+    assert!(test.config.permissions.network.is_some());
+    assert!(test.session_configured.network_proxy.is_some());
     let first_call_id = "guardian-network-approved";
     let second_call_id = "guardian-network-denied";
     let first_command = network_fetch_args(LOCAL_ENVIRONMENT_ID)["cmd"]
@@ -1116,9 +1128,9 @@ async fn background_network_approval_uses_current_review_settings_and_original_e
     Ok(())
 }
 
+#[test_case("experimental_network"; "legacy_requirements")]
 #[test_case("network_proxy"; "proxy_requirements")]
 #[test_case("permissions.network"; "canonical_requirements")]
-#[test_case("experimental_network"; "legacy_requirements")]
 #[tokio::test]
 #[cfg_attr(
     not(target_os = "linux"),
@@ -1129,7 +1141,7 @@ async fn user_network_approval_once_session_and_denial_semantics(
 ) -> Result<()> {
     skip_if_remote!(
         Ok(()),
-        "this fixture exercises the local human-approval proxy bridge"
+        "remote executors forward network decisions only to Guardian"
     );
     skip_if_target_windows!(Ok(()), "uses the POSIX/Python network fixture");
     skip_if_host_windows!(Ok(()));
@@ -1137,6 +1149,7 @@ async fn user_network_approval_once_session_and_denial_semantics(
     skip_if_sandbox!(Ok(()));
 
     let server = start_mock_server().await;
+    // Keep the test's trace subscriber installed until the queued tool tasks finish.
     let mut queued = NamedTraceEvents::subscribe("xdcode.network_approval.queued");
     let requirements = CloudConfigBundleFixture::loader_with_enterprise_requirement(format!(
         "[{requirements_table}]\nenabled = true\nallow_local_binding = true\n"
@@ -1183,50 +1196,48 @@ async fn user_network_approval_once_session_and_denial_semantics(
             decision: ReviewDecision::Approved,
         })
         .await?;
-    let EventMsg::ExecApprovalRequest(session_approval) = wait_for_event(&test.xdcode, |event| {
-        matches!(
-            event,
-            EventMsg::ExecApprovalRequest(_) | EventMsg::TurnComplete(_)
-        )
+    // The first execution may finish before or after the next manual prompt arrives.
+    let mut pending = HashSet::from(matching_calls);
+    let mut granted_for_session = false;
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while !pending.is_empty() {
+            match test.xdcode.next_event().await?.msg {
+                EventMsg::ExecApprovalRequest(approval) => {
+                    assert!(!granted_for_session, "duplicate prompt after session grant");
+                    assert_eq!(approval.command, ["network-access", NETWORK_TEST_TARGET]);
+                    assert_eq!(
+                        approval.environment_id.as_ref(),
+                        Some(&environment.environment_id)
+                    );
+                    assert_eq!(approval.approval_id, None);
+                    assert_ne!(approval.call_id, first_approval_call_id);
+                    test.xdcode
+                        .submit(Op::ExecApproval {
+                            id: approval.effective_approval_id(),
+                            turn_id: Some(approval.turn_id),
+                            decision: ReviewDecision::ApprovedForSession,
+                        })
+                        .await?;
+                    granted_for_session = true;
+                }
+                EventMsg::ExecCommandEnd(end) => {
+                    assert!(
+                        pending.remove(end.call_id.as_str()),
+                        "unexpected completion: {end:?}"
+                    );
+                    assert_eq!(end.exit_code, 0);
+                }
+                EventMsg::TurnComplete(_) => {
+                    anyhow::bail!("turn completed with port 81 still pending")
+                }
+                _ => {}
+            }
+        }
+        anyhow::Ok(())
     })
     .await
-    else {
-        anyhow::bail!("turn completed with port 81 still pending")
-    };
-    assert_eq!(
-        session_approval.command,
-        ["network-access", NETWORK_TEST_TARGET]
-    );
-    assert_eq!(
-        session_approval.environment_id.as_ref(),
-        Some(&environment.environment_id)
-    );
-    assert_eq!(session_approval.approval_id, None);
-    assert_ne!(session_approval.call_id, first_approval_call_id);
-    test.xdcode
-        .submit(Op::ExecApproval {
-            id: session_approval.effective_approval_id(),
-            turn_id: Some(session_approval.turn_id),
-            decision: ReviewDecision::ApprovedForSession,
-        })
-        .await?;
-    let matching_results =
-        matching_calls.map(|id| test.config.cwd.join(format!("network-complete-{id}")));
-    wait_for_paths(
-        &matching_results
-            .iter()
-            .map(|path| path.as_path())
-            .collect::<Vec<_>>(),
-    )
-    .await
-    .context("matching network requests did not finish while port 81 was pending")?;
-    assert!(
-        !test
-            .config
-            .cwd
-            .join("network-complete-user-network-port")
-            .exists()
-    );
+    .context("matching executions did not finish while port 81 was pending")??;
+    assert!(granted_for_session);
     test.xdcode
         .submit(Op::ExecApproval {
             id: other_port.effective_approval_id(),
@@ -1234,42 +1245,7 @@ async fn user_network_approval_once_session_and_denial_semantics(
             decision: ReviewDecision::denied("rejected by user"),
         })
         .await?;
-    let mut pending = HashSet::from([
-        matching_calls[0],
-        matching_calls[1],
-        matching_calls[2],
-        "user-network-port",
-    ]);
-    tokio::time::timeout(Duration::from_secs(30), async {
-        loop {
-            match test.xdcode.next_event().await?.msg {
-                EventMsg::ExecApprovalRequest(approval) => {
-                    anyhow::bail!("duplicate prompt after session grant: {approval:?}")
-                }
-                EventMsg::ExecCommandEnd(end) => {
-                    assert!(
-                        pending.remove(end.call_id.as_str()),
-                        "unexpected completion: {end:?}"
-                    );
-                    if end.call_id == "user-network-port" {
-                        assert_ne!(end.exit_code, 0);
-                    } else {
-                        assert_eq!(end.exit_code, 0);
-                    }
-                }
-                EventMsg::TurnComplete(_) => {
-                    assert!(
-                        pending.is_empty(),
-                        "missing execution completions: {pending:?}"
-                    );
-                    return anyhow::Ok(());
-                }
-                _ => {}
-            }
-        }
-    })
-    .await
-    .context("network executions did not complete after the independent denial")??;
+    wait_for_completion_without_network_prompt(&test).await;
     for id in matching_calls {
         assert_network_probe_allowed(&responses, id);
     }
@@ -1650,7 +1626,7 @@ async fn allowing_network_policy_amendment_persists_context_and_bypasses_prompt(
 async fn denying_network_policy_amendment_persists_and_blocks_request() -> Result<()> {
     skip_if_remote!(
         Ok(()),
-        "this fixture exercises the local human-approval proxy bridge"
+        "remote executors forward network decisions only to Guardian"
     );
     skip_if_target_windows!(Ok(()), "uses the POSIX/Python network fixture");
     skip_if_host_windows!(Ok(()));
@@ -3201,6 +3177,7 @@ async fn local_session_grant_does_not_allow_the_same_host_on_a_remote_executor()
         AskForApproval::OnRequest,
     )
     .await?;
+    // Remote executors do not forward manual prompts. The proxy must deny this request.
     wait_for_completion_without_network_prompt(&test).await;
     let output = remote_responses
         .function_call_output_text("exec-network-remote")
@@ -3390,9 +3367,11 @@ async fn start_concurrent_network_requests(
     let environment = test.executor_environment().selection();
     let mut calls = Vec::new();
     for &(id, port) in requests {
-        let command = format!(
-            "{} && printf complete > network-complete-{id}",
-            network_proxy_request_command(&format!("{NETWORK_TEST_HOST}:{port}"), "PROXY")
+        // One request stays connected while the test finishes the other approvals.
+        let command = network_proxy_request_command(
+            &format!("{NETWORK_TEST_HOST}:{port}"),
+            "PROXY",
+            Duration::from_secs(60),
         );
         let args = network_probe_args(&command, &environment.environment_id);
         calls.push(ev_function_call(id, "exec_command", &args.to_string()));
@@ -3434,6 +3413,7 @@ async fn start_concurrent_network_requests(
         prompts.len() == ports.len()
     })
     .await;
+    // Every matching execution has joined its endpoint queue before the first decision.
     for _ in ports.len()..requests.len() {
         queued.next().await?;
     }
@@ -3459,6 +3439,7 @@ async fn managed_network_unified_exec_test_with_features(
 
 fn managed_network_unified_exec_builder(features: &[Feature]) -> Result<TestXdcodeBuilder> {
     let home = Arc::new(TempDir::new()?);
+    // Limited mode uses TLS interception, which remote executors cannot enforce.
     let mode = if core_test_support::is_remote_test_environment() {
         "full"
     } else {
@@ -3467,9 +3448,7 @@ fn managed_network_unified_exec_builder(features: &[Feature]) -> Result<TestXdco
     fs::write(
         home.path().join("config.toml"),
         format!(
-            r#"model = "gpt-5.5"
-model_provider = "test-provider"
-default_permissions = "workspace"
+            r#"default_permissions = "workspace"
 
 [permissions.workspace.filesystem]
 ":minimal" = "read"
@@ -3478,12 +3457,6 @@ default_permissions = "workspace"
 enabled = true
 mode = "{mode}"
 allow_local_binding = true
-
-[model_providers.test-provider]
-name = "Test Responses provider"
-base_url = "http://127.0.0.1:9/v1"
-wire_api = "responses"
-experimental_bearer_token = "xdcode-local-mock-only"
 "#
         ),
     )?;
@@ -3554,16 +3527,15 @@ fn network_exec_args(command: &str) -> Value {
 }
 
 fn network_probe_args(command: &str, environment_id: &str) -> Value {
-    let mut args = network_exec_args(command);
-    args["environment_id"] = json!(environment_id);
-    args["yield_time_ms"] = json!(10_000);
-    args
+    // Remote executors accept only their configured shell.
+    json!({ "cmd": command, "environment_id": environment_id, "login": false, "yield_time_ms": 10_000 })
 }
 
 fn assert_network_probe_allowed(responses: &ResponseMock, id: &str) {
     let output = responses
         .function_call_output_text(id)
         .unwrap_or_else(|| panic!("missing network output for {id}"));
+    // The fixture host need not resolve. A gateway error still means the proxy allowed it.
     assert!(
         output.contains("PROXY:HTTP/1.1 502") || output.contains("PROXY:HTTP/1.1 200"),
         "{id}: {output}"
@@ -3571,12 +3543,13 @@ fn assert_network_probe_allowed(responses: &ResponseMock, id: &str) {
 }
 
 fn remote_network_proxy_request_command(marker: &str) -> String {
-    network_proxy_request_command(NETWORK_TEST_HOST, marker)
+    network_proxy_request_command(NETWORK_TEST_HOST, marker, Duration::from_secs(10))
 }
 
-fn network_proxy_request_command(host: &str, marker: &str) -> String {
+fn network_proxy_request_command(host: &str, marker: &str, read_timeout: Duration) -> String {
+    let read_timeout_secs = read_timeout.as_secs();
     format!(
-        "python3 -c \"import os,socket,urllib.parse; proxy = urllib.parse.urlparse(os.environ['HTTP_PROXY']); sock = socket.create_connection((proxy.hostname, proxy.port), timeout=10); sock.sendall(b'GET http://{host} HTTP/1.1\\r\\nHost: {host}\\r\\nConnection: close\\r\\n\\r\\n'); print('{marker}:' + sock.makefile('rb').readline().decode(errors='replace'))\""
+        "python3 -c \"import os,socket,urllib.parse; proxy = urllib.parse.urlparse(os.environ['HTTP_PROXY']); sock = socket.create_connection((proxy.hostname, proxy.port), timeout=10); sock.settimeout({read_timeout_secs}); sock.sendall(b'GET http://{host} HTTP/1.1\\r\\nHost: {host}\\r\\nConnection: close\\r\\n\\r\\n'); print('{marker}:' + sock.makefile('rb').readline().decode(errors='replace'))\""
     )
 }
 

@@ -8,6 +8,12 @@ use xdcode_windows_sandbox::WindowsSandboxProxyListeners;
 
 use crate::ipc::ProvisioningRequest;
 
+const NETWORK_TABLES: [&str; 3] = [
+    "network_proxy",
+    "experimental_network",
+    "permissions.network",
+];
+
 fn validate_requirements(
     settings: &WindowsSandboxProvisioningSettings,
     listeners: WindowsSandboxProxyListeners,
@@ -312,7 +318,7 @@ fn malformed_machine_policy_fails_closed() {
             validate_requirements(
                 &WindowsSandboxProvisioningSettings::default(),
                 WindowsSandboxProxyListeners::default(),
-                &format!("[{table}]\nenabled = true\n[permissions.network]\nenabled = true")
+                &format!("[{table}]\nenabled = true\n[permissions.network]\nenabled = false")
             )
             .is_err()
         );

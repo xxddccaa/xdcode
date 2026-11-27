@@ -200,6 +200,7 @@ async fn hooks_list_shows_discovered_hook() -> Result<()> {
     let request_id = mcp
         .send_hooks_list_request(HooksListParams {
             cwds: vec![cwd.path().to_path_buf()],
+            ..Default::default()
         })
         .await?;
     let HooksListResponse { data } =
@@ -225,6 +226,7 @@ async fn hooks_list_shows_discovered_hook() -> Result<()> {
                 source_path: config_path,
                 source: HookSource::User,
                 plugin_id: None,
+                environment_id: None,
                 display_order: 0,
                 enabled: true,
                 is_managed: false,
@@ -280,6 +282,7 @@ async fn hooks_list_shows_discovered_plugin_hook() -> Result<()> {
     let request_id = mcp
         .send_hooks_list_request(HooksListParams {
             cwds: vec![cwd.path().to_path_buf()],
+            ..Default::default()
         })
         .await?;
     let HooksListResponse { data } =
@@ -308,6 +311,7 @@ async fn hooks_list_shows_discovered_plugin_hook() -> Result<()> {
                 source_path: plugin_hooks_path,
                 source: HookSource::Plugin,
                 plugin_id: Some("demo@test".to_string()),
+                environment_id: None,
                 display_order: 0,
                 enabled: true,
                 is_managed: false,
@@ -375,6 +379,7 @@ async fn plugin_upgrade_refreshes_hook_runtime_for_loaded_session() -> Result<()
     let hooks_list_id = mcp
         .send_hooks_list_request(HooksListParams {
             cwds: vec![xdcode_home.path().to_path_buf()],
+            ..Default::default()
         })
         .await?;
     let HooksListResponse { data } =
@@ -504,7 +509,8 @@ async fn plugin_upgrade_refreshes_hook_runtime_for_loaded_session() -> Result<()
 
     let hooks_list_id = mcp
         .send_hooks_list_request(HooksListParams {
-            cwds: vec![xdcode_home.path().to_path_buf()],
+            thread_id: Some(thread.id.clone()),
+            ..Default::default()
         })
         .await?;
     let HooksListResponse { data } =
@@ -595,6 +601,7 @@ async fn loaded_session_refreshes_externally_updated_plugin_hooks() -> Result<()
     let list_id = mcp
         .send_hooks_list_request(HooksListParams {
             cwds: vec![xdcode_home.path().to_path_buf()],
+            ..Default::default()
         })
         .await?;
     let HooksListResponse { data } = timeout(DEFAULT_TIMEOUT, mcp.read_response(list_id)).await??;
@@ -665,6 +672,7 @@ async fn loaded_session_refreshes_externally_updated_plugin_hooks() -> Result<()
         let list_id = mcp
             .send_hooks_list_request(HooksListParams {
                 cwds: vec![xdcode_home.path().to_path_buf()],
+                ..Default::default()
             })
             .await?;
         let HooksListResponse { data } =
@@ -853,6 +861,7 @@ source = "{}"
     let hooks_list_id = mcp
         .send_hooks_list_request(HooksListParams {
             cwds: vec![xdcode_home.path().to_path_buf()],
+            ..Default::default()
         })
         .await?;
     let HooksListResponse { data } =
@@ -926,6 +935,7 @@ async fn hooks_list_shows_discovered_plugin_mcp_tool_hook() -> Result<()> {
     let request_id = mcp
         .send_hooks_list_request(HooksListParams {
             cwds: vec![cwd.path().to_path_buf()],
+            ..Default::default()
         })
         .await?;
     let HooksListResponse { data } =
@@ -955,6 +965,7 @@ async fn hooks_list_shows_discovered_plugin_mcp_tool_hook() -> Result<()> {
                 source_path,
                 source: HookSource::Plugin,
                 plugin_id: Some("demo@test".to_string()),
+                environment_id: None,
                 display_order: 0,
                 enabled: true,
                 is_managed: false,
@@ -969,15 +980,24 @@ async fn hooks_list_shows_discovered_plugin_mcp_tool_hook() -> Result<()> {
     Ok(())
 }
 
-#[test_case::test_case("browser", "node_repl"; "node_repl")]
-#[test_case::test_case("unified-computer-use", "cua_repl"; "cua_repl")]
+#[test_case::test_case("browser", "node_repl", "turn_ended", HookEventName::Stop, None; "node_repl")]
+#[test_case::test_case("unified-computer-use", "cua_repl", "turn_ended", HookEventName::Stop, None; "cua_repl")]
+#[test_case::test_case("xdcode-dream-memory", "xdcode_apps", "xdcode_dream_memory.get_mec", HookEventName::SessionStart, Some("^(startup|compact)$"); "memory_without_apps_connection")]
 #[tokio::test]
 async fn hooks_list_hides_builtin_cleanup_and_preserves_other_plugin_hooks(
     plugin_name: &str,
     server: &str,
+    tool: &str,
+    event_name: HookEventName,
+    matcher: Option<&str>,
 ) -> Result<()> {
     let xdcode_home = TempDir::new()?;
     let cwd = TempDir::new()?;
+    let (event_key, event_wire) = match event_name {
+        HookEventName::Stop => ("stop", "Stop"),
+        HookEventName::SessionStart => ("session_start", "SessionStart"),
+        _ => unreachable!("test event"),
+    };
     let plugin_id = format!("{plugin_name}@provider-bundled");
     let plugin_root = xdcode_home.path().join(format!(
         "plugins/cache/provider-bundled/{plugin_name}/local"
@@ -992,8 +1012,8 @@ async fn hooks_list_hides_builtin_cleanup_and_preserves_other_plugin_hooks(
     std::fs::write(
         plugin_root.join("hooks/hooks.json"),
         serde_json::to_vec(&serde_json::json!({
-            "hooks": { "Stop": [{ "hooks": [
-                { "type": "mcp_tool", "server": server, "tool": "turn_ended" },
+            "hooks": { (event_wire): [{ "matcher": matcher, "hooks": [
+                { "type": "mcp_tool", "server": server, "tool": tool },
                 { "type": "command", "command": ordinary_command, "timeout": 5 },
             ] }] },
         }))?,
@@ -1008,7 +1028,7 @@ hooks = true
 [plugins."{plugin_id}"]
 enabled = true
 
-[hooks.state."{plugin_id}:hooks/hooks.json:stop:0:1"]
+[hooks.state."{plugin_id}:hooks/hooks.json:{event_key}:0:1"]
 enabled = false
 "#
         ),
@@ -1021,6 +1041,7 @@ enabled = false
     let request_id = mcp
         .send_hooks_list_request(HooksListParams {
             cwds: vec![cwd.path().to_path_buf()],
+            ..Default::default()
         })
         .await?;
     let HooksListResponse { data } =
@@ -1034,19 +1055,20 @@ enabled = false
         vec![HooksListEntry {
             cwd: cwd.path().to_path_buf(),
             hooks: vec![HookMetadata {
-                key: format!("{plugin_id}:hooks/hooks.json:stop:0:1"),
-                event_name: HookEventName::Stop,
+                key: format!("{plugin_id}:hooks/hooks.json:{event_key}:0:1"),
+                event_name,
                 handler: HookHandlerMetadata::Command {
                     command: ordinary_command.to_string(),
                     r#async: false,
                 },
-                matcher: None,
+                matcher: matcher.map(str::to_string),
                 timeout_sec: 5,
                 status_message: None,
                 additional_context_limit: None,
                 source_path,
                 source: HookSource::Plugin,
                 plugin_id: Some(plugin_id),
+                environment_id: None,
                 display_order: 1,
                 enabled: false,
                 is_managed: false,
@@ -1103,6 +1125,7 @@ async fn hooks_list_warms_plugin_capabilities_for_thread_start() -> Result<()> {
     let hooks_list_id = mcp
         .send_hooks_list_request(HooksListParams {
             cwds: vec![cwd.path().to_path_buf()],
+            ..Default::default()
         })
         .await?;
     let _: HooksListResponse = timeout(DEFAULT_TIMEOUT, mcp.read_response(hooks_list_id)).await??;
@@ -1146,6 +1169,7 @@ async fn hooks_list_shows_plugin_hook_load_warnings() -> Result<()> {
     let request_id = mcp
         .send_hooks_list_request(HooksListParams {
             cwds: vec![cwd.path().to_path_buf()],
+            ..Default::default()
         })
         .await?;
     let HooksListResponse { data } =
@@ -1204,6 +1228,7 @@ timeout = 5
                 xdcode_home.path().to_path_buf(),
                 workspace.path().to_path_buf(),
             ],
+            ..Default::default()
         })
         .await?;
     let HooksListResponse { data } =
@@ -1238,6 +1263,7 @@ timeout = 5
                     source_path: project_config_path,
                     source: HookSource::Project,
                     plugin_id: None,
+                    environment_id: None,
                     display_order: 0,
                     enabled: true,
                     is_managed: false,
@@ -1292,6 +1318,7 @@ async fn hooks_list_uses_root_repo_hooks_for_linked_worktrees() -> Result<()> {
     let list_id = mcp
         .send_hooks_list_request(HooksListParams {
             cwds: vec![repo_root.clone(), worktree_root.clone()],
+            ..Default::default()
         })
         .await?;
     let HooksListResponse { data } = timeout(DEFAULT_TIMEOUT, mcp.read_response(list_id)).await??;
@@ -1340,6 +1367,7 @@ async fn hooks_list_uses_root_repo_hooks_for_linked_worktrees() -> Result<()> {
     let list_id = mcp
         .send_hooks_list_request(HooksListParams {
             cwds: vec![worktree_root],
+            ..Default::default()
         })
         .await?;
     let HooksListResponse { data } = timeout(DEFAULT_TIMEOUT, mcp.read_response(list_id)).await??;
@@ -1363,6 +1391,7 @@ async fn config_batch_write_toggles_user_hook() -> Result<()> {
     let request_id = mcp
         .send_hooks_list_request(HooksListParams {
             cwds: vec![cwd.path().to_path_buf()],
+            ..Default::default()
         })
         .await?;
     let HooksListResponse { data } =
@@ -1392,6 +1421,7 @@ async fn config_batch_write_toggles_user_hook() -> Result<()> {
     let request_id = mcp
         .send_hooks_list_request(HooksListParams {
             cwds: vec![cwd.path().to_path_buf()],
+            ..Default::default()
         })
         .await?;
     let HooksListResponse { data } =
@@ -1422,6 +1452,7 @@ async fn config_batch_write_toggles_user_hook() -> Result<()> {
     let request_id = mcp
         .send_hooks_list_request(HooksListParams {
             cwds: vec![cwd.path().to_path_buf()],
+            ..Default::default()
         })
         .await?;
     let HooksListResponse { data } =
@@ -1482,6 +1513,7 @@ command = "python3 {}"
     let hook_list_id = mcp
         .send_hooks_list_request(HooksListParams {
             cwds: vec![xdcode_home.path().to_path_buf()],
+            ..Default::default()
         })
         .await?;
     let HooksListResponse { data } =
@@ -1539,6 +1571,7 @@ command = "python3 {}"
     let hook_list_id = mcp
         .send_hooks_list_request(HooksListParams {
             cwds: vec![xdcode_home.path().to_path_buf()],
+            ..Default::default()
         })
         .await?;
     let HooksListResponse { data } =
@@ -1598,6 +1631,7 @@ command = "python3 {}"
     let hook_list_id = mcp
         .send_hooks_list_request(HooksListParams {
             cwds: vec![xdcode_home.path().to_path_buf()],
+            ..Default::default()
         })
         .await?;
     let HooksListResponse { data } =
@@ -1685,6 +1719,7 @@ command = "python3 {}"
     let hook_list_id = mcp
         .send_hooks_list_request(HooksListParams {
             cwds: vec![xdcode_home.path().to_path_buf()],
+            ..Default::default()
         })
         .await?;
     let HooksListResponse { data } =

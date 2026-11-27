@@ -1,5 +1,6 @@
 //! Streamable HTTP and trusted-host caller metadata for the shared MCP contract.
 //! Backend selection and membership validation belong to the supplied adapter binding.
+//! Shutdown cancels pending bindings and drains session handlers before releasing their state.
 
 use crate::MessageBoardMcpServer;
 use crate::list_tools_result;
@@ -55,6 +56,8 @@ where
     let cancellation = config.cancellation_token.clone();
     let sessions = Arc::new(LocalSessionManager::default());
     let handlers = TaskTracker::new();
+    // Track the factory even when a connection never creates an MCP handler.
+    // The tuple drops the binding before its completion token.
     let binding = (bind, handlers.token());
     let shutdown = cancellation.clone();
     let app = Router::new()
@@ -87,10 +90,15 @@ where
         .with_graceful_shutdown(cancellation.clone().cancelled_owned())
         .await;
     cancellation.cancel();
+    // HTTP has drained, so no new sessions can be registered. rmcp's HTTP token
+    // does not stop legacy session workers; explicitly close their transports.
     let sessions = std::mem::take(&mut *sessions.sessions.write().await);
     for session in sessions.into_values() {
+        // The only close error means the worker has already terminated.
         let _ = session.close().await;
     }
+    // close() only queues a message. Wait for the factory, services, and outstanding
+    // calls to drop their bindings, including calls from already-removed sessions.
     handlers.close();
     handlers.wait().await;
     result.map_err(Into::into)
@@ -100,6 +108,7 @@ struct HttpServer<F> {
     bind: F,
     invocation_scope: String,
     cancellation: CancellationToken,
+    // Drop last so shutdown cannot return before the binding releases its state.
     _lifetime: TaskTrackerToken,
 }
 
@@ -149,10 +158,11 @@ where
         let mut adapter = tokio::select! {
             biased;
             _ = self.cancellation.cancelled() => {
-                return Err(ErrorData::internal_error("Message-board server is shutting down", None));
+                return Err(ErrorData::internal_error("Message-board server is shutting down", /*data*/ None));
             }
             adapter = async { (self.bind)(caller.thread_id, caller.session_id).await } => adapter?,
         };
+        // Preserve retry identity across calls in this MCP session, scoped to the caller.
         adapter.invocation_scope = format!("{}:{}", self.invocation_scope, caller.thread_id);
         adapter.call_tool(request, context).await
     }

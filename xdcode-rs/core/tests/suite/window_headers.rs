@@ -15,7 +15,6 @@ use xdcode_core::XdcodeThread;
 use xdcode_core::compact::SUMMARIZATION_PROMPT;
 use xdcode_protocol::protocol::EventMsg;
 use xdcode_protocol::protocol::Op;
-use xdcode_protocol::protocol::WarningEvent;
 use xdcode_protocol::user_input::UserInput;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

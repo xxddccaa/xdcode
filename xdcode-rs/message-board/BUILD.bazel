@@ -1,5 +1,13 @@
 load("//:defs.bzl", "xdcode_rust_crate")
 
+exports_files(
+    ["tests/common/mod.rs"],
+    visibility = [
+        "//xdcode-rs/core:__pkg__",
+        "//xdcode-rs/ext/guardian-v3:__pkg__",
+    ],
+)
+
 xdcode_rust_crate(
     name = "message-board",
     crate_name = "xdcode_message_board",

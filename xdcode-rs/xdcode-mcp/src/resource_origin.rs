@@ -15,6 +15,7 @@ use xdcode_protocol::mcp::McpResourceOriginCheckpoint;
 use xdcode_protocol::protocol::EventMsg;
 
 use crate::McpBinding;
+use crate::McpServerKey;
 use crate::XDCODE_APPS_MCP_SERVER_NAME;
 
 const MAX_ORIGINS: usize = 64;
@@ -259,7 +260,10 @@ impl ResourceOrigin {
         }
 
         let tool_info = binding
-            .tool_info(XDCODE_APPS_MCP_SERVER_NAME, &self.tool)
+            .tool_info(
+                &McpServerKey::unscoped(XDCODE_APPS_MCP_SERVER_NAME),
+                &self.tool,
+            )
             .context("originating MCP tool is unavailable")?;
         if tool_info.connector_id.as_deref() != Some(self.connector_id.as_str()) {
             anyhow::bail!("originating MCP tool connector does not match its app context");
@@ -309,7 +313,7 @@ impl ResourceOrigin {
             }),
         );
         binding
-            .read_resource(XDCODE_APPS_MCP_SERVER_NAME, params)
+            .read_resource(&McpServerKey::unscoped(XDCODE_APPS_MCP_SERVER_NAME), params)
             .await
     }
 }

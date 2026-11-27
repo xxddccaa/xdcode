@@ -91,6 +91,7 @@ impl SkillLoadOutcome {
             else {
                 continue;
             };
+            // Only native paths participate in implicit command detection.
             let Ok(path) = skill.path_to_skills_md.to_abs_path() else {
                 continue;
             };
@@ -168,6 +169,7 @@ impl SkillLoadOutcome {
                         "skill discovery filesystem is unavailable for this callback",
                     )
                 })?,
+            // Host skills still honor the caller's current filesystem permissions.
             SkillScope::User | SkillScope::System | SkillScope::Admin => accessors
                 .iter()
                 .copied()

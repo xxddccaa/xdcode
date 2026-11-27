@@ -1,0 +1,6 @@
+load("//:defs.bzl", "xdcode_rust_crate")
+
+xdcode_rust_crate(
+    name = "head-tail-buffer",
+    crate_name = "xdcode_utils_head_tail_buffer",
+)

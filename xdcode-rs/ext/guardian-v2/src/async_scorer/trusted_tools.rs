@@ -33,7 +33,7 @@ pub(crate) async fn trusted_tool_context(
             .enabled(Feature::GuardianTrustOrchestratorConnectors)
     {
         return Some(TrustedTool {
-            server: tool.server_name.clone(),
+            server: tool.server_name().to_owned(),
             connector_id: tool.connector_id.clone(),
             source: TrustedToolSource::PluginServiceOrchestrator,
         });
@@ -83,13 +83,13 @@ pub(crate) async fn trusted_tool_context(
             plugin_root.as_path().display().to_string()
         }
         McpToolSource::Config => {
-            trusted_user_config_source(config, "mcp_servers", &tool.server_name, &xdcode_home)?
+            trusted_user_config_source(config, "mcp_servers", tool.server_name(), &xdcode_home)?
         }
         McpToolSource::SelectedPlugin | McpToolSource::Other => return None,
     };
 
     Some(TrustedTool {
-        server: tool.server_name.clone(),
+        server: tool.server_name().to_owned(),
         connector_id: tool.connector_id.clone(),
         source: TrustedToolSource::UserConfiguration(source),
     })

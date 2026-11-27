@@ -22,6 +22,7 @@ xdcode-http-client = { workspace = true }
 xdcode-network-proxy = { workspace = true }
 xdcode-utils-absolute-path = { workspace = true }
 xdcode-utils-image = { workspace = true }
+xdcode-utils-model-facing-id = { workspace = true }
 xdcode-utils-path-uri = { workspace = true }
 xdcode-utils-redacted-string = { workspace = true }
 xdcode-utils-string = { workspace = true }

@@ -321,6 +321,10 @@ pub(crate) fn require_sandbox_account(
         proxy_settings_mode,
         run_automatic_setup,
         local_user_flags,
+        |home| {
+            crate::registered_core_requested()
+                && !crate::app_package::registered_setup_is_ready(home).unwrap_or(false)
+        },
     )
 }
 
@@ -329,6 +333,7 @@ fn require_sandbox_account_with_setup(
     proxy_settings_mode: crate::WindowsSandboxProxySettingsMode,
     run_full_setup: impl FnOnce(SandboxSetupRequest<'_>, &OfflineProxySettings) -> Result<()>,
     read_local_user_flags: impl Fn(&str) -> Result<Option<u32>>,
+    registration_required: impl Fn(&Path) -> bool,
 ) -> Result<(SandboxCreds, OfflineProxySettings)> {
     let &SandboxSetupRequest {
         permissions,
@@ -392,6 +397,11 @@ fn require_sandbox_account_with_setup(
         }
     }
 
+    if identity.is_some() && registration_required(xdcode_home) {
+        setup_reason = Some("protected Core registration is missing or out of date".to_string());
+        identity = None;
+    }
+
     if identity.is_none() {
         if let Some(reason) = &setup_reason {
             crate::logging::log_note(
@@ -411,6 +421,10 @@ fn require_sandbox_account_with_setup(
             },
             &desired_offline_proxy_settings,
         )?;
+        ensure!(
+            !registration_required(xdcode_home),
+            "protected Core setup did not publish ready runtime ownership"
+        );
         for username in [OFFLINE_USERNAME, ONLINE_USERNAME] {
             if let Ok(Some(flags)) = read_local_user_flags(username) {
                 anyhow::ensure!(

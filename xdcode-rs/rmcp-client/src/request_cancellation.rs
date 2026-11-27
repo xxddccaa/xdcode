@@ -43,6 +43,8 @@ impl RequestScope {
     ) -> Result<ServerResult, ServiceError> {
         let cancellation = self.cancellation.child_token();
         let _cancel_on_drop = cancellation.clone().drop_guard();
+        // The transport must make progress even if the caller stops polling its future.
+        // Register before the task checks cancellation so a racing release observes it.
         let send = async move {
             let handle = tokio::select! {
                 biased;

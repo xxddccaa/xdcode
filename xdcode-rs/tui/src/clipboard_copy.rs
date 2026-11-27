@@ -112,6 +112,7 @@ fn copy_to_clipboard(
     };
     #[cfg(not(target_os = "android"))]
     let native_copy = {
+        // Bound WSL native setup: even initialization can block forever.
         let clipboard = (!environment.wsl_session).then(arboard::Clipboard::new);
         move |text: &str, html: Option<&str>| {
             let clipboard = match clipboard {
@@ -343,10 +344,13 @@ fn osc52_sequence(text: &str, target: Osc52Target) -> Result<String, String> {
         Osc52Target::Direct => osc,
         Osc52Target::Tmux => format!("\x1bPtmux;\x1b{osc}\x1b\\"),
         Osc52Target::Screen => {
+            // Screen buffers each DCS separately. Stay below even its older 256-byte
+            // string limit while forwarding one continuous OSC 52 to the outer terminal.
             const CHUNK_SIZE: usize = 252;
             let mut wrapped = String::new();
             for start in (0..osc.len()).step_by(CHUNK_SIZE) {
                 let end = (start + CHUNK_SIZE).min(osc.len());
+                // OSC 52 contains only ASCII, so every byte offset is a character boundary.
                 wrapped.push_str("\x1bP");
                 wrapped.push_str(&osc[start..end]);
                 wrapped.push_str("\x1b\\");

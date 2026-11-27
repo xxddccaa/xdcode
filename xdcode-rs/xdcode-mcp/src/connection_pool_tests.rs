@@ -1,6 +1,8 @@
 //! Tests for shared MCP connection ownership and protocol negotiation.
 
 use super::*;
+use crate::McpServerKey;
+use crate::McpServerPermissions;
 use crate::binding_clients::McpBindingClients;
 use crate::connection_manager::tests::create_ready_async_managed_client;
 use crate::connection_manager::tests::create_test_tool;
@@ -56,8 +58,8 @@ impl Default for TestServer {
                 create_test_tool("test_server", "test").tool,
             ])),
             block_listing: Arc::default(),
-            started_listings: Arc::new(Semaphore::new(0)),
-            cancelled_listings: Arc::new(Semaphore::new(0)),
+            started_listings: Arc::new(Semaphore::new(/*permits*/ 0)),
+            cancelled_listings: Arc::new(Semaphore::new(/*permits*/ 0)),
         }
     }
 }
@@ -88,7 +90,10 @@ impl ServerHandler for TestServer {
         if self.block_listing.load(Ordering::Acquire) {
             context.ct.cancelled().await;
             self.cancelled_listings.add_permits(1);
-            return Err(rmcp::ErrorData::internal_error("listing cancelled", None));
+            return Err(rmcp::ErrorData::internal_error(
+                "listing cancelled",
+                /*data*/ None,
+            ));
         }
         Ok(ListToolsResult::with_all_items(
             self.tools.lock().unwrap().clone(),
@@ -146,7 +151,9 @@ pub(crate) fn key(context: &McpRuntimeContext, config: &McpServerConfig) -> Conn
     ConnectionKey {
         server_name: "test_server".to_string(),
         identity: reusable_server_identity("test_server", config, context),
-        account: ConnectorRuntimeContextKey::personal(None, None),
+        account: ConnectorRuntimeContextKey::personal(
+            /*account_id*/ None, /*chatgpt_user_id*/ None,
+        ),
         auth_state: None,
         startup_timeout: Duration::from_secs(30),
         catalog_item_limit: 100,
@@ -213,15 +220,16 @@ pub(crate) fn startup(
                     .await?;
                 let (tools, meta) = list_tools_for_client_uncached(
                     "test_server",
-                    false,
+                    /*is_xdcode_apps_mcp_server*/ false,
                     "test",
                     &client.client,
-                    None,
-                    100,
-                    None,
+                    /*timeout*/ None,
+                    /*catalog_item_limit*/ 100,
+                    /*server_instructions*/ None,
                 )
                 .await?;
-                client.tool_catalog = Arc::new(ClientToolCatalog::new(tools, meta, None));
+                client.tool_catalog =
+                    Arc::new(ClientToolCatalog::new(tools, meta, /*updates*/ None));
                 client.connection_sharing = sharing;
                 Ok(client)
             }
@@ -324,7 +332,7 @@ impl LeasePeer {
                 Arc::new(Mutex::new(Some(
                     json!({"extensions": {LEASE_CAPABILITY: {}}}),
                 ))),
-                None,
+                /*tool_catalog_cache_context*/ None,
                 CancellationToken::new(),
                 launch,
             )
@@ -357,7 +365,12 @@ async fn releasing_lease_cancels_pending_call_before_release() {
     let mut peer = LeasePeer::new();
     let (first, first_id) = peer.chat().await;
     let (other, other_id) = peer.chat().await;
-    let call = first.call_tool("wait".into(), None, |_| Ok(None), None);
+    let call = first.call_tool(
+        "wait".into(),
+        /*arguments*/ None,
+        |_| Ok(None),
+        /*timeout*/ None,
+    );
     tokio::pin!(call);
     let request = tokio::select! {
         result = &mut call => panic!("call completed without a reply: {result:?}"),
@@ -367,6 +380,7 @@ async fn releasing_lease_cancels_pending_call_before_release() {
         panic!("expected shared lease")
     };
     lease.release();
+    // Leave the caller unpolled: the release must drive the cancellation write itself.
     let cancel = peer.next("notifications/cancelled").await;
     assert_eq!(cancel.message["params"]["requestId"], request.message["id"]);
     let release = peer.next("codex/connection/release").await;
@@ -375,7 +389,12 @@ async fn releasing_lease_cancels_pending_call_before_release() {
     assert!(call.await.is_err());
 
     let (result, ()) = tokio::join!(
-        other.call_tool("test".into(), None, |_| Ok(None), None,),
+        other.call_tool(
+            "test".into(),
+            /*arguments*/ None,
+            |_| Ok(None),
+            /*timeout*/ None,
+        ),
         async {
             let request = peer.next("tools/call").await;
             assert_eq!(request.message["params"]["_meta"][LEASE_META_KEY], other_id);
@@ -438,7 +457,7 @@ async fn shared_startup_survives_first_chat_cancellation_and_rejects_released_bi
         Arc::default(),
         key.clone(),
         Arc::default(),
-        None,
+        /*tool_catalog_cache_context*/ None,
         first_cancel.clone(),
         &launch,
     );
@@ -446,7 +465,7 @@ async fn shared_startup_survives_first_chat_cancellation_and_rejects_released_bi
         Arc::default(),
         key.clone(),
         Arc::default(),
-        None,
+        /*tool_catalog_cache_context*/ None,
         CancellationToken::new(),
         &launch,
     );
@@ -466,43 +485,51 @@ async fn shared_startup_survives_first_chat_cancellation_and_rejects_released_bi
             Arc::default(),
             key,
             Arc::default(),
-            None,
+            /*tool_catalog_cache_context*/ None,
             CancellationToken::new(),
             &launch,
         )
         .await
         .unwrap();
     let mut config = crate::mcp::tests::test_mcp_config(std::env::temp_dir());
-    config
-        .server_permission_profiles
-        .insert("test_server".to_string(), config.permission_profile.clone());
+    config.server_permissions.insert(
+        McpServerKey::unscoped("test_server"),
+        McpServerPermissions::Thread,
+    );
     let prepared = crate::binding::PreparedMcpCall::new(
-        Arc::new(crate::connection_manager::McpConnectionSet::empty(true)),
+        Arc::new(crate::connection_manager::McpConnectionSet::empty(
+            /*prefix_mcp_tool_names*/ true,
+        )),
         Arc::new(client.clone()),
         Arc::new(config),
         client.tool_catalog.read(Arc::new).await,
         create_test_tool("test_server", "test"),
         crate::server::McpServerMetadata {
             environment_id: "local".to_string(),
+            server_key: McpServerKey::unscoped("test_server"),
             pollutes_memory: false,
             origin: None,
             supports_parallel_tool_calls: true,
             default_tools_approval_mode: None,
             tool_approval_modes: Default::default(),
         },
-        None,
-        false,
+        /*plugin_id*/ None,
+        /*selected_plugin_server*/ false,
     )
     .unwrap();
-    let bindings = McpBindingClients::new(HashMap::from([(
-        "test_server".to_string(),
-        Arc::new(client.clone()),
-    )]));
+    let bindings = McpBindingClients::new(
+        HashMap::from([(
+            McpServerKey::unscoped("test_server"),
+            Arc::new(client.clone()),
+        )]),
+        Vec::new(),
+    );
     server.block_listing.store(true, Ordering::Release);
     let waiting = async {
+        let server = McpServerKey::unscoped("test_server");
         tokio::join!(
-            bindings.list_resources("test_server", None),
-            bindings.list_resource_templates("test_server", None),
+            bindings.list_resources(&server, /*params*/ None),
+            bindings.list_resource_templates(&server, /*params*/ None),
         )
     };
     tokio::pin!(waiting);
@@ -525,7 +552,7 @@ async fn shared_startup_survives_first_chat_cancellation_and_rejects_released_bi
     .unwrap()
     .forget();
     let prepared_error = prepared
-        .call_with_preparation(None, || async {
+        .call_with_preparation(/*requested_timeout*/ None, || async {
             panic!("released bindings must not perform irreversible preparation")
         })
         .await
@@ -536,7 +563,12 @@ async fn shared_startup_survives_first_chat_cancellation_and_rejects_released_bi
             .contains("lease has been released")
     );
     other
-        .call_tool("test".to_string(), None, |_| Ok(None), None)
+        .call_tool(
+            "test".to_string(),
+            /*arguments*/ None,
+            |_| Ok(None),
+            /*timeout*/ None,
+        )
         .await
         .unwrap();
     owned.client = futures::future::ready(Ok(other)).boxed().shared();
@@ -610,7 +642,7 @@ async fn callback_during_startup_releases_waiting_chats_without_sharing_authorit
         Arc::default(),
         key.clone(),
         Arc::default(),
-        None,
+        /*tool_catalog_cache_context*/ None,
         CancellationToken::new(),
         launch("first"),
     );
@@ -618,7 +650,7 @@ async fn callback_during_startup_releases_waiting_chats_without_sharing_authorit
         Arc::default(),
         key,
         Arc::default(),
-        None,
+        /*tool_catalog_cache_context*/ None,
         CancellationToken::new(),
         launch("second"),
     );
@@ -637,7 +669,12 @@ async fn callback_during_startup_releases_waiting_chats_without_sharing_authorit
     .expect("the joining chat must start before the first finishes")
     .unwrap();
     first
-        .call_tool("test".to_string(), None, |_| Ok(None), None)
+        .call_tool(
+            "test".to_string(),
+            /*arguments*/ None,
+            |_| Ok(None),
+            /*timeout*/ None,
+        )
         .await
         .unwrap();
     let mut owner = create_ready_async_managed_client(Vec::new()).await;
@@ -652,7 +689,12 @@ async fn callback_during_startup_releases_waiting_chats_without_sharing_authorit
     assert_eq!(starts.load(Ordering::SeqCst), 2);
     assert_eq!(*callbacks.lock().unwrap(), ["first", "second"]);
     second
-        .call_tool("test".to_string(), None, |_| Ok(None), None)
+        .call_tool(
+            "test".to_string(),
+            /*arguments*/ None,
+            |_| Ok(None),
+            /*timeout*/ None,
+        )
         .await
         .unwrap();
 }
@@ -691,7 +733,7 @@ async fn new_chat_relists_tools_without_invalidating_or_waiting_for_existing_cal
             Arc::default(),
             key.clone(),
             Arc::default(),
-            None,
+            /*tool_catalog_cache_context*/ None,
             CancellationToken::new(),
             &launch,
         )
@@ -712,7 +754,7 @@ async fn new_chat_relists_tools_without_invalidating_or_waiting_for_existing_cal
                 Arc::default(),
                 key.clone(),
                 Arc::default(),
-                None,
+                /*tool_catalog_cache_context*/ None,
                 CancellationToken::new(),
                 &launch,
             ),
@@ -732,6 +774,7 @@ async fn new_chat_relists_tools_without_invalidating_or_waiting_for_existing_cal
             Duration::from_secs(1),
             second.tool_catalog.refresh(
                 || async { Ok((vec![create_test_tool("test_server", "refreshed")], None, ())) },
+                || Some(()),
                 |_, _, ()| {},
             ),
         )
@@ -755,7 +798,7 @@ async fn new_chat_relists_tools_without_invalidating_or_waiting_for_existing_cal
             Arc::default(),
             key,
             Arc::default(),
-            None,
+            /*tool_catalog_cache_context*/ None,
             CancellationToken::new(),
             &launch,
         )
@@ -767,7 +810,12 @@ async fn new_chat_relists_tools_without_invalidating_or_waiting_for_existing_cal
             .expect("timed-out listings must be cancelled")
             .unwrap();
     first
-        .call_tool("test".to_string(), None, |_| Ok(None), None)
+        .call_tool(
+            "test".to_string(),
+            /*arguments*/ None,
+            |_| Ok(None),
+            /*timeout*/ None,
+        )
         .await
         .unwrap();
 }

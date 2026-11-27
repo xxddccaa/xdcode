@@ -46,6 +46,7 @@ use crate::reducer::MAX_PLUGIN_MEASUREMENTS_PER_BATCH;
 use crate::reducer::tracked_tool_item_id;
 use crate::reducer::valid_plugin_measurement_identifier;
 use crate::reducer::valid_plugin_measurement_row;
+use http::HeaderMap;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -72,8 +73,12 @@ use xdcode_app_server_protocol::TurnItemsView;
 use xdcode_app_server_protocol::TurnStartedNotification;
 use xdcode_app_server_protocol::TurnStatus;
 use xdcode_app_server_protocol::item_event_to_server_notification;
+use xdcode_features::RuntimeAuthMode;
+use xdcode_http_client::PROVIDER_ORGANIZATION_HEADER;
+use xdcode_http_client::PROVIDER_PROJECT_HEADER;
 use xdcode_login::AuthManager;
 use xdcode_login::XdcodeAuth;
+use xdcode_model_provider::ChatgptBaseUrl;
 use xdcode_plugin::PluginId;
 use xdcode_plugin::PluginTelemetryMetadata;
 use xdcode_protocol::ThreadId;
@@ -83,6 +88,7 @@ use xdcode_protocol::items::TurnItem;
 use xdcode_protocol::protocol::Event;
 use xdcode_protocol::protocol::EventMsg;
 use xdcode_protocol::request_permissions::RequestPermissionsResponse;
+use xdcode_runtime_agent_instance::RuntimeAuthSlot;
 
 const ANALYTICS_EVENTS_QUEUE_SIZE: usize = 256;
 const ANALYTICS_EVENTS_TIMEOUT: Duration = Duration::from_secs(10);
@@ -116,21 +122,38 @@ pub struct AnalyticsEventsClient {
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum AnalyticsEventsDestination {
     Http {
-        url: String,
+        base_url: ChatgptBaseUrl,
+        api_key_headers: HeaderMap,
     },
     #[cfg(debug_assertions)]
-    CaptureFile {
-        path: PathBuf,
-    },
+    CaptureFile { path: PathBuf },
 }
 
 impl AnalyticsEventsDestination {
-    fn from_base_url(base_url: String) -> Self {
+    fn from_base_url(base_url: ChatgptBaseUrl, headers: HeaderMap) -> Self {
         let capture_file = analytics_capture_file_from_env();
-        Self::from_base_url_and_capture_file(base_url, capture_file)
+        let mut destination = Self::from_base_url_and_capture_file(base_url, capture_file);
+        match &mut destination {
+            Self::Http {
+                api_key_headers, ..
+            } => {
+                // Model-provider secrets and gateway headers do not belong on analytics requests.
+                for name in [PROVIDER_ORGANIZATION_HEADER, PROVIDER_PROJECT_HEADER] {
+                    if let Some(value) = headers.get(name) {
+                        api_key_headers.insert(name, value.clone());
+                    }
+                }
+            }
+            #[cfg(debug_assertions)]
+            Self::CaptureFile { .. } => {}
+        }
+        destination
     }
 
-    fn from_base_url_and_capture_file(base_url: String, capture_file: Option<PathBuf>) -> Self {
+    fn from_base_url_and_capture_file(
+        base_url: ChatgptBaseUrl,
+        capture_file: Option<PathBuf>,
+    ) -> Self {
         #[cfg(debug_assertions)]
         if let Some(path) = capture_file {
             if let Err(err) = crate::analytics_capture::initialize(&path) {
@@ -149,9 +172,20 @@ impl AnalyticsEventsDestination {
         #[cfg(not(debug_assertions))]
         let _ = capture_file;
 
-        let base_url = base_url.trim_end_matches('/');
         Self::Http {
-            url: format!("{base_url}/xdcode/analytics-events/events"),
+            base_url,
+            api_key_headers: HeaderMap::new(),
+        }
+    }
+
+    fn url_for_auth(&self, auth: &XdcodeAuth) -> Option<String> {
+        match self {
+            Self::Http { base_url, .. } => {
+                let base_url = base_url.resolve(auth).trim_end_matches('/');
+                Some(format!("{base_url}/xdcode/analytics-events/events"))
+            }
+            #[cfg(debug_assertions)]
+            Self::CaptureFile { .. } => None,
         }
     }
 }
@@ -169,7 +203,11 @@ fn analytics_capture_file_from_env() -> Option<PathBuf> {
 }
 
 impl AnalyticsEventsQueue {
-    fn new(auth_manager: Arc<AuthManager>, destination: AnalyticsEventsDestination) -> Self {
+    fn new(
+        auth_manager: Arc<AuthManager>,
+        destination: AnalyticsEventsDestination,
+        runtime_auth: Option<(RuntimeAuthSlot, RuntimeAuthMode)>,
+    ) -> Self {
         let (sender, mut receiver) = mpsc::channel(ANALYTICS_EVENTS_QUEUE_SIZE);
         let product_generation = Arc::new(AtomicU64::new(0));
         let worker_product_generation = Arc::clone(&product_generation);
@@ -206,23 +244,42 @@ impl AnalyticsEventsQueue {
                         {
                             reducer.flush_thread(evicted, &mut events);
                         }
-                        send_track_events(&auth_manager, &destination, events, &thread_products)
-                            .await;
+                        send_track_events(
+                            &auth_manager,
+                            &destination,
+                            events,
+                            &thread_products,
+                            runtime_auth.as_ref(),
+                        )
+                        .await;
                         thread_products.register(thread_id, product_sku);
                         continue;
                     }
                     AnalyticsEventsQueueMessage::Flush(done_tx) => {
                         let mut events = Vec::new();
                         reducer.flush(&mut events);
-                        send_track_events(&auth_manager, &destination, events, &thread_products)
-                            .await;
+                        send_track_events(
+                            &auth_manager,
+                            &destination,
+                            events,
+                            &thread_products,
+                            runtime_auth.as_ref(),
+                        )
+                        .await;
                         let _ = done_tx.send(());
                         continue;
                     }
                 };
                 let mut events = Vec::new();
                 reducer.ingest(input, &mut events).await;
-                send_track_events(&auth_manager, &destination, events, &thread_products).await;
+                send_track_events(
+                    &auth_manager,
+                    &destination,
+                    events,
+                    &thread_products,
+                    runtime_auth.as_ref(),
+                )
+                .await;
             }
         });
         Self {
@@ -313,10 +370,38 @@ impl AnalyticsEventsClient {
 
     pub fn new(
         _auth_manager: Arc<AuthManager>,
-        _base_url: String,
+        _base_url: impl Into<ChatgptBaseUrl>,
         _analytics_enabled: Option<bool>,
     ) -> Self {
         Self::disabled()
+    }
+
+    /// Share runtime identity for Provider delivery; file capture never authenticates.
+    pub fn new_with_runtime(
+        _auth_manager: Arc<AuthManager>,
+        _base_url: impl Into<ChatgptBaseUrl>,
+        _analytics_enabled: Option<bool>,
+        _runtime_auth: Option<(RuntimeAuthSlot, RuntimeAuthMode)>,
+        _api_key_headers: HeaderMap,
+    ) -> Self {
+        Self::disabled()
+    }
+
+    /// Give a resumed actor its own queue while preserving the caller's analytics setting.
+    pub fn for_auth_context(
+        &self,
+        auth_manager: Arc<AuthManager>,
+        base_url: String,
+        runtime_auth: Option<(RuntimeAuthSlot, RuntimeAuthMode)>,
+        api_key_headers: HeaderMap,
+    ) -> Self {
+        Self::new_with_runtime(
+            auth_manager,
+            base_url,
+            Some(self.queue.is_some()),
+            runtime_auth,
+            api_key_headers,
+        )
     }
 
     pub fn disabled() -> Self {
@@ -432,22 +517,29 @@ impl AnalyticsEventsClient {
         completed_at_ms: i64,
     ) {
         let thread_id = item.sender_thread_id.to_string();
-        let completed_item = TurnItem::CollabAgentToolCall(item.clone()).into();
+        let completed_item = xdcode_app_server_protocol::ThreadItemPayload::from(
+            TurnItem::CollabAgentToolCall(item.clone()),
+        );
         item.status = CollabAgentToolCallStatus::InProgress;
 
-        self.track_notification(&ServerNotification::ItemStarted(ItemStartedNotification {
-            item: TurnItem::CollabAgentToolCall(item).into(),
-            thread_id: thread_id.clone(),
-            turn_id: turn_id.clone(),
-            started_at_ms,
-        }));
+        self.track_notification(&ServerNotification::ItemStarted(
+            ItemStartedNotification::new(
+                thread_id.clone(),
+                turn_id.clone(),
+                xdcode_app_server_protocol::ThreadItemPayload::from(TurnItem::CollabAgentToolCall(
+                    item,
+                )),
+                started_at_ms,
+            ),
+        ));
         self.track_notification(&ServerNotification::ItemCompleted(
-            ItemCompletedNotification {
-                item: completed_item,
+            ItemCompletedNotification::new(
                 thread_id,
                 turn_id,
+                completed_item,
+                Some(started_at_ms),
                 completed_at_ms,
-            },
+            ),
         ));
     }
 
@@ -632,6 +724,16 @@ impl AnalyticsEventsClient {
         self.record_fact(AnalyticsFact::Custom(CustomAnalyticsFact::TurnXdcodeError(
             Box::new(fact),
         )));
+    }
+
+    /// Record the provenance of one user input after it is added to turn history.
+    pub fn track_accepted_user_input(&self, turn_id: &str, used_dictation: Option<bool>) {
+        self.record_fact(AnalyticsFact::Custom(
+            CustomAnalyticsFact::AcceptedUserInput {
+                turn_id: turn_id.to_owned(),
+                used_dictation,
+            },
+        ));
     }
 
     pub fn track_plugin_installed(&self, plugin: PluginTelemetryMetadata) {
@@ -931,7 +1033,7 @@ fn session_event_to_analytics_notification(
     match &notification {
         ServerNotification::ItemStarted(ItemStartedNotification { item, .. })
         | ServerNotification::ItemCompleted(ItemCompletedNotification { item, .. }) => {
-            tracked_tool_item_id(item)?;
+            tracked_tool_item_id(&item.payload)?;
         }
         _ => {}
     }
@@ -957,6 +1059,7 @@ async fn send_track_events(
     destination: &AnalyticsEventsDestination,
     mut events: Vec<TrackEventRequest>,
     thread_products: &ThreadProducts,
+    runtime_auth: Option<&(RuntimeAuthSlot, RuntimeAuthMode)>,
 ) {
     if events.is_empty() {
         return;
@@ -985,6 +1088,7 @@ async fn send_track_events(
             http_client_factory.clone(),
         );
         let product_sku = product_sku.map(str::to_string);
+        let runtime_auth = runtime_auth.cloned();
         requests.spawn(async move {
             for events in track_event_request_batches(events) {
                 send_track_events_request(
@@ -993,6 +1097,7 @@ async fn send_track_events(
                     events,
                     &factory,
                     product_sku.as_deref(),
+                    runtime_auth.as_ref(),
                 )
                 .await;
             }
@@ -1034,6 +1139,7 @@ async fn send_track_events_request(
     events: Vec<TrackEventRequest>,
     http_client_factory: &xdcode_http_client::HttpClientFactory,
     product_sku: Option<&str>,
+    runtime_auth: Option<&(RuntimeAuthSlot, RuntimeAuthMode)>,
 ) {
     if events.is_empty() {
         return;
@@ -1046,26 +1152,58 @@ async fn send_track_events_request(
         return;
     }
 
-    let url = match destination {
-        AnalyticsEventsDestination::Http { url } => url,
-        #[cfg(debug_assertions)]
-        AnalyticsEventsDestination::CaptureFile { .. } => return,
+    let Some(url) = destination.url_for_auth(auth) else {
+        return;
     };
-    let headers = match xdcode_model_provider::auth_provider_from_auth(auth).to_auth_headers() {
-        Ok(headers) => headers,
+    if runtime_auth.is_some()
+        && let Err(error) = xdcode_model_provider::validate_runtime_destination(Some(&url))
+    {
+        tracing::warn!("failed to authenticate events request: {error}");
+        return;
+    }
+    let runtime = match runtime_auth {
+        Some((slot, mode)) => {
+            let Some(manager) = slot.get() else {
+                tracing::warn!("runtime authentication has not been initialized for events");
+                return;
+            };
+            Some((Arc::clone(manager), *mode))
+        }
+        None => None,
+    };
+    let headers = match destination {
+        AnalyticsEventsDestination::Http {
+            api_key_headers, ..
+        } if auth.is_api_key_auth() => api_key_headers.clone(),
+        _ => HeaderMap::new(),
+    };
+    let resolved = async {
+        let resolved =
+            xdcode_model_provider::auth_provider_for_request(auth, runtime.as_ref(), &headers)
+                .await?;
+        let factory = resolved.bind_http_client_factory(http_client_factory.clone())?;
+        resolved
+            .auth
+            .apply_auth_headers(headers)
+            .await
+            .map(|headers| (headers, factory))
+    }
+    .await;
+    let (headers, factory) = match resolved {
+        Ok(resolved) => resolved,
         Err(error) => {
             tracing::warn!("failed to authenticate events request: {error}");
             return;
         }
     };
-    let client = match xdcode_login::default_client::create_client_for_route_async(
-        http_client_factory.clone(),
+    let client = xdcode_login::default_client::create_client_for_route_async(
+        factory,
         url.clone(),
         xdcode_http_client::ClientRouteClass::Api,
         xdcode_login::default_client::ClientRedirectPolicy::Default,
     )
-    .await
-    {
+    .await;
+    let client = match client {
         Ok(client) => client,
         Err(error) => {
             tracing::warn!(%error, "failed to build events client");
@@ -1073,7 +1211,7 @@ async fn send_track_events_request(
         }
     };
     let mut request = client
-        .post(url)
+        .post(&url)
         .timeout(ANALYTICS_EVENTS_TIMEOUT)
         .headers(headers)
         .header("Content-Type", "application/json")
@@ -1120,3 +1258,7 @@ fn capture_track_events_request(
 #[cfg(test)]
 #[path = "client_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "client_runtime_auth_tests.rs"]
+mod runtime_auth_tests;

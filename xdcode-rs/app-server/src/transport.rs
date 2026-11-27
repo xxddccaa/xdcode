@@ -10,6 +10,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 use xdcode_app_server_protocol::ExperimentalApi;
+use xdcode_app_server_protocol::ServerNotification;
 use xdcode_app_server_protocol::ServerRequest;
 
 pub use xdcode_app_server_transport::AppServerTransport;
@@ -154,11 +155,25 @@ async fn send_message_to_connection(
     }
 
     let writer = connection_state.writer.clone();
+    let optional_progress = matches!(
+        &message,
+        OutgoingMessage::AppServerNotification(envelope)
+            if matches!(&envelope.notification, ServerNotification::ThreadSearchPartial(_))
+    );
     let queued_message = QueuedOutgoingMessage {
         message,
         write_complete_tx,
     };
-    if connection_state.can_disconnect() {
+    if optional_progress {
+        // Keep room for the required response that follows optional progress.
+        if writer.capacity() <= 1 {
+            return false;
+        }
+        if let Err(mpsc::error::TrySendError::Closed(_)) = writer.try_send(queued_message) {
+            return disconnect_connection(connections, connection_id);
+        }
+        false
+    } else if connection_state.can_disconnect() {
         match writer.try_send(queued_message) {
             Ok(()) => false,
             Err(mpsc::error::TrySendError::Full(_)) => {

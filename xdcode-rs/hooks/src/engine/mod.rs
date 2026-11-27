@@ -63,7 +63,7 @@ pub(crate) struct CommandShell {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ConfiguredHandler {
-    /// Internally admitted cleanup hook, enabled independently of per-hook state.
+    /// Internally admitted bundled hook, enabled independently of per-hook state.
     pub builtin: bool,
     pub plugin_trust: Option<plugin_trust::PluginHookTrust>,
     pub event_name: xdcode_protocol::protocol::HookEventName,
@@ -83,7 +83,7 @@ pub(crate) enum HandlerSourcePath {
     Environment {
         environment_id: String,
         cwd: PathUri,
-        source_path: AbsolutePathBuf,
+        source_path: PathUri,
     },
     /// Executor-scoped handlers are currently excluded from user-visible hook reporting
     /// (events, summary, telemetry). Their handlers are always executed async.
@@ -129,7 +129,9 @@ impl std::fmt::Display for HandlerSourcePath {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Local(path) => write!(formatter, "{}", path.display()),
-            Self::Environment { source_path, .. } => write!(formatter, "{}", source_path.display()),
+            Self::Environment { source_path, .. } => {
+                write!(formatter, "{}", source_path.inferred_native_path_string())
+            }
             Self::ExecutorScoped {
                 environment_id,
                 manifest_path,
@@ -151,6 +153,7 @@ pub(crate) enum ConfiguredHandlerKind {
         r#async: bool,
     },
     McpTool {
+        expected_app_connector_id: Option<&'static str>,
         server: String,
         tool: String,
         input: serde_json::Map<String, serde_json::Value>,
@@ -159,6 +162,7 @@ pub(crate) enum ConfiguredHandlerKind {
 
 #[derive(Debug)]
 pub(crate) struct HandlerRunResult {
+    pub structured_content: Option<serde_json::Value>,
     pub context_metadata: xdcode_protocol::models::ContentItemMetadata,
     pub started_at: i64,
     pub completed_at: i64,
@@ -412,6 +416,7 @@ impl ClaudeHooksEngine {
                     source: HookSource::Plugin,
                     display_order,
                     kind: ConfiguredHandlerKind::McpTool {
+                        expected_app_connector_id: None,
                         server,
                         tool,
                         input,

@@ -27,6 +27,7 @@ use xdcode_mcp::McpRuntimeContext;
 use xdcode_mcp::McpRuntimeInput;
 use xdcode_mcp::McpStartupPolicy;
 use xdcode_mcp::McpToolCatalogCache;
+use xdcode_mcp::McpToolStartup;
 use xdcode_mcp::XDCODE_APPS_MCP_SERVER_NAME;
 use xdcode_mcp::XdcodeAppsToolsCache;
 use xdcode_protocol::mcp::ClientMcpExtensions;
@@ -80,7 +81,7 @@ async fn hosted_plugin_runtime_ps_mcp_tool_calls_use_current_auth_manager_token(
     // debug bearer override in their environment.
     *bearer_token_env_var = None;
     let mcp_servers = HashMap::from([(
-        XDCODE_APPS_MCP_SERVER_NAME.to_string(),
+        xdcode_mcp::McpServerKey::unscoped(XDCODE_APPS_MCP_SERVER_NAME),
         EffectiveMcpServer::from_host_config(hosted_plugin_runtime_config),
     )]);
     let mut config = ConfigBuilder::default()
@@ -92,6 +93,7 @@ async fn hosted_plugin_runtime_ps_mcp_tool_calls_use_current_auth_manager_token(
     let mcp_config = Arc::new(config.to_mcp_config(&plugins_manager).await);
     let runtime = McpRuntime::new(McpRuntimeInput {
         network_policy_metadata: None,
+        runtime_auth: None,
         startup_policy: McpStartupPolicy::Eager,
         config: mcp_config,
         plugins_available: false,
@@ -141,7 +143,7 @@ async fn hosted_plugin_runtime_ps_mcp_tool_calls_use_current_auth_manager_token(
             })),
             /*meta*/ None,
             /*requested_timeout*/ None,
-            /*wait_for_server*/ true,
+            McpToolStartup::Wait,
         )
         .await?;
     assert_eq!(tool_result.result.is_error, Some(false));

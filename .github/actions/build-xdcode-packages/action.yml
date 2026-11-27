@@ -23,8 +23,8 @@ runs:
       shell: bash
       working-directory: xdcode-rs
       env:
-        BASE_BINARIES: "xdcode xdcode-app-server xdcode-code-mode-host"
-        WINDOWS_ONLY_BINARIES: "xdcode-command-runner xdcode-windows-sandbox-setup"
+        BASE_BINARIES: "xdcode xdcode-app-server xdcode-code-mode-host xdcode-exec-server"
+        WINDOWS_ONLY_BINARIES: "xdcode-command-runner xdcode-windows-sandbox-setup xdcode-windows-sandbox-service"
         BUILD_MODE: ${{ inputs.build-mode }}
         BUILD_SYSTEM: ${{ inputs.build-system }}
         PACKAGE_ACTION_PATH: ${{ github.action_path }}
@@ -138,6 +138,7 @@ runs:
         package_args=(
           --target "$target"
           --code-mode-host-bin "${release_dir}/xdcode-code-mode-host${exe_suffix}"
+          --exec-server-bin "${release_dir}/xdcode-exec-server${exe_suffix}"
           --cargo-profile release
           --package-version "$XDCODE_PACKAGE_VERSION"
           --force
@@ -183,7 +184,6 @@ runs:
         mkdir -p "${GITHUB_WORKSPACE}/xdcode-rs/target"
         pytest_args=(
           -v
-          --basetemp "${GITHUB_WORKSPACE}/xdcode-rs/target/package-smoke-tmp"
           --package-target "$target"
           --symbols-archive "${GITHUB_WORKSPACE}/symbols-dist/${target}/xdcode-symbols-${target}.tar.gz"
         )
@@ -194,13 +194,17 @@ runs:
           exit 1
         fi
 
+        # Windows setup helpers can finish background ACL work after pytest exits.
+        # Separate roots keep the next run from deleting their executables.
         uv run --frozen pytest "${pytest_args[@]}" \
+          --basetemp "${GITHUB_WORKSPACE}/xdcode-rs/target/package-smoke-gzip-tmp" \
           --compression gzip \
           --cli-archive "${archive_dir}/xdcode-package-${target}.tar.gz" \
           --app-server-archive "${archive_dir}/xdcode-app-server-package-${target}.tar.gz" \
           test_xdcode_package.py
 
         uv run --frozen pytest "${pytest_args[@]}" \
+          --basetemp "${GITHUB_WORKSPACE}/xdcode-rs/target/package-smoke-zstd-tmp" \
           --compression zstd \
           --cli-archive "${archive_dir}/xdcode-package-${target}.tar.zst" \
           --app-server-archive "${archive_dir}/xdcode-app-server-package-${target}.tar.zst" \

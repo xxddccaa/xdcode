@@ -1,4 +1,4 @@
-//! Snapshots cloud-preferred skill deduplication and stable executor aliases in model requests.
+//! Snapshots skill deduplication and incremental catalogs across turns and context resets.
 
 use std::collections::HashSet;
 use std::num::NonZeroUsize;
@@ -34,8 +34,12 @@ use super::super::skills_extension::CatalogSkillProvider;
 use super::super::skills_extension::RepositoryGrant;
 use super::super::skills_extension::repository_skill_grant_history;
 
+#[test_case::test_case(false; "descriptions")]
+#[test_case::test_case(true; "omit_descriptions")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn cloud_preference_preserves_executor_aliases_and_description_budget() -> Result<()> {
+async fn cloud_preference_preserves_executor_aliases_and_description_budget(
+    omit_descriptions: bool,
+) -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = responses::start_mock_server().await;
@@ -88,6 +92,9 @@ async fn cloud_preference_preserves_executor_aliases_and_description_budget() ->
             .with_cloud_provider(provider(cloud_entries)),
         |config: &Config| SkillsExtensionConfig {
             include_instructions: config.include_skill_instructions,
+            omit_descriptions: config
+                .features
+                .enabled(xdcode_features::Feature::OmitSkillDescriptions),
             max_context_tokens: config.skill_max_context_tokens,
             bundled_skills_enabled: false,
             cloud_skill_enabled: true,
@@ -113,12 +120,11 @@ async fn cloud_preference_preserves_executor_aliases_and_description_budget() ->
     let test = test_xdcode()
         .with_exec_server_url("none")
         .with_extensions(Arc::new(extensions.build()))
-        .with_model_info_override("gpt-6-astra", |model| {
-            model.context_window = Some(70_000);
-            model.max_context_window = None;
-            model.include_skills_usage_instructions = false;
-        })
-        .with_config(|config| {
+        .with_config(move |config| {
+            config
+                .features
+                .set_enabled(Feature::OmitSkillDescriptions, omit_descriptions)
+                .expect("set omit_skill_descriptions feature");
             super::configure_scenario_catalog(config);
             config.cloud_skill_enabled = true;
             config
@@ -126,6 +132,7 @@ async fn cloud_preference_preserves_executor_aliases_and_description_budget() ->
                 .enable(Feature::ExecutorCapabilityDiscovery)
                 .expect("enable executor capability discovery");
         })
+        .with_model("gpt-6-astra")
         .build_with_auto_env(&server)
         .await?;
     test.submit_turn("Which skills are available?").await?;
@@ -152,12 +159,23 @@ async fn cloud_preference_preserves_executor_aliases_and_description_budget() ->
                 index == 1
             );
         }
-        assert_eq!(body.matches("UNIQUE_DESCRIPTION_END").count(), 3);
+        assert_eq!(
+            body.matches("UNIQUE_DESCRIPTION_END").count(),
+            if omit_descriptions { 0 } else { 3 }
+        );
     }
     insta::assert_snapshot!(
-        "dedup_before_budgeting",
+        if omit_descriptions {
+            "dedup_without_descriptions"
+        } else {
+            "dedup_before_budgeting"
+        },
         context_snapshot::format_request_history_snapshot(
-            "Cloud skills replace duplicate executor listings before budgeting; unique executor skills retain their descriptions and e1 aliases across turns.",
+            if omit_descriptions {
+                "Cloud and executor skill catalogs retain names and aliases across turns with descriptions omitted."
+            } else {
+                "Cloud skills replace duplicate executor listings before budgeting; unique executor skills retain their descriptions and e1 aliases across turns."
+            },
             &requests,
             &ContextSnapshotOptions::default().include_request_settings(),
         )
@@ -170,6 +188,7 @@ async fn skill_catalog_deltas_survive_resume_and_rebuild_after_compaction() -> R
     skip_if_no_network!(Ok(()));
 
     let server = responses::start_mock_server().await;
+    // Both skill roots include the home path, so its length affects the metadata budget.
     let temp_root = dunce::canonicalize(std::env::temp_dir())?;
     let home = Arc::new(
         tempfile::Builder::new()
@@ -194,6 +213,7 @@ async fn skill_catalog_deltas_survive_resume_and_rebuild_after_compaction() -> R
         SkillProviders::new().with_host_provider(Arc::new(HostSkillProvider::new())),
         |config: &Config| SkillsExtensionConfig {
             include_instructions: config.include_skill_instructions,
+            omit_descriptions: config.features.enabled(Feature::OmitSkillDescriptions),
             max_context_tokens: config.skill_max_context_tokens,
             bundled_skills_enabled: false,
             cloud_skill_enabled: false,
@@ -309,6 +329,8 @@ async fn skill_catalog_deltas_survive_resume_and_rebuild_after_compaction() -> R
         .submit_turn("Continue after compacting the smaller skills list.")
         .await?;
 
+    // Compaction omitted translation from the new catalog. Editing and then
+    // removing it must not advertise a skill that is no longer shown.
     std::fs::write(
         translation.join("SKILL.md"),
         "---\nname: translation\ndescription: Translate and localize text.\n---\n\n# Instructions\n",
@@ -323,6 +345,8 @@ async fn skill_catalog_deltas_survive_resume_and_rebuild_after_compaction() -> R
         .submit_turn("Continue after removing translation.")
         .await?;
 
+    // Editing a shown skill also needs remaining budget. Removing skills does
+    // not refund the space their earlier descriptions still occupy in history.
     std::fs::write(
         home.path().join("skills/code-review/SKILL.md"),
         format!(
@@ -363,6 +387,8 @@ async fn skill_catalog_deltas_survive_resume_and_rebuild_after_compaction() -> R
 
     let requests = mock.requests();
     assert_eq!(requests.len(), 19);
+    // Count newly injected catalog parts by message ID and content index, so retained
+    // history is not counted again on later requests or after resume.
     let mut seen_catalog_parts = HashSet::new();
     let injections = requests
         .iter()
@@ -474,6 +500,7 @@ async fn repository_skill_turn_grant() -> Result<()> {
                 text.contains("Some previously unavailable skills are available again.")
             })
     );
+    // Normalize the executor's temporary path before long tool arguments are clipped and hashed.
     let skill_root = serde_json::to_string(&skill_root.inferred_native_path_string())?;
     let mut bodies = requests
         .iter()

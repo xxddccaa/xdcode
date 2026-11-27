@@ -12,9 +12,9 @@ use xdcode_app_server_protocol::DynamicToolCallOutputContentItem;
 use xdcode_app_server_protocol::DynamicToolCallStatus;
 use xdcode_config::types::AltScreenMode;
 
-fn dynamic_item(id: &str, status: DynamicToolCallStatus) -> AppServerThreadItem {
+fn dynamic_item(id: &str, status: DynamicToolCallStatus) -> AppServerThreadItemPayload {
     let completed = status != DynamicToolCallStatus::InProgress;
-    AppServerThreadItem::DynamicToolCall {
+    AppServerThreadItemPayload::DynamicToolCall {
         id: id.to_string(),
         namespace: Some("test".to_string()),
         tool: "lookup".to_string(),

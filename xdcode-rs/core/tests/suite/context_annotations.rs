@@ -15,6 +15,7 @@ use xdcode_core::config::RolloutBudgetConfig;
 use xdcode_core::config::TokenBudgetConfig;
 use xdcode_features::Feature;
 use xdcode_protocol::model_types::InputModality;
+use xdcode_protocol::models::AudioReference;
 use xdcode_protocol::models::ImageReference;
 use xdcode_protocol::protocol::AdditionalContextEntry;
 use xdcode_protocol::protocol::AdditionalContextKind;
@@ -49,7 +50,9 @@ async fn first_request_item_types_roles_and_content_annotations() -> Result<()> 
                 ..TokenBudgetConfig::default()
             });
             config.rollout_budget = Some(RolloutBudgetConfig {
-                limit_tokens: 100,
+                enforce_limit: true,
+                limit_budget: 100.0,
+                reminder_at_context_start: true,
                 reminder_at_remaining_tokens: Vec::new(),
                 sampling_token_weight: 1.0,
                 prefill_token_weight: 1.0,
@@ -118,24 +121,22 @@ async fn first_request_item_types_roles_and_content_annotations() -> Result<()> 
                     },
                     detail: None,
                 },
-                UserInput::Audio {
-                    audio_url: "data:audio/wav;base64,AAAA".to_string(),
-                },
+                UserInput::Audio { audio: AudioReference::Inline { audio_url: "data:audio/wav;base64,AAAA".to_string() } },
             ])
             .with_additional_context(BTreeMap::from([
                 (
                     "browser_info".to_string(),
-                    AdditionalContextEntry {
-                        value: "tab one".to_string(),
-                        kind: AdditionalContextKind::Untrusted,
-                    },
+                    AdditionalContextEntry::new(
+                        "tab one".to_string(),
+                        AdditionalContextKind::Untrusted,
+                    ),
                 ),
                 (
                     "automation_info".to_string(),
-                    AdditionalContextEntry {
-                        value: "run one".to_string(),
-                        kind: AdditionalContextKind::Application,
-                    },
+                    AdditionalContextEntry::new(
+                        "run one".to_string(),
+                        AdditionalContextKind::Application,
+                    ),
                 ),
             ])),
         )
@@ -214,7 +215,7 @@ async fn first_request_item_types_roles_and_content_annotations() -> Result<()> 
     message developer ["multi_agent.mode_instructions"]
     message user ["environments.environment_context"]
     message developer ["additional_content.automation_info"]
-    message user ["additional_content.browser_info"]
+    function_call_output - null
     message user ["user.text","user.image","user.audio"]
     message developer ["rollout_budget.remaining_tokens"]
     message developer ["current_time.reminder"]

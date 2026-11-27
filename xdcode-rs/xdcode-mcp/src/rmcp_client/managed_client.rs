@@ -59,7 +59,11 @@ impl ManagedClient {
         }
     }
 
-    async fn with_lease_request<T>(&self, operation: impl Future<Output = Result<T>>) -> Result<T> {
+    pub(crate) async fn with_lease_request<T>(
+        &self,
+        operation: impl Future<Output = Result<T>>,
+    ) -> Result<T> {
+        // Keep one copy of the request future as it passes through both lease scopes.
         let operation = std::pin::pin!(operation);
         self.with_active_shared_lease(async {
             match self.connection_sharing.server_lease() {
@@ -158,6 +162,8 @@ impl ManagedClient {
         let total_start = Instant::now();
         self.tool_catalog
             .read(|catalog| {
+                // Discovery may use the shared cache until this client is refreshed.
+                // Executable bindings always capture this client's own catalog.
                 if catalog.revision == 0
                     && let Some(cache_context) = &self.xdcode_apps_tools_cache_context
                 {

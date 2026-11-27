@@ -21,17 +21,17 @@ The source repository's `upstream.json` is the authority for the product version
 and baseline. Installed packages record that metadata in `build-info.json` under
 `upstream`:
 
-- Product version: `0.167.0`; actual upstream baseline: `0.165.0`, tag `rust-v0.165.0`.
-- Selected upstream source: `360319d8dee62d87e2d59fc0c21805d79519cfed`.
-- Release branch base: `b559e6a3988489b636e1e79672eff330bf0679dc`.
+- Product version: `0.172.0`; upstream baseline: `0.172.0`, tag `rust-v0.172.0`.
+- Selected upstream source: `3d86e43b075adeba2193ec5c22ac92f55afd82e6`.
+- Release branch base: `39c29c3bb620f91e84a3bb266bb496dfb697c101`.
 
-The 0.167.0 maintenance revision preserves the [unified model catalog](model-configuration.md),
-provider switching, project preferences and the bundled configuration skill.
-It fixes Plan-to-implementation transitions and retries temporary rate limits
-until recovery or cancellation. The build ID distinguishes each release. See
-[the selective maintenance record](../UPSTREAM_0.167.0.md) and
-[the baseline upgrade record](../UPSTREAM_0.165.0.md) for scope and validation, and each
-build's receipt for its actual source and artifact identity.
+The 0.172.0 release is a full baseline upgrade that keeps the
+[unified model catalog](model-configuration.md), provider switching, project
+preferences, shared provider history, rate-limit retries and the bundled
+configuration skill. Delegation, `exec --remote`, `/rc`, hosted voice and the
+hosted Cloud tunnel/backends are removed or disabled. The build ID distinguishes
+each release. See [the upgrade record](../UPSTREAM_0.172.0.md) for scope and
+validation, and each build's receipt for its actual source and artifact identity.
 
 Stable tags can be on a release branch; a nearest-ancestor `git describe` on
 main can return an unrelated old version. Update the metadata deliberately when
@@ -212,15 +212,15 @@ does not resolve protocol or runtime-data compatibility.
 Transfer the three output files to the target machine and run:
 
 ```bash
-python3.11 xdcode-0.167.0-personal1-linux-x86_64.install.py \
-  xdcode-0.167.0-personal1-linux-x86_64.tar.gz
+python3.11 xdcode-0.172.0-personal1-linux-x86_64.install.py \
+  xdcode-0.172.0-personal1-linux-x86_64.tar.gz
 ```
 
 To allow existing sessions to continue running during installation:
 
 ```bash
-python3.11 xdcode-0.167.0-personal1-linux-x86_64.install.py --force \
-  xdcode-0.167.0-personal1-linux-x86_64.tar.gz
+python3.11 xdcode-0.172.0-personal1-linux-x86_64.install.py --force \
+  xdcode-0.172.0-personal1-linux-x86_64.tar.gz
 ```
 
 Alternatively use the trusted repository's `scripts/xdcode/install.py`. Supply
@@ -261,7 +261,7 @@ Explicit paths allow isolated installation tests without changing home variables
 ```bash
 xdcode_test_root="$(mktemp -d)"
 python3.11 scripts/xdcode/install.py \
-  target/xdcode-dist/xdcode-0.167.0-personal1-linux-x86_64.tar.gz \
+  target/xdcode-dist/xdcode-0.172.0-personal1-linux-x86_64.tar.gz \
   --install-root "$xdcode_test_root/lib/xdcode" \
   --bin-dir "$xdcode_test_root/bin" \
   --xdcode-home "$xdcode_test_root/runtime"
@@ -320,9 +320,6 @@ invalid configuration produces a report without network probes. A disabled
 WebSocket transport is reported without probing it. External credential commands
 and OAuth resolution are not run by these probes, and their absence is reported
 as a partial result. Diagnostic output redacts credentials and raw wire errors.
-
-The bundled `xdcode-delegate` skill explains how to select a worker model and
-override its supervision deadline in a prompt.
 
 ## Provider setup and independent state
 
@@ -418,10 +415,11 @@ The repository-root `install.sh` is a manually downloaded latest-release
 bootstrapper, separate from the runtime and the offline Linux installer. It
 detects Linux x86_64/macOS ARM64 and can pin a release with `--release`.
 `XDCODE_INSTALL_PROXY` configures its downloads without changing global settings.
-On Linux it executes only the offline installer extracted from the verified
-archive; the Python 3.11+ prerequisite and same-build overwrite refusal remain.
-macOS installation uses system tools and an atomic managed symlink, with no
-Python prerequisite. Windows uses root `install.ps1` and a native immutable
+On Linux and macOS it needs only bash, curl, tar and a SHA-256 tool (no Python):
+it verifies the archive checksum, checks the extracted `xdcode --version`, places the
+build in its own directory and atomically switches the `~/.local/bin/xdcode` symlink.
+Re-running it upgrades; running sessions keep their build. The offline Linux
+installer (`.install.py`) remains available for air-gapped installs. Windows uses root `install.ps1` and a native immutable
 launcher; see [the Windows delivery guide](xdcode-windows.md). Unsupported
 architectures are explicit failures, not fallback downloads from another product.
 Existing published two-platform releases remain installable on Linux/macOS,

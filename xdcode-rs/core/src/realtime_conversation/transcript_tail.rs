@@ -1,8 +1,10 @@
-//! Saves terminal speech in model and client history before realtime closure, without inference.
+//! Records realtime transcript chunks in model and client history without inference.
 
 use crate::session::new_submission_id;
 use crate::session::session::Session;
 use std::sync::Arc;
+use xdcode_history::RealtimeSessionInputMetadata;
+use xdcode_history::ResponseItemEnvelope;
 use xdcode_protocol::items::TurnItem;
 use xdcode_protocol::items::UserMessageItem;
 use xdcode_protocol::protocol::EventMsg;
@@ -10,15 +12,31 @@ use xdcode_protocol::protocol::HasLegacyEvent;
 use xdcode_protocol::protocol::ItemCompletedEvent;
 use xdcode_protocol::protocol::TurnCompleteEvent;
 use xdcode_protocol::protocol::TurnStartedEvent;
-use xdcode_protocol::user_input::UserInput;
 use xdcode_rollout::RolloutItem;
 use xdcode_thread_store::PersistContext;
+use xdcode_user_input::ResolvedUserInput;
+
+pub(super) async fn record(session: &Session, text: String) -> std::io::Result<()> {
+    record_input(session, text, /*metadata*/ None).await
+}
+
+pub(super) async fn record_chunk(
+    session: &Session,
+    text: String,
+    metadata: RealtimeSessionInputMetadata,
+) -> std::io::Result<()> {
+    record_input(session, text, Some(metadata)).await
+}
 
 #[expect(
     clippy::await_holding_invalid_type,
     reason = "record history before the owning task can finish or a new task can start"
 )]
-pub(super) async fn record(session: &Session, text: String) -> std::io::Result<()> {
+async fn record_input(
+    session: &Session,
+    text: String,
+    metadata: Option<RealtimeSessionInputMetadata>,
+) -> std::io::Result<()> {
     let mut recording_context = session.new_inject_items_context().await;
     Arc::get_mut(&mut recording_context)
         .ok_or_else(|| std::io::Error::other("realtime transcript context is shared"))?
@@ -30,10 +48,7 @@ pub(super) async fn record(session: &Session, text: String) -> std::io::Result<(
         .map(|task| Arc::clone(&task.turn_context));
     let recording_turn = running_turn.is_none();
     let turn = running_turn.unwrap_or(recording_context);
-    let content = vec![UserInput::Text {
-        text,
-        text_elements: Vec::new(),
-    }];
+    let input = ResolvedUserInput::text(text);
     let now = chrono::Utc::now();
     if recording_turn {
         let started = EventMsg::TurnStarted(TurnStartedEvent {
@@ -52,17 +67,29 @@ pub(super) async fn record(session: &Session, text: String) -> std::io::Result<(
             .record_started_turn(&turn.sub_id, /*attribution*/ None)
             .await;
     }
-    let item = session.response_item_from_user_input(content.clone());
-    session
-        .record_conversation_items(&turn, turn.model_info(), &[item])
-        .await;
+    let item = session.response_item_from_user_input(std::slice::from_ref(&input));
+    if let Some(metadata) = metadata {
+        let mut envelope = ResponseItemEnvelope::new(item);
+        envelope
+            .metadata
+            .get_or_insert_default()
+            .realtime_session_input = Some(Box::new(metadata));
+        session
+            .record_realtime_session_chunk(&turn, envelope)
+            .await?;
+    } else {
+        session
+            .record_conversation_items(&turn, turn.model_info(), &[item])
+            .await;
+    }
 
     // ItemCompleted is the existing source for thread/items/list. Keep the legacy
     // equivalent too; the store selects the appropriate format for this thread.
     let completed = EventMsg::ItemCompleted(ItemCompletedEvent {
+        content_token_count: None,
         thread_id: session.thread_id,
         turn_id: turn.sub_id.clone(),
-        item: TurnItem::UserMessage(UserMessageItem::new(&content)),
+        item: TurnItem::UserMessage(UserMessageItem::new(&[input.to_user_input()])),
         started_at_ms: Some(now.timestamp_millis()),
         completed_at_ms: now.timestamp_millis(),
     });

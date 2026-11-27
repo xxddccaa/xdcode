@@ -5,6 +5,7 @@ use crate::TS;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
+use xdcode_protocol::model_types::DaybreakAvailability as CoreDaybreakAvailability;
 use xdcode_protocol::model_types::InputModality;
 use xdcode_protocol::model_types::ModelAccessPrograms as CoreModelAccessPrograms;
 use xdcode_protocol::model_types::ModelAvailabilityNux as CoreModelAvailabilityNux;
@@ -52,6 +53,7 @@ pub struct ModelProviderCapabilitiesReadResponse {
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct ModelListParams {
+    /// List models for this configured provider instead of the app-server default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional = nullable)]
     pub model_provider: Option<String>,
@@ -90,19 +92,37 @@ pub struct ModelServiceTier {
     pub description: String,
 }
 
-/// Caller-specific explicit access programs advertised by model discovery.
+v2_enum_from_core!(
+    /// Server-resolved Daybreak availability for this caller and model.
+    #[derive(Default)]
+    #[ts(rename_all = "camelCase")]
+    pub enum DaybreakAvailability from CoreDaybreakAvailability {
+        Available,
+        EnrollmentRequired,
+        UnavailableForModel,
+        #[default]
+        #[serde(other)]
+        Default
+    }
+);
+
+/// Caller-specific access programs and Daybreak availability from model discovery.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct ModelAccessPrograms {
     /// Accepted explicit selections.
     pub cyber: Vec<CyberAccessProgram>,
+    /// Server-resolved Daybreak availability for this caller and model.
+    #[serde(default)]
+    pub daybreak_availability: DaybreakAvailability,
 }
 
 impl From<CoreModelAccessPrograms> for ModelAccessPrograms {
     fn from(value: CoreModelAccessPrograms) -> Self {
         Self {
             cyber: value.cyber.into_iter().map(Into::into).collect(),
+            daybreak_availability: value.daybreak_availability.into(),
         }
     }
 }
@@ -111,6 +131,7 @@ impl From<ModelAccessPrograms> for CoreModelAccessPrograms {
     fn from(value: ModelAccessPrograms) -> Self {
         Self {
             cyber: value.cyber.into_iter().map(Into::into).collect(),
+            daybreak_availability: value.daybreak_availability.to_core(),
         }
     }
 }

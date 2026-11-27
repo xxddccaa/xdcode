@@ -5,15 +5,16 @@ use super::LocalAgentControl;
 use crate::rollout_budget::RolloutBudgetReminder;
 use xdcode_protocol::ThreadId;
 use xdcode_protocol::error::Result as XdcodeResult;
-use xdcode_protocol::error::XdcodeErr;
 use xdcode_protocol::protocol::TokenUsage;
 
 impl LocalAgentControl {
-    pub(crate) fn record_rollout_budget_usage(&self, usage: &TokenUsage) -> XdcodeResult<()> {
-        if self.runtime.rollout_budget.record_usage(usage)? {
-            return Err(XdcodeErr::SessionBudgetExceeded);
-        }
-        Ok(())
+    pub(crate) fn record_rollout_budget_usage(
+        &self,
+        usage: Option<&TokenUsage>,
+        hook_charge: xdcode_hooks::HookCharge,
+    ) -> XdcodeResult<()> {
+        // The caller keeps a consumed response even when its bill stops new work.
+        self.runtime.rollout_budget.record_usage(usage, hook_charge)
     }
 
     pub(crate) fn pending_budget_reminder(

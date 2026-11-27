@@ -83,13 +83,16 @@ fn main() -> Result<()> {
             continue;
         };
 
+        // Some older helpers assume their first request is initialize without inspecting its method.
         let method = if mode == "legacy-init-first" && !initialized {
             "initialize"
         } else {
             method
         };
         match method {
+            // Some legacy stdio servers exit if their first message is not initialize.
             "server/discover" if mode == "legacy" => {
+                // Some wrappers print a banner before starting the protocol.
                 writeln!(stdout, "starting server")?;
                 write_message(
                     &mut stdout,
@@ -100,6 +103,7 @@ fn main() -> Result<()> {
             "server/discover" if mode == "legacy-late" => {
                 late_discovery_id = Some(message["id"].clone());
             }
+            // The first helper makes its version offer only after it receives initialize.
             "server/discover"
                 if mode == "modern-late"
                     && !std::path::Path::new("retry-modern").try_exists()? => {}

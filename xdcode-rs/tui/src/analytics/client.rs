@@ -14,6 +14,7 @@ use tokio::sync::OnceCell;
 use xdcode_backend_client::AnalyticsReport;
 use xdcode_backend_client::AnalyticsSession;
 use xdcode_backend_client::RequestError;
+use xdcode_features::Feature;
 use xdcode_protocol::account::PlanType;
 
 pub(super) struct Live {
@@ -258,3 +259,7 @@ mod connection_tests;
 #[cfg(test)]
 #[path = "account_plan_tests.rs"]
 mod account_plan_tests;
+
+#[cfg(test)]
+#[path = "runtime_auth_tests.rs"]
+mod runtime_auth_tests;

@@ -18,9 +18,12 @@ use std::fmt;
 use std::num::NonZeroU64;
 use std::path::Component;
 use std::path::Path;
+use std::path::PathBuf;
 use std::sync::PoisonError;
 use std::sync::RwLock;
 use std::time::Duration;
+use xdcode_client::PROVIDER_ORGANIZATION_HEADER;
+use xdcode_client::PROVIDER_PROJECT_HEADER;
 use xdcode_client::Provider as ApiProvider;
 use xdcode_client::RetryConfig as ApiRetryConfig;
 use xdcode_protocol::auth::AuthMode;
@@ -37,6 +40,8 @@ pub use capabilities::ModelProviderCapabilities;
 pub use capabilities::RemoteCompactionSupport;
 pub use gateway_oauth::GatewayOAuthConfig;
 pub use gateway_oauth::GatewayOAuthDelivery;
+pub use gateway_oauth::GatewayOAuthSettings;
+pub use oauth_session::OAuthCredentialsStore;
 pub use oauth_session::OAuthSessionConfig;
 
 pub const RESIDENCY_HEADER_NAME: &str = "x-openai-internal-codex-residency";
@@ -67,7 +72,7 @@ pub fn read_managed_residency_requirement() -> Option<ResidencyRequirement> {
 const DEFAULT_STREAM_IDLE_TIMEOUT_MS: u64 = 300_000;
 const DEFAULT_STREAM_MAX_RETRIES: u64 = 5;
 const DEFAULT_REQUEST_MAX_RETRIES: u64 = 4;
-const DEFAULT_AWS_CREDENTIAL_EXPORT_TIMEOUT_MS: u64 = 30_000;
+const DEFAULT_CREDENTIAL_EXPORT_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_AWS_AUTH_REFRESH_TIMEOUT_MS: u64 = 300_000;
 pub const DEFAULT_WEBSOCKET_CONNECT_TIMEOUT_MS: u64 = 15_000;
 /// Hard cap for user-configured `stream_max_retries`.
@@ -75,21 +80,24 @@ const MAX_STREAM_MAX_RETRIES: u64 = 100;
 /// Hard cap for user-configured `request_max_retries`.
 const MAX_REQUEST_MAX_RETRIES: u64 = 100;
 
+pub const PROVIDER_PROVIDER_NAME: &str = "Provider";
 const PROVIDER_ACTOR_AUTHORIZATION_HEADER: &str = "x-openai-actor-authorization";
 pub const PROVIDER_PROVIDER_ID: &str = "provider";
 pub const CUSTOM_PROVIDER_ID: &str = "custom";
 pub const CUSTOM_PROVIDER_SETUP: &str = "xdcode requires a user-configured Responses provider. Set model and model_provider in ~/.xdcode/config.toml, add [model_providers.<name>] with base_url, wire_api = \"responses\" and env_key = \"XDCODE_API_KEY\", then export XDCODE_API_KEY. Hosted login is unavailable.";
 pub const CHATGPT_XDCODE_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
-const AMAZON_BEDROCK_PROVIDER_NAME: &str = "Amazon Bedrock";
+pub const AMAZON_BEDROCK_PROVIDER_NAME: &str = "Amazon Bedrock";
 pub const AMAZON_BEDROCK_PROVIDER_ID: &str = "amazon-bedrock";
-const AMAZON_BEDROCK_RUNTIME_PROVIDER_NAME: &str = "Amazon Bedrock Runtime";
+pub const AMAZON_BEDROCK_RUNTIME_PROVIDER_NAME: &str = "Amazon Bedrock Runtime";
 pub const AMAZON_BEDROCK_RUNTIME_PROVIDER_ID: &str = "amazon-bedrock-runtime";
-const GCP_PROVIDER_NAME: &str = "Google Cloud Vertex AI";
+pub const GCP_PROVIDER_NAME: &str = "Google Cloud Vertex AI";
 pub const GCP_PROVIDER_ID: &str = "gcp";
 pub const AMAZON_BEDROCK_GPT_5_5_MODEL_ID: &str = "openai.gpt-5.5";
 pub const AMAZON_BEDROCK_GPT_5_6_SOL_MODEL_ID: &str = "openai.gpt-5.6-sol";
 pub const AMAZON_BEDROCK_GPT_6_1_SOL_MODEL_ID: &str = "openai.gpt-6.1-sol";
 pub const AMAZON_BEDROCK_GPT_6_1_TERRA_MODEL_ID: &str = "openai.gpt-6.1-terra";
+pub const AMAZON_BEDROCK_GPT_6_2_ASTRA_MODEL_ID: &str = "openai.gpt-6.2-astra";
+pub const AMAZON_BEDROCK_GPT_6_2_SOL_MODEL_ID: &str = "openai.gpt-6.2-sol";
 pub const AMAZON_BEDROCK_GPT_6_SOL_MODEL_ID: &str = "openai.gpt-6-sol";
 pub const AMAZON_BEDROCK_GPT_6_LUNA_MODEL_ID: &str = "openai.gpt-6-luna";
 pub const AMAZON_BEDROCK_GPT_6_ASTRA_MODEL_ID: &str = "openai.gpt-6-astra";
@@ -149,6 +157,16 @@ pub struct ModelProviderInfo {
     pub base_url: Option<String>,
     /// Optional full URL for a Xdcode-native model catalog. When unset, Provider discovery
     /// uses the Xdcode backend unless `base_url` overrides the inference endpoint.
+    /// The endpoint must serve the Xdcode catalog format, not the public `/v1/models` API.
+    ///
+    /// For built-in Provider, set this under `[model_providers.provider]`; other non-default
+    /// provider overrides are rejected. The URL must use HTTPS and an allowed ChatGPT
+    /// host. Other hosts require a custom provider. Inference still uses `provider_base_url`.
+    ///
+    /// Catalog requests use the provider's credentials, including an API key or ChatGPT
+    /// access token. Only configure an endpoint you trust with those credentials.
+    /// Setting this URL does not grant catalog access or guarantee that the endpoint
+    /// accepts a regional API key. Existing discovery gates and entitlement checks apply.
     pub model_catalog_url: Option<RedactedString>,
     /// Environment variable that stores the user's API key for this provider.
     pub env_key: Option<String>,
@@ -162,10 +180,19 @@ pub struct ModelProviderInfo {
     pub experimental_bearer_token: Option<RedactedString>,
     /// Command-backed bearer-token configuration for this provider.
     pub auth: Option<ModelProviderAuthInfo>,
-    /// Secondary OAuth credentials required by the provider's gateway.
+    /// Gateway access token from OAuth or a credential export command.
     pub gateway_oauth: Option<GatewayOAuthConfig>,
     /// AWS SigV4 auth configuration for this provider.
     pub aws: Option<ModelProviderAwsAuthInfo>,
+    /// Google Cloud project ID for the built-in GCP provider. Takes precedence
+    /// over `GOOGLE_CLOUD_PROJECT` when deriving the Vertex AI endpoint.
+    pub project_id: Option<String>,
+    /// Google Cloud location for the built-in GCP provider. Takes precedence
+    /// over `GOOGLE_CLOUD_LOCATION`; defaults to `global` when neither is set.
+    pub location: Option<String>,
+    /// Absolute path to a Google ADC credential file. For GCP, overrides
+    /// GOOGLE_APPLICATION_CREDENTIALS in the auth command's environment only.
+    pub credential_file: Option<PathBuf>,
     /// Which wire protocol this provider expects.
     #[serde(default)]
     pub wire_api: WireApi,
@@ -226,30 +253,48 @@ pub struct ModelProviderAwsAuthInfo {
     pub auth_refresh: Option<AwsAuthRefreshConfig>,
 }
 
-/// Command used to export AWS signing credentials for a model provider.
+/// Command used to export credentials for a model provider.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema)]
 #[schemars(deny_unknown_fields)]
-pub struct AwsCredentialExportConfig {
+pub struct CredentialExportConfig {
     /// Executable to invoke directly, without a shell.
     pub command: String,
     /// Arguments passed to the credential export command.
     #[serde(default)]
     pub args: Vec<RedactedString>,
     /// Maximum time to wait for the credential export command to complete.
-    #[serde(default = "default_aws_credential_export_timeout_ms")]
+    #[serde(default = "default_credential_export_timeout_ms")]
     pub timeout_ms: NonZeroU64,
 }
 
-impl AwsCredentialExportConfig {
+pub type AwsCredentialExportConfig = CredentialExportConfig;
+
+impl CredentialExportConfig {
+    pub fn validate(&self, field: &str) -> Result<(), String> {
+        if self.command.trim().is_empty() {
+            return Err(format!("provider {field}.command must not be empty"));
+        }
+        let path = Path::new(&self.command);
+        let mut components = path.components();
+        let bare = matches!((components.next(), components.next()),
+            (Some(Component::Normal(name)), None) if name == path.as_os_str());
+        if !path.is_absolute() && !bare {
+            return Err(format!(
+                "provider {field}.command must be an absolute path or a bare executable name"
+            ));
+        }
+        Ok(())
+    }
+
     pub fn timeout(&self) -> Duration {
         Duration::from_millis(self.timeout_ms.get())
     }
 }
 
-fn default_aws_credential_export_timeout_ms() -> NonZeroU64 {
-    match NonZeroU64::new(DEFAULT_AWS_CREDENTIAL_EXPORT_TIMEOUT_MS) {
+fn default_credential_export_timeout_ms() -> NonZeroU64 {
+    match NonZeroU64::new(DEFAULT_CREDENTIAL_EXPORT_TIMEOUT_MS) {
         Some(timeout_ms) => timeout_ms,
-        None => panic!("AWS credential export timeout must be non-zero"),
+        None => panic!("credential export timeout must be non-zero"),
     }
 }
 
@@ -336,7 +381,20 @@ other non-default provider fields are not supported"
         Ok(())
     }
 
+    /// Checks the credential-file path for a GCP provider or built-in GCP override.
+    pub fn validate_gcp_credential_file(&self) -> Result<(), String> {
+        if let Some(credential_file) = &self.credential_file
+            && !credential_file.is_absolute()
+        {
+            return Err("provider credential_file must be an absolute path".to_string());
+        }
+        Ok(())
+    }
+
     pub fn validate(&self) -> std::result::Result<(), String> {
+        if self.is_gcp() {
+            self.validate_gcp_credential_file()?;
+        }
         if let Some(gateway) = &self.gateway_oauth {
             gateway.validate(self)?;
         }
@@ -376,23 +434,7 @@ other non-default provider fields are not supported"
                             .to_string(),
                     );
                 }
-                if credential_export.command.trim().is_empty() {
-                    return Err(
-                        "provider aws.credential_export.command must not be empty".to_string()
-                    );
-                }
-                let command = Path::new(&credential_export.command);
-                let mut components = command.components();
-                let is_bare_command = matches!(
-                    (components.next(), components.next()),
-                    (Some(Component::Normal(name)), None) if name == command.as_os_str()
-                );
-                if !command.is_absolute() && !is_bare_command {
-                    return Err(
-                        "provider aws.credential_export.command must be an absolute path or a bare executable name"
-                            .to_string(),
-                    );
-                }
+                credential_export.validate("aws.credential_export")?;
             }
 
             if let Some(auth_refresh) = aws.auth_refresh.as_ref() {
@@ -434,7 +476,8 @@ other non-default provider fields are not supported"
         }
     }
 
-    fn build_header_map(&self) -> XdcodeResult<HeaderMap> {
+    /// Resolve configured request headers before choosing credentials or a runtime.
+    pub fn build_header_map(&self) -> XdcodeResult<HeaderMap> {
         let capacity = self.http_headers.as_ref().map_or(0, HashMap::len)
             + self.env_http_headers.as_ref().map_or(0, HashMap::len);
         let mut headers = HeaderMap::with_capacity(capacity);
@@ -586,6 +629,9 @@ other non-default provider fields are not supported"
             supports_websockets: false,
             supports_standalone_web_search: false,
             capabilities: None,
+            project_id: None,
+            location: None,
+            credential_file: None,
             include_internal_metadata: false,
         }
     }
@@ -626,6 +672,9 @@ other non-default provider fields are not supported"
             supports_websockets: false,
             supports_standalone_web_search: false,
             capabilities: None,
+            project_id: None,
+            location: None,
+            credential_file: None,
             include_internal_metadata: false,
         }
     }
@@ -662,8 +711,19 @@ other non-default provider fields are not supported"
             requires_hosted_auth: false,
             supports_websockets: false,
             supports_standalone_web_search: false,
+            project_id: None,
+            location: None,
+            credential_file: None,
             include_internal_metadata: false,
         }
+    }
+
+    /// Whether explicit Cyber programs may be selected and forwarded to this provider.
+    /// Use the configured provider ID, never its user-controlled display name, for defaults.
+    pub fn supports_cyber_access_programs(&self, provider_id: &str) -> bool {
+        self.capabilities
+            .and_then(|capabilities| capabilities.cyber_access_programs)
+            .unwrap_or(provider_id == PROVIDER_PROVIDER_ID)
     }
 
     pub fn is_hosted_provider(&self) -> bool {
@@ -741,6 +801,48 @@ pub fn merge_configured_model_providers(
     Ok(model_providers)
 }
 
+/// Validates GCP overrides and applies them when the built-in provider is present.
+pub fn merge_gcp_provider_overrides(
+    built_in: Option<&mut ModelProviderInfo>,
+    mut overrides: ModelProviderInfo,
+) -> Result<(), String> {
+    overrides
+        .validate_gcp_credential_file()
+        .and_then(|()| overrides.validate())
+        .map_err(|message| format!("model_providers.{GCP_PROVIDER_ID} {message}"))?;
+    let base_url = overrides.base_url.take();
+    let auth = overrides.auth.take();
+    let credential_file = overrides.credential_file.take();
+    let http_headers = overrides.http_headers.take();
+    let project_id = overrides.project_id.take();
+    let location = overrides.location.take();
+    if overrides != ModelProviderInfo::default() {
+        return Err(format!(
+            "model_providers.{GCP_PROVIDER_ID} only supports changing \
+`base_url`, `auth`, `http_headers`, `project_id`, `location`, and `credential_file`; other non-default provider fields are not supported"
+        ));
+    }
+
+    if let Some(provider) = built_in {
+        provider.project_id = project_id;
+        provider.location = location;
+        provider.credential_file = credential_file;
+        if let Some(base_url) = base_url {
+            provider.base_url = Some(base_url);
+        }
+        if let Some(auth) = auth {
+            provider.auth = Some(auth);
+        }
+        if let Some(http_headers) = http_headers {
+            provider
+                .http_headers
+                .get_or_insert_default()
+                .extend(http_headers);
+        }
+    }
+    Ok(())
+}
+
 pub fn create_oss_provider(default_provider_port: u16, wire_api: WireApi) -> ModelProviderInfo {
     // These XDCODE_OSS_ environment variables are experimental: we may
     // switch to reading values from config.toml instead.
@@ -783,6 +885,9 @@ pub fn create_oss_provider_with_base_url(base_url: &str, wire_api: WireApi) -> M
         supports_websockets: false,
         supports_standalone_web_search: false,
         capabilities: None,
+        project_id: None,
+        location: None,
+        credential_file: None,
         include_internal_metadata: false,
     }
 }

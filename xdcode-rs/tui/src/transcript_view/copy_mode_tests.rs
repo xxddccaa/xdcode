@@ -200,11 +200,11 @@ fn marker_only_prompt_is_a_copy_target() {
         Arc::new(AgentMarkdownCell::new("Response".into(), Path::new("/"))),
     ];
     let mut view = TranscriptView::default();
-    render(&mut view, &cells, 50, 8);
-    view.begin_copy_mode(&cells, None);
+    render(&mut view, &cells, /*width*/ 50, /*height*/ 8);
+    view.begin_copy_mode(&cells, /*guard*/ None);
     view.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &cells);
     insta::assert_snapshot!(
-        view.footer_with_navigation(50, crate::motion::MotionMode::Reduced, "")
+        view.footer_with_navigation(/*width*/ 50, crate::motion::MotionMode::Reduced, "")
             .unwrap().text.to_string(), @"
     Copy user message
     ↑/↓/j/k select · g/G ends · enter copy · esc close
@@ -215,10 +215,15 @@ fn marker_only_prompt_is_a_copy_target() {
     else {
         panic!("expected a copy action");
     };
-    view.copy_selected_text_with(&cells, &selection, true, |text, _| {
-        assert_eq!(text, "8.");
-        Ok(CopyStatus::Confirmed)
-    })
+    view.copy_selected_text_with(
+        &cells,
+        &selection,
+        /*clear_selection*/ true,
+        |text, _| {
+            assert_eq!(text, "8.");
+            Ok(CopyStatus::Confirmed)
+        },
+    )
     .unwrap();
 }
 
@@ -502,8 +507,8 @@ fn user_code_blocks_preserve_original_line_endings() {
     ] {
         let mut view = TranscriptView::default();
         view.set_presentation(detailed, mode);
-        render(&mut view, &cells, 40, 10);
-        view.begin_copy_mode(&cells, None);
+        render(&mut view, &cells, /*width*/ 40, /*height*/ 10);
+        view.begin_copy_mode(&cells, /*guard*/ None);
         assert_eq!(
             payload(&mut view, &cells),
             "echo user  \r\n",
@@ -531,9 +536,9 @@ fn copying_a_disabled_fenced_table_uses_the_original_body() {
         Vec::new(),
     ))];
     let mut view = TranscriptView::default();
-    let buffer = render(&mut view, &cells, 50, 12);
+    let buffer = render(&mut view, &cells, /*width*/ 50, /*height*/ 12);
     assert!(text(&buffer).contains("```md"));
-    view.begin_copy_mode(&cells, None);
+    view.begin_copy_mode(&cells, /*guard*/ None);
     assert_eq!(payload(&mut view, &cells), "echo done\r\n");
     view.move_copy_target(&cells, KeyCode::Up);
     assert_eq!(payload(&mut view, &cells), body);

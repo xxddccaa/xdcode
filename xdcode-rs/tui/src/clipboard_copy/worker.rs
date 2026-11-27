@@ -237,7 +237,7 @@ impl ClipboardWorker {
             self.start(
                 frames,
                 |text, format, setup| {
-                    let terminal_sequence = Cell::new(None);
+                    let terminal_sequence = Cell::new(/*value*/ None);
                     let result = super::copy_to_clipboard(
                         text,
                         format,
@@ -309,6 +309,21 @@ impl ClipboardWorker {
             .map_err(|_| "clipboard worker stopped".to_string())?;
         read.response = Some(receiver);
         Ok(())
+    }
+
+    /// The original budget follows the read until its owner consumes the result.
+    pub(crate) fn text_read_deadline(&self, request: &Arc<()>) -> Option<Instant> {
+        let request = Arc::downgrade(request);
+        self.pending_read
+            .as_ref()
+            .filter(|read| read.owner.ptr_eq(&request))
+            .map(|read| read.deadline)
+            .or_else(|| {
+                self.read_result
+                    .as_ref()
+                    .filter(|(_, owner, _)| owner.ptr_eq(&request))
+                    .map(|(deadline, _, _)| *deadline)
+            })
     }
 
     pub(crate) fn take_text_result(&mut self) -> Option<Result<String, String>> {

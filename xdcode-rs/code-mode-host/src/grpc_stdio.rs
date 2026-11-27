@@ -20,7 +20,7 @@ use xdcode_code_mode_protocol::host::MAX_FRAME_BYTES;
 
 use crate::GrpcCodeModeHost;
 
-pub(crate) async fn run() -> Result<()> {
+pub(crate) async fn run(host: GrpcCodeModeHost) -> Result<()> {
     let closed = CancellationToken::new();
     let connection = StdioConnection {
         io: tokio::io::join(tokio::io::stdin(), tokio::io::stdout()),
@@ -31,7 +31,7 @@ pub(crate) async fn run() -> Result<()> {
         .chain(futures::stream::pending());
     let server = Server::builder()
         .add_service(
-            CodeModeHostServer::new(GrpcCodeModeHost::new())
+            CodeModeHostServer::new(host)
                 .max_decoding_message_size(MAX_FRAME_BYTES)
                 .max_encoding_message_size(MAX_FRAME_BYTES),
         )

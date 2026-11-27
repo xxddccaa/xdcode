@@ -1,4 +1,5 @@
 use crate::config::OtelTlsConfig;
+use crate::headers_helper::HeadersHelper;
 use http::Uri;
 use opentelemetry_otlp::OTEL_EXPORTER_OTLP_TIMEOUT;
 use opentelemetry_otlp::OTEL_EXPORTER_OTLP_TIMEOUT_DEFAULT;
@@ -16,6 +17,7 @@ use std::fs;
 use std::io;
 use std::io::ErrorKind;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 use xdcode_utils_absolute_path::AbsolutePathBuf;
 
@@ -130,7 +132,7 @@ fn build_http_client_inner(
                     key_location.display()
                 ))
             })?;
-            builder = builder.identity(identity).https_only(true);
+            builder = builder.use_rustls_tls().identity(identity).https_only(true);
         }
         (Some(_), None) | (None, Some(_)) => {
             return Err(config_error(
@@ -149,6 +151,7 @@ pub(crate) fn build_async_http_client(
     factory: &xdcode_http_client::HttpClientFactory,
     tls: Option<&OtelTlsConfig>,
     timeout_var: &str,
+    headers_helper: Option<Arc<HeadersHelper>>,
 ) -> Result<crate::network_policy::RuntimeHttpClient, Box<dyn Error>> {
     let mut config = xdcode_http_client::HttpClientTlsConfig::default();
 
@@ -189,12 +192,23 @@ pub(crate) fn build_async_http_client(
         }
     }
 
+    let mut builder = xdcode_http_client::HttpClientBuilder::new().without_request_logging();
+    if headers_helper.is_some() {
+        // Custom credential headers must never follow a collector redirect.
+        builder = builder.without_redirects();
+    }
     Ok(crate::network_policy::RuntimeHttpClient {
-        client: xdcode_http_client::HttpClientBuilder::new()
-            .without_request_logging()
-            .build_with_tls(factory, xdcode_http_client::ClientRouteClass::Other, config),
+        client: builder.build_with_tls(
+            factory,
+            xdcode_http_client::ClientRouteClass::Other,
+            config,
+        ),
         timeout: resolve_otlp_timeout(timeout_var),
-        runtime: tokio::runtime::Handle::try_current()?,
+        runtime: match &headers_helper {
+            Some(helper) => helper.runtime.clone(),
+            None => tokio::runtime::Handle::try_current()?,
+        },
+        headers_helper,
     })
 }
 
@@ -235,7 +249,13 @@ fn config_error(message: impl Into<String>) -> Box<dyn Error> {
 mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
+    use rcgen::CertifiedKey;
+    use rcgen::generate_simple_self_signed;
+    use std::fs;
+    use tempfile::TempDir;
     use tokio::runtime::Builder;
+    use xdcode_http_client::HttpClientFactory;
+    use xdcode_http_client::OutboundProxyPolicy;
 
     #[test]
     fn current_tokio_runtime_is_multi_thread_detects_runtime_flavor() {
@@ -273,5 +293,57 @@ mod tests {
         });
 
         assert!(client.is_ok());
+    }
+
+    #[test]
+    fn build_http_client_accepts_pem_client_identity() {
+        let (_temp_dir, tls) = write_test_mtls_config();
+
+        build_http_client(&tls, OTEL_EXPORTER_OTLP_TIMEOUT)
+            .expect("blocking HTTP client should accept PEM client identity");
+    }
+
+    #[tokio::test]
+    async fn build_async_http_client_accepts_pem_client_identity() {
+        let (_temp_dir, tls) = write_test_mtls_config();
+
+        let factory = HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault);
+        build_async_http_client(
+            &factory,
+            Some(&tls),
+            OTEL_EXPORTER_OTLP_TIMEOUT,
+            /*headers_helper*/ None,
+        )
+        .expect("async HTTP client should accept PEM client identity");
+    }
+
+    fn write_test_mtls_config() -> (TempDir, OtelTlsConfig) {
+        let temp_dir = tempfile::tempdir().expect("temporary TLS fixture directory");
+        let CertifiedKey { cert, signing_key } =
+            generate_simple_self_signed(vec!["localhost".to_string()])
+                .expect("test certificate should generate");
+        let certificate_path = temp_dir.path().join("client.pem");
+        let private_key_path = temp_dir.path().join("client-key.pem");
+        fs::write(&certificate_path, cert.pem()).expect("client certificate should write");
+        fs::write(&private_key_path, signing_key.serialize_pem())
+            .expect("client private key should write");
+
+        (
+            temp_dir,
+            OtelTlsConfig {
+                ca_certificate: Some(
+                    AbsolutePathBuf::from_absolute_path(&certificate_path)
+                        .expect("CA certificate path should be absolute"),
+                ),
+                client_certificate: Some(
+                    AbsolutePathBuf::from_absolute_path(&certificate_path)
+                        .expect("client certificate path should be absolute"),
+                ),
+                client_private_key: Some(
+                    AbsolutePathBuf::from_absolute_path(&private_key_path)
+                        .expect("client private key path should be absolute"),
+                ),
+            },
+        )
     }
 }

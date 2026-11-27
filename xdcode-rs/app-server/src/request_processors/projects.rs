@@ -1,7 +1,6 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use tokio::sync::Semaphore;
 use tokio::sync::SemaphorePermit;
 use xdcode_app_server_protocol::ClientResponsePayload;
 use xdcode_app_server_protocol::JSONRPCErrorError;
@@ -39,6 +38,8 @@ use xdcode_thread_store::ThreadStore;
 use xdcode_thread_store::ThreadStoreError;
 use xdcode_thread_store::UpdateProjectParams as StoreUpdateProjectParams;
 
+use super::ThreadListState;
+
 use super::thread_processor::THREAD_LIST_DEFAULT_LIMIT;
 use super::thread_processor::THREAD_LIST_MAX_LIMIT;
 use crate::error_code::internal_error;
@@ -50,14 +51,14 @@ use crate::outgoing_message::OutgoingMessageSender;
 pub(crate) struct ProjectRequestProcessor {
     thread_store: Arc<dyn ThreadStore>,
     outgoing: Arc<OutgoingMessageSender>,
-    thread_list_state_permit: Arc<Semaphore>,
+    thread_list_state_permit: Arc<ThreadListState>,
 }
 
 impl ProjectRequestProcessor {
     pub(crate) fn new(
         thread_store: Arc<dyn ThreadStore>,
         outgoing: Arc<OutgoingMessageSender>,
-        thread_list_state_permit: Arc<Semaphore>,
+        thread_list_state_permit: Arc<ThreadListState>,
     ) -> Self {
         Self {
             thread_store,
@@ -291,12 +292,7 @@ impl ProjectRequestProcessor {
     async fn acquire_thread_list_state_permit(
         &self,
     ) -> Result<SemaphorePermit<'_>, JSONRPCErrorError> {
-        self.thread_list_state_permit
-            .acquire()
-            .await
-            .map_err(|err| {
-                internal_error(format!("failed to acquire thread list state permit: {err}"))
-            })
+        self.thread_list_state_permit.acquire_exclusive().await
     }
 }
 
@@ -379,7 +375,6 @@ fn api_project(project: StoredProject) -> Result<Project, JSONRPCErrorError> {
             })
             .collect::<Result<_, JSONRPCErrorError>>()?,
         metadata: project.metadata,
-        position: project.position,
         created_at: project.created_at_ms / 1000,
         updated_at: project.updated_at_ms / 1000,
         recency_at: project

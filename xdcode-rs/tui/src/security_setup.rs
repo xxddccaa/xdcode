@@ -20,10 +20,6 @@ pub(crate) struct Action {
     pub url: String,
 }
 
-#[derive(Deserialize)]
-struct Response {
-    notice: Option<Notice>,
-}
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Identity {
     pub account: String,

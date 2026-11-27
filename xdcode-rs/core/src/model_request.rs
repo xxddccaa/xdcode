@@ -1,4 +1,4 @@
-//! Compose request-scoped response interceptors before tracing and response bookkeeping.
+//! Check budgets and prepare response interceptors before sending model requests.
 use std::collections::HashMap;
 use std::sync::Arc;
 use xdcode_extension_api::ModelRequestContributor;
@@ -6,6 +6,24 @@ use xdcode_extension_api::ModelRequestInput;
 use xdcode_extension_api::ModelRequestKind;
 use xdcode_extension_api::ModelResponseInterceptor;
 use xdcode_extension_api::ModelResponseStream;
+use xdcode_protocol::error::Result;
+use xdcode_protocol::error::XdcodeErr;
+
+pub(crate) async fn check_budget(
+    contributors: &[Arc<dyn ModelRequestContributor>],
+    thread_id: &str,
+    kind: ModelRequestKind,
+) -> Result<()> {
+    if kind == ModelRequestKind::Warmup {
+        return Ok(());
+    }
+    for contributor in contributors {
+        if contributor.budget_exhausted(thread_id).await {
+            return Err(XdcodeErr::SessionBudgetExceeded);
+        }
+    }
+    Ok(())
+}
 
 pub(crate) fn prepare(
     contributors: &[Arc<dyn ModelRequestContributor>],

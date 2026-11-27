@@ -13,7 +13,6 @@ use xdcode_extension_api::ToolContributor;
 use xdcode_extension_api::ToolExecutor;
 use xdcode_http_client::HttpClientFactory;
 use xdcode_login::AuthManager;
-use xdcode_model_provider::create_model_provider;
 use xdcode_model_provider_info::ModelProviderInfo;
 use xdcode_utils_absolute_path::AbsolutePathBuf;
 
@@ -31,6 +30,7 @@ type SaveRootResolver = dyn Fn(&Config) -> Option<AbsolutePathBuf> + Send + Sync
 #[derive(Clone)]
 struct ImageGenerationExtensionConfig {
     available: bool,
+    gif_enabled: bool,
     http_client_factory: HttpClientFactory,
     provider: ModelProviderInfo,
     save_root: Option<AbsolutePathBuf>,
@@ -43,6 +43,7 @@ impl ImageGenerationExtensionConfig {
             available: config.model_provider.is_hosted_provider()
                 || config.model_provider.requires_hosted_auth
                 || config.model_provider.uses_provider_actor_authorization(),
+            gif_enabled: config.features.image_generation_animation_enabled(),
             http_client_factory: config.http_client_factory(),
             provider: config.model_provider.clone(),
             save_root: resolve_save_root(config),
@@ -96,10 +97,18 @@ impl ToolContributor for ImageGenerationExtension {
         if !config.available {
             return Vec::new();
         }
+        let auth = thread_store
+            .get::<xdcode_model_provider::ProviderAuthContext>()
+            .unwrap_or_else(|| {
+                Arc::new(xdcode_model_provider::ProviderAuthContext {
+                    credentials: Arc::clone(&self.auth_manager),
+                    runtime_auth: None,
+                })
+            });
 
         vec![Arc::new(ImageGenerationTool::new(
             XdcodeImagesBackend::new(
-                create_model_provider(config.provider.clone(), Some(self.auth_manager.clone())),
+                auth.model_provider(config.provider.clone()),
                 config.http_client_factory.clone(),
                 thread_store
                     .get::<ThreadOriginator>()
@@ -107,6 +116,7 @@ impl ToolContributor for ImageGenerationExtension {
             ),
             config.save_root.clone(),
             thread_store.level_id().to_string(),
+            config.gif_enabled,
         ))]
     }
 }

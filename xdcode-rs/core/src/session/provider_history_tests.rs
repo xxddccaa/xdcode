@@ -371,7 +371,7 @@ async fn pre_turn_compaction_records_its_pinned_provider_before_ciphertext() {
         ContextManager::reconstruct_rollout(
             items,
             ThreadHistoryMode::default(),
-            ContextManager::new(),
+            ContextManager::new(crate::session::session::Session::new_item_id_generator()),
             TruncationPolicy::Bytes(usize::MAX / 2),
         )
     };

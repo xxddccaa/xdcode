@@ -10,11 +10,17 @@ use serde_json::json;
 use std::path::PathBuf;
 use std::time::Duration;
 use xdcode_protocol::models::PermissionProfile;
+use xdcode_protocol::permissions::FileSystemAccessMode;
+use xdcode_protocol::permissions::FileSystemSandboxEntry;
+use xdcode_protocol::permissions::FileSystemSandboxPolicy;
+use xdcode_protocol::permissions::NetworkSandboxPolicy;
 use xdcode_shell_command::shell_detect::DetectedShell;
 use xdcode_shell_command::shell_detect::ShellType;
 
+#[test_case::test_case(false; "store_fallback")]
+#[test_case::test_case(true; "unreadable_ancestor")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn mxc_replaces_store_powershell_before_launch() -> Result<()> {
+async fn mxc_exec_command_starts_powershell(restrict_parent: bool) -> Result<()> {
     if !xdcode_sandboxing::windows_mxc_available() {
         eprintln!("skipping test: native MXC is unavailable on this host");
         return Ok(());
@@ -38,11 +44,49 @@ async fn mxc_replaces_store_powershell_before_launch() -> Result<()> {
         });
     // Discovery is intentionally host-local; remote execution must not use the host's shell.
     let harness = TestXdcodeHarness::with_builder(builder).await?;
+    let (workdir, permissions, checks) = if restrict_parent {
+        let ancestor = harness.path_abs("ancestor");
+        let workspace = ancestor.join("Downloads");
+        std::fs::create_dir_all(&workspace)?;
+        std::fs::write(workspace.join("fixture.txt"), b"granted")?;
+        std::fs::write(ancestor.join("private.txt"), b"private")?;
+        let mut policy = FileSystemSandboxPolicy::read_only();
+        policy.entries.extend([
+            FileSystemSandboxEntry::new(ancestor.into(), FileSystemAccessMode::Deny),
+            FileSystemSandboxEntry::new(workspace.clone().into(), FileSystemAccessMode::Write),
+        ]);
+        let checks = r#"
+$ErrorActionPreference = 'Stop'
+if ($PWD.Path -ne [Environment]::CurrentDirectory) { throw "Unexpected PowerShell location: $PWD" }
+if ((Get-Content -LiteralPath .\fixture.txt -Raw) -ne 'granted') { throw 'Relative read failed' }
+$parent = [IO.Path]::GetDirectoryName([Environment]::CurrentDirectory)
+try {
+    [void][IO.File]::GetAttributes($parent)
+    throw 'The workspace parent allowed an attribute read'
+} catch [UnauthorizedAccessException] {}
+try {
+    [void][IO.File]::ReadAllText([IO.Path]::Combine($parent, 'private.txt'))
+    throw 'The sibling was readable'
+} catch [UnauthorizedAccessException] {} catch [IO.FileNotFoundException] {}
+"#;
+        (
+            workspace,
+            PermissionProfile::from_runtime_permissions(&policy, NetworkSandboxPolicy::Restricted),
+            checks,
+        )
+    } else {
+        (
+            harness.path_abs(""),
+            PermissionProfile::workspace_write(),
+            "",
+        )
+    };
     let mock = mount_function_call_agent_response(
         harness.server(),
         "mxc-powershell",
         &json!({
-            "cmd": "Set-Content -LiteralPath fallback.txt -Value mxc-powershell -NoNewline",
+            "cmd": format!("{checks}\nSet-Content -LiteralPath fallback.txt -Value mxc-powershell -NoNewline"),
+            "workdir": workdir,
             "login": false,
             "yield_time_ms": 10_000,
         })
@@ -53,7 +97,7 @@ async fn mxc_replaces_store_powershell_before_launch() -> Result<()> {
     harness
         .submit_with_permission_profile(
             "Write a file using PowerShell in the sandbox.",
-            PermissionProfile::workspace_write(),
+            permissions.clone(),
         )
         .await?;
 
@@ -89,7 +133,7 @@ async fn mxc_replaces_store_powershell_before_launch() -> Result<()> {
             harness
                 .submit_with_permission_profile(
                     "Wait for the PowerShell command to finish.",
-                    PermissionProfile::workspace_write(),
+                    permissions.clone(),
                 )
                 .await?;
             let request = poll_mock.completion.single_request();
@@ -105,7 +149,7 @@ async fn mxc_replaces_store_powershell_before_launch() -> Result<()> {
     .context("timed out waiting for MXC PowerShell to exit")??;
     assert!(output.contains("Process exited with code 0"), "{output}");
     assert_eq!(
-        std::fs::read_to_string(harness.path("fallback.txt"))?,
+        std::fs::read_to_string(workdir.join("fallback.txt"))?,
         "mxc-powershell"
     );
     let metadata: serde_json::Value = serde_json::from_str(

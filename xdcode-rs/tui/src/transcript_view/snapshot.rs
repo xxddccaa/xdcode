@@ -1,4 +1,4 @@
-//! Retain displayed revisions while selecting or reading a live tail or a replaced tool group.
+//! Retain displayed revisions while selecting or reading across live updates and history replay.
 //! Pinned layouts respect manual disclosures; Find's expansion is applied only at display time.
 
 use std::collections::HashMap;
@@ -94,6 +94,7 @@ impl TranscriptView {
         }
         if !replay_may_have_output {
             self.last_tail = replayed.last().map(EntryKey::cell);
+            // The parked display and replayed widget may represent the same stream differently.
             self.live_key = replayed_live.map(|mut key| {
                 key.cacheable = false;
                 (self.area.width, key)

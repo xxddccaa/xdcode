@@ -1,0 +1,7 @@
+---
+source: tui/src/app/startup_warnings_tests.rs
+expression: text
+---
+⚠ Some Xdcode SQLite files on NFS have permissions other than 0600. Migration
+  preserves these permissions and requires your confirmation. Before running
+  `xdcode migrate-nfs-db`, stop Xdcode on every host that uses these databases.

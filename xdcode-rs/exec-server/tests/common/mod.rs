@@ -14,7 +14,7 @@ use xdcode_exec_server::XDCODE_ARG0_EXEC_HELPER_ARG1;
 use xdcode_exec_server::XDCODE_FS_HELPER_ARG1;
 use xdcode_http_client::HttpClientFactory;
 use xdcode_http_client::OutboundProxyPolicy;
-use xdcode_sandboxing::landlock::XDCODE_LINUX_SANDBOX_ARG0;
+use xdcode_sandboxing::linux::XDCODE_LINUX_SANDBOX_ARG0;
 use xdcode_test_binary_support::TestBinaryDispatchGuard;
 use xdcode_test_binary_support::TestBinaryDispatchMode;
 use xdcode_test_binary_support::configure_test_binary_dispatch;

@@ -1,10 +1,12 @@
+use super::responses_error::parse_error_event;
 use super::responses_error::parse_failed_response;
+use crate::common::ReasoningRemovalReason;
 use crate::common::ResponseEvent;
 use crate::common::ResponseStream;
 use crate::common::SafetyBuffering;
 use crate::common::SafetyBufferingTreatment;
 use crate::error::ApiError;
-use crate::error::parse_terminal_provider_error;
+use crate::guardian_assessment::parse_guardian_assessment;
 use crate::rate_limits::parse_all_rate_limits;
 use crate::safety_buffering::treatment_from_headers;
 use crate::telemetry::SseTelemetry;
@@ -12,6 +14,7 @@ use eventsource_stream::Eventsource;
 use futures::StreamExt;
 use serde::Deserialize;
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -101,6 +104,7 @@ pub fn spawn_response_stream(
     });
 
     ResponseStream {
+        routing_affinity: None,
         rx_event,
         upstream_request_id,
         interrupt: None,
@@ -166,6 +170,7 @@ pub struct ResponsesStreamEvent {
     pub(crate) headers: Option<Value>,
     metadata: Option<Value>,
     response: Option<Value>,
+    response_id: Option<Value>,
     error: Option<Value>,
     item: Option<Value>,
     item_id: Option<String>,
@@ -219,6 +224,33 @@ impl ResponsesStreamEvent {
         self.headers
             .as_ref()
             .and_then(header_turn_state_value_from_json)
+    }
+
+    /// Collects independent typed notifications in delivery order. The transport
+    /// supplies safety buffering after applying its response-header treatment.
+    pub(crate) fn metadata_events(
+        &self,
+        safety_buffering: Option<SafetyBuffering>,
+    ) -> Vec<ResponseEvent> {
+        let guardian = if self.kind() == "response.metadata" {
+            parse_guardian_assessment(
+                self.response_id.as_ref().and_then(Value::as_str),
+                self.metadata.as_ref(),
+            )
+        } else {
+            None
+        };
+        [
+            self.model_verifications()
+                .map(ResponseEvent::ModelVerifications),
+            self.turn_moderation_metadata()
+                .map(ResponseEvent::TurnModerationMetadata),
+            safety_buffering.map(ResponseEvent::SafetyBuffering),
+            guardian.map(ResponseEvent::GuardianAssessment),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
     }
 
     pub(crate) fn model_verifications(&self) -> Option<Vec<ModelVerification>> {
@@ -349,14 +381,35 @@ impl ResponsesEventError {
     }
 }
 
+// Diagnostic fields are optional and must never make an otherwise valid response fail.
+fn reasoning_removals(response: &Value) -> Option<BTreeMap<ReasoningRemovalReason, i64>> {
+    let transformations = response.get("input_transformations")?.as_array()?;
+    let mut counts = BTreeMap::new();
+    for transformation in transformations {
+        if transformation.get("type").and_then(Value::as_str) != Some("reasoning")
+            || transformation.get("action").and_then(Value::as_str) != Some("removed")
+        {
+            continue;
+        }
+        let reason = match transformation.get("reason").and_then(Value::as_str) {
+            Some("organization_mismatch") => ReasoningRemovalReason::OrganizationMismatch,
+            Some("end_user_mismatch") => ReasoningRemovalReason::EndUserMismatch,
+            Some("model_mismatch") => ReasoningRemovalReason::ModelMismatch,
+            Some("prefix_mismatch") => ReasoningRemovalReason::PrefixMismatch,
+            Some("turn_boundary") => ReasoningRemovalReason::TurnBoundary,
+            _ => ReasoningRemovalReason::Other,
+        };
+        *counts.entry(reason).or_default() += 1;
+    }
+    Some(counts)
+}
+
 pub fn process_responses_event(
     event: ResponsesStreamEvent,
 ) -> std::result::Result<Option<ResponseEvent>, ResponsesEventError> {
     match event.kind.as_str() {
         "error" => {
-            if let Some(error) =
-                parse_terminal_provider_error(event.error.as_ref(), /*status*/ None)
-            {
+            if let Some(error) = parse_error_event(event.error.as_ref(), event.headers.as_ref()) {
                 return Err(ResponsesEventError::Api(error));
             }
         }
@@ -452,6 +505,15 @@ pub fn process_responses_event(
                         .map(Into::into);
                     return Err(ResponsesEventError::Api(ApiError::ResponseIncomplete(
                         Box::new(ResponseIncompleteError {
+                            partial_output: response
+                                .and_then(|r| r.get("output")?.as_array())
+                                .into_iter()
+                                .flatten()
+                                .filter(|item| {
+                                    item.get("status").and_then(Value::as_str) == Some("incomplete")
+                                })
+                                .cloned()
+                                .collect(),
                             reason: reason.to_string(),
                             response_id,
                             token_usage,
@@ -460,6 +522,7 @@ pub fn process_responses_event(
                 }
             }
             if let Some(resp_val) = event.response {
+                let reasoning_removals = reasoning_removals(&resp_val);
                 let metadata = resp_val
                     .get("usage")
                     .filter(|usage| !usage.is_null())
@@ -473,6 +536,7 @@ pub fn process_responses_event(
                             response_id: resp.id,
                             token_usage: resp.usage.map(Into::into),
                             usage_metadata: resp.usage_metadata,
+                            reasoning_removals,
                             end_turn: if interrupted {
                                 Some(false)
                             } else {
@@ -557,7 +621,6 @@ async fn process_sse_with_treatment(
     response_retry_after: Option<xdcode_http_client::RetryAfter>,
 ) {
     let mut stream = stream.eventsource();
-    let mut response_error: Option<ApiError> = None;
     let mut last_server_model: Option<String> = None;
 
     loop {
@@ -584,9 +647,7 @@ async fn process_sse_with_treatment(
                 return;
             }
             Ok(None) => {
-                let error = response_error.unwrap_or(ApiError::Stream(
-                    "stream closed before response.completed".into(),
-                ));
+                let error = ApiError::Stream("stream closed before response.completed".into());
                 let _ = tx_event.send(Err(error)).await;
                 return;
             }
@@ -613,9 +674,8 @@ async fn process_sse_with_treatment(
                 continue;
             }
         };
-        let model_verifications = event.model_verifications();
-        let turn_moderation_metadata = event.turn_moderation_metadata();
         let safety_buffering = event.safety_buffering(&safety_buffering_treatment);
+        let metadata_events = event.metadata_events(safety_buffering);
 
         if let Some(model) = event.response_model()
             && last_server_model.as_deref() != Some(model.as_str())
@@ -629,29 +689,10 @@ async fn process_sse_with_treatment(
             }
             last_server_model = Some(model);
         }
-        if let Some(verifications) = model_verifications
-            && tx_event
-                .send(Ok(ResponseEvent::ModelVerifications(verifications)))
-                .await
-                .is_err()
-        {
-            return;
-        }
-        if let Some(metadata) = turn_moderation_metadata
-            && tx_event
-                .send(Ok(ResponseEvent::TurnModerationMetadata(metadata)))
-                .await
-                .is_err()
-        {
-            return;
-        }
-        if let Some(buffering) = safety_buffering
-            && tx_event
-                .send(Ok(ResponseEvent::SafetyBuffering(buffering)))
-                .await
-                .is_err()
-        {
-            return;
+        for metadata_event in metadata_events {
+            if tx_event.send(Ok(metadata_event)).await.is_err() {
+                return;
+            }
         }
 
         match process_responses_event(event) {
@@ -673,16 +714,8 @@ async fn process_sse_with_treatment(
                     // The HTTP response header takes precedence over in-stream message advice.
                     *retry_after = Some(advice);
                 }
-                if matches!(
-                    error,
-                    ApiError::FlexUnavailable
-                        | ApiError::SessionBudgetExceeded
-                        | ApiError::ResponseIncomplete(_)
-                ) {
-                    let _ = tx_event.send(Err(error)).await;
-                    return;
-                }
-                response_error = Some(error);
+                let _ = tx_event.send(Err(error)).await;
+                return;
             }
         };
     }
@@ -872,6 +905,7 @@ mod tests {
                 response_id,
                 token_usage,
                 usage_metadata,
+                reasoning_removals: _,
                 end_turn,
             }) => {
                 assert_eq!(response_id, "resp1");
@@ -1070,6 +1104,7 @@ mod tests {
                 response_id,
                 token_usage,
                 usage_metadata,
+                reasoning_removals: _,
                 end_turn,
             }) => {
                 assert_eq!(response_id, "resp1");
@@ -1210,6 +1245,60 @@ mod tests {
         assert_eq!(events.len(), 1);
 
         assert_matches!(events[0], Err(ApiError::QuotaExceeded));
+    }
+
+    #[tokio::test]
+    async fn statusless_policy_error_events_are_terminal() {
+        for code in ["bio_policy", "cyber_policy"] {
+            let event = json!({
+                "type": "error",
+                "sequence_number": 0,
+                "error": {
+                    "type": "invalid_request_error",
+                    "code": code,
+                    "message": "policy rejection",
+                },
+            });
+            let sse = format!("event: error\ndata: {event}\n\n");
+            let events = collect_events(&[sse.as_bytes()]).await;
+            match (code, events.as_slice()) {
+                ("bio_policy", [Err(ApiError::BioPolicy { message })])
+                | ("cyber_policy", [Err(ApiError::CyberPolicy { message })]) => {
+                    assert_eq!(message, "policy rejection");
+                }
+                other => panic!("unexpected policy error event: {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn statusless_policy_errors_exit_before_sse_idle_timeout() {
+        for code in ["bio_policy", "cyber_policy"] {
+            let event = json!({
+                "type": "error",
+                "error": { "code": code, "message": "policy rejection" },
+            });
+            let sse = format!("event: error\ndata: {event}\n\n");
+            let stream = stream::iter([Ok(Bytes::from(sse))]).chain(stream::pending());
+            let (tx, mut rx) = mpsc::channel(1);
+            let started = tokio::time::Instant::now();
+            tokio::spawn(process_sse(
+                Box::pin(stream),
+                tx,
+                idle_timeout(),
+                /*telemetry*/ None,
+            ));
+
+            let result = rx.recv().await.expect("expected a policy error");
+            match (code, result) {
+                ("bio_policy", Err(ApiError::BioPolicy { message }))
+                | ("cyber_policy", Err(ApiError::CyberPolicy { message })) => {
+                    assert_eq!(message, "policy rejection");
+                }
+                other => panic!("unexpected policy error: {other:?}"),
+            }
+            assert_eq!(started.elapsed(), Duration::ZERO);
+        }
     }
 
     #[tokio::test]
@@ -1412,6 +1501,25 @@ mod tests {
                 other => panic!("unexpected event for {code}: {other:?}"),
             }
         }
+    }
+
+    #[tokio::test]
+    async fn incomplete_response_retains_partial_output_on_the_error() {
+        let call = json!({
+            "type": "function_call", "status": "incomplete", "id": "fc_attempt",
+            "call_id": "attempt", "name": "unknown", "arguments": "{}",
+        });
+        let terminal = json!({
+            "type": "response.incomplete",
+            "response": {
+                "id": "resp_1", "incomplete_details": {"reason": "invalid_recipient"},
+                "output": [{"type": "message", "status": "completed"}, call],
+            }
+        });
+        let sse = format!("event: response.incomplete\ndata: {terminal}\n\n");
+        let events = collect_events(&[sse.as_bytes()]).await;
+        assert_matches!(events.as_slice(), [Err(ApiError::ResponseIncomplete(error))]
+            if error.reason == "invalid_recipient" && error.partial_output == [call]);
     }
 
     #[tokio::test]
@@ -1647,6 +1755,7 @@ mod tests {
                 response_id,
                 token_usage: None,
                 usage_metadata: None,
+                reasoning_removals: None,
                 end_turn: None,
             } if response_id == "resp-1"
         );
@@ -1688,6 +1797,7 @@ mod tests {
                 response_id,
                 token_usage: None,
                 usage_metadata: None,
+                reasoning_removals: None,
                 end_turn: None,
             } if response_id == "resp-1"
         );
@@ -1724,6 +1834,7 @@ mod tests {
                 response_id,
                 token_usage: None,
                 usage_metadata: None,
+                reasoning_removals: None,
                 end_turn: None,
             } if response_id == "resp-1"
         );
@@ -1760,6 +1871,7 @@ mod tests {
                 response_id,
                 token_usage: None,
                 usage_metadata: None,
+                reasoning_removals: None,
                 end_turn: None,
             } if response_id == "resp-1"
         );

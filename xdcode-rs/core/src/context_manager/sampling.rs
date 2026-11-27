@@ -14,7 +14,7 @@ impl SamplingProgress {
         let metadata = envelope.metadata.get_or_insert_default();
         let sequence = metadata
             .history_sequence
-            .get_or_insert_with(|| self.last_sequence.strict_add(1));
+            .get_or_insert_with(|| self.last_sequence.strict_add(/* rhs */ 1));
         self.last_sequence = self.last_sequence.max(*sequence);
         self.sampled_through = self
             .sampled_through
@@ -33,6 +33,8 @@ impl SamplingProgress {
                 .max(metadata.sampled_through_sequence.unwrap_or_default());
         }
         progress.last_sequence = progress.last_sequence.max(progress.sampled_through);
+        // Legacy inputs have no delivery proof. Give them distinct identities and keep
+        // them pending until a normal request includes them; never guess from output order.
         progress.assign_missing_sequences(items);
         progress
     }
@@ -52,7 +54,7 @@ impl SamplingProgress {
             if envelope
                 .metadata
                 .as_ref()
-                .and_then(|metadata| metadata.history_sequence)
+                .and_then(|m| m.history_sequence)
                 .is_none()
             {
                 self.record(envelope);

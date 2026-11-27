@@ -61,7 +61,8 @@ pub(crate) use bindings::configured_binding_for_action;
 pub(crate) use bindings::keymap_action_id;
 pub(crate) use bindings::keymap_action_ids;
 use bindings::runtime_action_bindings;
-pub(crate) use chords::KEY_CHORD_TIMEOUT;
+#[cfg(test)]
+pub(crate) use chords::CHORD_REVEAL_DELAY;
 pub(crate) use chords::KeyChordMatch;
 pub(crate) use chords::KeyChordMatcher;
 pub(crate) use chords::KeymapContextSet;
@@ -102,6 +103,9 @@ pub(crate) struct RuntimeKeymap {
 
 #[derive(Clone, Debug)]
 pub(crate) struct AppKeymap {
+    /// Change where a new conversation runs.
+    pub(crate) change_host: Vec<KeyBinding>,
+    pub(crate) choose_cloud_environment: Vec<KeyBinding>,
     pub(crate) focus_main_composer: Vec<KeyBinding>,
     pub(crate) focus_sidebar_content: Vec<KeyBinding>,
     pub(crate) focus_sidebar_tabs: Vec<KeyBinding>,
@@ -118,7 +122,7 @@ pub(crate) struct AppKeymap {
     pub(crate) move_divider_left: Vec<KeyBinding>,
     pub(crate) move_divider_right: Vec<KeyBinding>,
     pub(crate) toggle_pane_zoom: Vec<KeyBinding>,
-    /// Open the daemon-wide agent-session overview.
+    /// Open the agent command center.
     pub(crate) open_agents: Vec<KeyBinding>,
     /// Open transcript overlay.
     pub(crate) open_transcript: Vec<KeyBinding>,
@@ -204,6 +208,8 @@ pub(crate) struct ComposerKeymap {
     pub(crate) history_search_previous: Vec<KeyBinding>,
     /// Move to the next match in reverse history search.
     pub(crate) history_search_next: Vec<KeyBinding>,
+    pub(crate) undo: Vec<KeyBinding>,
+    pub(crate) redo: Vec<KeyBinding>,
 }
 
 /// Editor-specific keybindings used by the composer textarea.
@@ -337,6 +343,7 @@ pub(crate) struct PagerKeymap {
     pub(crate) close: Vec<KeyBinding>,
     pub(crate) close_transcript: Vec<KeyBinding>,
     pub(crate) find: Vec<KeyBinding>,
+    pub(crate) mark_markdown: Vec<KeyBinding>,
     chord_hints: Arc<RuntimeChordKeymap>,
 }
 
@@ -468,9 +475,11 @@ impl ListKeymap {
     }
 }
 
-/// Task-management shortcuts specific to the shared agents dashboard.
+/// Task-management shortcuts specific to the agents dashboard.
 #[derive(Clone, Debug)]
 pub(crate) struct AgentsKeymap {
+    pub(crate) next_group: Vec<KeyBinding>,
+    pub(crate) previous_group: Vec<KeyBinding>,
     pub(crate) resume: Vec<KeyBinding>,
     pub(crate) search: Vec<KeyBinding>,
     pub(crate) new_task: Vec<KeyBinding>,
@@ -668,7 +677,7 @@ impl RuntimeKeymap {
 
         DEFAULTS
             .get_or_init(|| {
-                Self::resolve(&TuiKeymap::default(), false).unwrap_or_else(|error| {
+                Self::resolve(&TuiKeymap::default(), /*workspace*/ false).unwrap_or_else(|error| {
                     panic!("built-in keymap defaults must be valid: {error}")
                 })
             })
@@ -689,18 +698,19 @@ impl RuntimeKeymap {
         if keymap == &TuiKeymap::default() {
             return Ok(Self::defaults());
         }
-        Self::resolve(keymap, false)
+        Self::resolve(keymap, /*workspace*/ false)
     }
 
     pub(crate) fn for_session(keymap: &TuiKeymap, workspace: bool) -> Result<Self, String> {
         if workspace {
-            Self::resolve(keymap, true)
+            Self::resolve(keymap, workspace)
         } else {
             Self::from_config(keymap)
         }
     }
 
     fn resolve(keymap: &TuiKeymap, workspace: bool) -> Result<Self, String> {
+        // Inactive pane shortcuts must not claim keys or chord prefixes in classic mode.
         let mut classic_keymap;
         let keymap = if workspace {
             keymap
@@ -715,13 +725,6 @@ impl RuntimeKeymap {
             classic_keymap.global.sidebar_down = None;
             classic_keymap.global.focus_pane_left = None;
             classic_keymap.global.focus_pane_right = None;
-            classic_keymap.global.minimize_pane_width = None;
-            classic_keymap.global.maximize_pane_width = None;
-            classic_keymap.global.equalize_pane_widths = None;
-            classic_keymap.global.resize_panes = None;
-            classic_keymap.global.move_divider_left = None;
-            classic_keymap.global.move_divider_right = None;
-            classic_keymap.global.toggle_pane_zoom = None;
             &classic_keymap
         };
         let defaults = Self::built_in_defaults();
@@ -770,6 +773,16 @@ impl RuntimeKeymap {
             .collect();
 
         let app = AppKeymap {
+            change_host: resolve_bindings(
+                keymap.global.change_host.as_ref(),
+                &defaults.app.change_host,
+                "tui.keymap.global.change_host",
+            )?,
+            choose_cloud_environment: resolve_bindings(
+                keymap.global.choose_cloud_environment.as_ref(),
+                &defaults.app.choose_cloud_environment,
+                "tui.keymap.global.choose_cloud_environment",
+            )?,
             focus_main_composer: resolve_bindings(
                 keymap.global.focus_main_composer.as_ref(),
                 &[],
@@ -989,6 +1002,8 @@ impl RuntimeKeymap {
                 history_search_previous
             ),
             history_search_next: resolve_local!(keymap, defaults, composer, history_search_next),
+            undo: resolve_local!(keymap, defaults, composer, undo),
+            redo: resolve_local!(keymap, defaults, composer, redo),
         };
 
         let editor = Arc::new(EditorKeymap {
@@ -1521,10 +1536,13 @@ impl RuntimeKeymap {
             close: resolve_local!(keymap, defaults, pager, close),
             close_transcript: resolve_local!(keymap, defaults, pager, close_transcript),
             find: resolve_local!(keymap, defaults, pager, find),
+            mark_markdown: resolve_local!(keymap, defaults, pager, mark_markdown),
             chord_hints: Arc::clone(&chords),
         };
 
         let mut agents = AgentsKeymap {
+            next_group: resolve_local!(keymap, defaults, agents, next_group),
+            previous_group: resolve_local!(keymap, defaults, agents, previous_group),
             resume: resolve_local!(keymap, defaults, agents, resume),
             search: resolve_local!(keymap, defaults, agents, search),
             new_task: resolve_local!(keymap, defaults, agents, new_task),
@@ -1542,6 +1560,11 @@ impl RuntimeKeymap {
 
         // New defaults yield to explicit bindings, including existing list shortcuts.
         for (configured, bindings) in [
+            (keymap.agents.next_group.as_ref(), &mut agents.next_group),
+            (
+                keymap.agents.previous_group.as_ref(),
+                &mut agents.previous_group,
+            ),
             (keymap.agents.resume.as_ref(), &mut agents.resume),
             (keymap.agents.search.as_ref(), &mut agents.search),
             (keymap.agents.new_task.as_ref(), &mut agents.new_task),
@@ -1713,6 +1736,11 @@ impl RuntimeKeymap {
         };
 
         for (configured, bindings) in [
+            (keymap.agents.next_group.as_ref(), &mut agents.next_group),
+            (
+                keymap.agents.previous_group.as_ref(),
+                &mut agents.previous_group,
+            ),
             (keymap.agents.resume.as_ref(), &mut agents.resume),
             (keymap.agents.search.as_ref(), &mut agents.search),
             (keymap.agents.new_task.as_ref(), &mut agents.new_task),
@@ -1763,9 +1791,13 @@ impl RuntimeKeymap {
             approval,
         };
 
+        let vim_undo = KeymapActionId {
+            context: KeymapContext::VimNormal,
+            action: "undo",
+        };
         let configured: Vec<_> = runtime_action_bindings(&resolved)
             .filter(|action| {
-                action.id.context.overlaps(KeymapContext::VimNormal)
+                action.id.overlaps(vim_undo)
                     && bindings::configured_binding_for_action(keymap, action.id)
                         .is_some_and(Option::is_some)
             })
@@ -1791,8 +1823,36 @@ impl RuntimeKeymap {
                     let event = KeyEvent::new(code, modifiers);
                     !configured.is_pressed(event)
                         && !resolved.chords.bindings.iter().any(|chord| {
-                            chord.action.context.overlaps(KeymapContext::VimNormal)
-                                && chord.chord.prefix.is_press(event)
+                            chord.action.overlaps(vim_undo) && chord.chord.prefix.is_press(event)
+                        })
+                });
+            }
+        }
+        let undo_action = KeymapActionId {
+            context: KeymapContext::Composer,
+            action: "undo",
+        };
+        let configured: Vec<_> = runtime_action_bindings(&resolved)
+            .filter(|action| {
+                action.id.overlaps(undo_action)
+                    && bindings::configured_binding_for_action(keymap, action.id)
+                        .is_some_and(Option::is_some)
+            })
+            .flat_map(|action| action.bindings.iter().copied())
+            .collect();
+        for (setting, bindings) in [
+            (keymap.composer.undo.as_ref(), &mut resolved.composer.undo),
+            (keymap.composer.redo.as_ref(), &mut resolved.composer.redo),
+        ] {
+            if setting.is_none() {
+                bindings.retain(|binding| {
+                    let (code, modifiers) = binding.parts();
+                    let event = KeyEvent::new(code, modifiers);
+                    !configured.is_pressed(event)
+                        && !(keymap.global.leader.is_some()
+                            && resolved.chords.leader.is_pressed(event))
+                        && !resolved.chords.bindings.iter().any(|chord| {
+                            chord.action.overlaps(undo_action) && chord.chord.prefix.is_press(event)
                         })
                 });
             }
@@ -1822,8 +1882,27 @@ impl RuntimeKeymap {
     /// both `?` and `shift-?`) because terminals disagree on whether SHIFT is
     /// preserved for certain printable/control chords.
     fn built_in_defaults() -> Self {
+        let undo_modifier = if cfg!(windows) {
+            KeyModifiers::CONTROL
+        } else {
+            KeyModifiers::ALT
+        };
+        let mut undo = vec![KeyBinding::new(KeyCode::Char('z'), undo_modifier)];
+        if cfg!(target_os = "macos") {
+            undo.push(KeyBinding::new(KeyCode::Char('z'), KeyModifiers::SUPER));
+        }
+        undo.push(key_hint::plain(KeyCode::F(7)));
+        let redo = undo
+            .iter()
+            .map(|binding| {
+                let (code, modifiers) = binding.parts();
+                KeyBinding::new(code, modifiers | KeyModifiers::SHIFT)
+            })
+            .collect();
         Self {
             app: AppKeymap {
+                change_host: Vec::new(),
+                choose_cloud_environment: Vec::new(),
                 focus_main_composer: Vec::new(),
                 focus_sidebar_content: Vec::new(),
                 focus_sidebar_tabs: Vec::new(),
@@ -1884,6 +1963,8 @@ impl RuntimeKeymap {
                 ],
                 history_search_previous: default_bindings![ctrl(KeyCode::Char('r'))],
                 history_search_next: default_bindings![ctrl(KeyCode::Char('s'))],
+                undo,
+                redo,
             },
             editor: Arc::new(EditorKeymap {
                 insert_newline: default_bindings![
@@ -2095,6 +2176,7 @@ impl RuntimeKeymap {
                 close: default_bindings![plain(KeyCode::Char('q')), ctrl(KeyCode::Char('c'))],
                 close_transcript: default_bindings![ctrl(KeyCode::Char('t'))],
                 find: default_bindings![plain(KeyCode::F(3)), plain(KeyCode::Char('/'))],
+                mark_markdown: Vec::new(),
                 chord_hints: Arc::default(),
             },
             list: ListKeymap {
@@ -2121,6 +2203,8 @@ impl RuntimeKeymap {
                 chord_hints: Arc::default(),
             },
             agents: AgentsKeymap {
+                next_group: default_bindings![shift(KeyCode::Down), shift(KeyCode::Char('j'))],
+                previous_group: default_bindings![shift(KeyCode::Up), shift(KeyCode::Char('k'))],
                 resume: default_bindings![plain(KeyCode::Char('o'))],
                 search: default_bindings![plain(KeyCode::F(3)), plain(KeyCode::Char('/'))],
                 new_task: default_bindings![plain(KeyCode::Char('n'))],
@@ -2165,22 +2249,23 @@ impl RuntimeKeymap {
     /// 2. Contexts with hard-coded sequence behavior, such as edit-previous
     ///    backtracking, intentionally stay outside this configurable keymap.
     fn validate_conflicts(&self) -> Result<(), String> {
-        let minimize = &self.app.minimize_pane_width;
-        let maximize = &self.app.maximize_pane_width;
-        let equalize = &self.app.equalize_pane_widths;
-        let resize = &self.app.resize_panes;
-        let divider_left = self.app.move_divider_left.as_slice();
-        let divider_right = self.app.move_divider_right.as_slice();
         for (action, bindings) in [
-            ("open_presets", &self.chat.open_presets),
-            ("toggle_voice", &self.chat.toggle_voice),
+            ("global.change_host", &self.app.change_host),
             (
-                "previous_permission_mode",
+                "global.choose_cloud_environment",
+                &self.app.choose_cloud_environment,
+            ),
+            ("chat.open_presets", &self.chat.open_presets),
+            ("chat.toggle_voice", &self.chat.toggle_voice),
+            ("composer.undo", &self.composer.undo),
+            ("composer.redo", &self.composer.redo),
+            (
+                "chat.previous_permission_mode",
                 &self.chat.previous_permission_mode,
             ),
-            ("next_permission_mode", &self.chat.next_permission_mode),
-            ("prompt_stack_back", &self.chat.prompt_stack_back),
-            ("skip_question", &self.chat.skip_question),
+            ("chat.next_permission_mode", &self.chat.next_permission_mode),
+            ("chat.prompt_stack_back", &self.chat.prompt_stack_back),
+            ("chat.skip_question", &self.chat.skip_question),
         ] {
             if bindings.iter().any(|binding| {
                 let (code, modifiers) = binding.parts();
@@ -2188,12 +2273,21 @@ impl RuntimeKeymap {
                     || matches!(code, KeyCode::Char(_)) && crate::key_hint::is_altgr(modifiers)
             }) {
                 return Err(format!(
-                    "tui.keymap.chat.{action}: printable keys are reserved for text input"
+                    "tui.keymap.{action}: printable keys are reserved for text input"
                 ));
             }
         }
+        let minimize = &self.app.minimize_pane_width;
+        let maximize = &self.app.maximize_pane_width;
+        let equalize = &self.app.equalize_pane_widths;
+        let resize = &self.app.resize_panes;
         #[cfg(unix)]
         for (action, bindings) in [
+            ("global.change_host", &self.app.change_host),
+            (
+                "global.choose_cloud_environment",
+                &self.app.choose_cloud_environment,
+            ),
             ("global.open_agents", &self.app.open_agents),
             ("global.focus_main_composer", &self.app.focus_main_composer),
             (
@@ -2201,28 +2295,27 @@ impl RuntimeKeymap {
                 &self.app.focus_sidebar_content,
             ),
             ("global.focus_sidebar_tabs", &self.app.focus_sidebar_tabs),
+            ("global.focus_pane_left", &self.app.focus_pane_left),
+            ("global.focus_pane_right", &self.app.focus_pane_right),
+            ("global.minimize_pane_width", minimize),
+            ("global.maximize_pane_width", maximize),
+            ("global.equalize_pane_widths", equalize),
+            ("global.resize_panes", resize),
+            ("global.move_divider_left", &self.app.move_divider_left),
+            ("global.move_divider_right", &self.app.move_divider_right),
+            ("global.toggle_pane_zoom", &self.app.toggle_pane_zoom),
             ("global.hide_pane", &self.app.hide_pane),
             ("global.close_sidebar_tab", &self.app.close_sidebar_tab),
             ("global.sidebar_up", &self.app.sidebar_up),
             ("global.sidebar_down", &self.app.sidebar_down),
-            ("global.focus_pane_left", &self.app.focus_pane_left),
-            ("global.focus_pane_right", &self.app.focus_pane_right),
-            ("global.minimize_pane_width", &self.app.minimize_pane_width),
-            ("global.maximize_pane_width", &self.app.maximize_pane_width),
-            (
-                "global.equalize_pane_widths",
-                &self.app.equalize_pane_widths,
-            ),
-            ("global.resize_panes", &self.app.resize_panes),
-            ("global.move_divider_left", &self.app.move_divider_left),
-            ("global.move_divider_right", &self.app.move_divider_right),
-            ("global.toggle_pane_zoom", &self.app.toggle_pane_zoom),
             (
                 "global.toggle_side_conversation",
                 &self.app.toggle_side_conversation,
             ),
             ("chat.open_presets", &self.chat.open_presets),
             ("chat.toggle_voice", &self.chat.toggle_voice),
+            ("composer.undo", &self.composer.undo),
+            ("composer.redo", &self.composer.redo),
         ] {
             if bindings.contains(&key_hint::ctrl(KeyCode::Char('z'))) {
                 return Err(format!(
@@ -2248,7 +2341,36 @@ impl RuntimeKeymap {
             side_toggle_bindings.push(legacy_slash_binding);
         }
 
+        let divider_left = self.app.move_divider_left.as_slice();
+        let divider_right = self.app.move_divider_right.as_slice();
         let main_bindings = [
+            ("change_host", self.app.change_host.as_slice()),
+            (
+                "choose_cloud_environment",
+                self.app.choose_cloud_environment.as_slice(),
+            ),
+            (
+                "focus_main_composer",
+                self.app.focus_main_composer.as_slice(),
+            ),
+            (
+                "focus_sidebar_content",
+                self.app.focus_sidebar_content.as_slice(),
+            ),
+            ("focus_sidebar_tabs", self.app.focus_sidebar_tabs.as_slice()),
+            ("focus_pane_left", self.app.focus_pane_left.as_slice()),
+            ("focus_pane_right", self.app.focus_pane_right.as_slice()),
+            ("minimize_pane_width", minimize),
+            ("maximize_pane_width", maximize),
+            ("equalize_pane_widths", equalize),
+            ("resize_panes", resize),
+            ("move_divider_left", divider_left),
+            ("move_divider_right", divider_right),
+            ("toggle_pane_zoom", self.app.toggle_pane_zoom.as_slice()),
+            ("hide_pane", self.app.hide_pane.as_slice()),
+            ("close_sidebar_tab", self.app.close_sidebar_tab.as_slice()),
+            ("sidebar_up", self.app.sidebar_up.as_slice()),
+            ("sidebar_down", self.app.sidebar_down.as_slice()),
             ("open_agents", self.app.open_agents.as_slice()),
             ("open_transcript", self.app.open_transcript.as_slice()),
             ("find_transcript", self.app.find_transcript.as_slice()),
@@ -2311,6 +2433,8 @@ impl RuntimeKeymap {
                 "composer.history_search_next",
                 self.composer.history_search_next.as_slice(),
             ),
+            ("composer.undo", self.composer.undo.as_slice()),
+            ("composer.redo", self.composer.redo.as_slice()),
         ];
         validate_unique("app", main_bindings)?;
 
@@ -2480,6 +2604,8 @@ impl RuntimeKeymap {
                 ),
                 ("chat.skip_question", self.chat.skip_question.as_slice()),
                 ("composer.submit", self.composer.submit.as_slice()),
+                ("composer.undo", self.composer.undo.as_slice()),
+                ("composer.redo", self.composer.redo.as_slice()),
                 ("toggle_vim_mode", self.app.toggle_vim_mode.as_slice()),
                 ("toggle_fast_mode", self.app.toggle_fast_mode.as_slice()),
                 ("toggle_raw_output", self.app.toggle_raw_output.as_slice()),
@@ -2619,9 +2745,9 @@ impl RuntimeKeymap {
                     self.pager.close_transcript.as_slice(),
                 ),
                 ("pager.find", self.pager.find.as_slice()),
+                ("pager.mark_markdown", self.pager.mark_markdown.as_slice()),
             ],
         )?;
-
         validate_no_reserved(
             "pager",
             context_bindings(KeymapContext::Pager),
@@ -2640,6 +2766,10 @@ impl RuntimeKeymap {
                 (
                     "global.focus_sidebar_content",
                     self.app.focus_sidebar_content.as_slice(),
+                ),
+                (
+                    "global.focus_sidebar_tabs",
+                    self.app.focus_sidebar_tabs.as_slice(),
                 ),
                 (
                     "global.focus_pane_left",
@@ -4151,20 +4281,9 @@ mod tests {
             "hide_pane",
             "focus_main_composer",
             "focus_sidebar_content",
-            "focus_sidebar_tabs",
-            "close_sidebar_tab",
-            "sidebar_up",
-            "sidebar_down",
             "focus_pane_left",
             "focus_pane_right",
-            "minimize_pane_width",
-            "maximize_pane_width",
-            "equalize_pane_widths",
-            "resize_panes",
-            "move_divider_left",
-            "move_divider_right",
             "toggle_pane_zoom",
-            "toggle_side_conversation",
         ] {
             let config: TuiKeymap =
                 toml::from_str(&format!("[global]\n{action} = 'ctrl-z'")).unwrap();
@@ -4236,12 +4355,12 @@ mod tests {
     fn pane_binding_only_shadows_side_toggle_in_workspace_sessions() {
         for action in ["focus_pane_right", "focus_sidebar_tabs"] {
             let keymap = toml::from_str(&format!("[global]\n{action} = 'ctrl-/'")).unwrap();
-            let classic = RuntimeKeymap::for_session(&keymap, false).unwrap();
+            let classic = RuntimeKeymap::for_session(&keymap, /*workspace*/ false).unwrap();
             assert_eq!(
                 classic.app.toggle_side_conversation,
                 RuntimeKeymap::defaults().app.toggle_side_conversation
             );
-            let workspace = RuntimeKeymap::for_session(&keymap, true).unwrap();
+            let workspace = RuntimeKeymap::for_session(&keymap, /*workspace*/ true).unwrap();
             assert!(workspace.app.toggle_side_conversation.is_empty());
         }
     }

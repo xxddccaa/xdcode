@@ -52,6 +52,8 @@ pub enum SlashCommand {
     Mention,
     Status,
     Daemon,
+    #[strum(to_string = "rc", serialize = "remote")]
+    Rc,
     Warnings,
     Cd,
     #[strum(to_string = "pwd", serialize = "cwd")]
@@ -107,7 +109,14 @@ impl SlashCommand {
     pub(crate) fn is_supported(self) -> bool {
         !matches!(
             self,
-            Self::App | Self::Apps | Self::Logout | Self::Feedback | Self::Usage | Self::Daybreak
+            Self::App
+                | Self::Apps
+                | Self::Logout
+                | Self::Feedback
+                | Self::Usage
+                | Self::Daybreak
+                | Self::Rc
+                | Self::Voice
         )
     }
 
@@ -115,7 +124,7 @@ impl SlashCommand {
     pub fn description(self) -> &'static str {
         match self {
             SlashCommand::Config => "configure Xdcode preferences",
-            SlashCommand::Feedback => "send logs to maintainers",
+            SlashCommand::Feedback => "send logs to maintainers or save a ZIP",
             SlashCommand::New => "start a new chat during a conversation",
             SlashCommand::Init => "create an AGENTS.md file with instructions for Xdcode",
             SlashCommand::Compact => "summarize conversation to prevent hitting the context limit",
@@ -140,6 +149,7 @@ impl SlashCommand {
             SlashCommand::Import => "import setup, this project, and recent chats from Claude Code",
             SlashCommand::Hooks => "view and manage lifecycle hooks",
             SlashCommand::Daemon => "Manage the local background server",
+            SlashCommand::Rc => "manage remote control for the local background server",
             SlashCommand::Warnings => "view retained warnings and diagnostic details",
             SlashCommand::Status => "show current session configuration and token usage",
             SlashCommand::Cd => "change the current working directory",
@@ -173,7 +183,9 @@ impl SlashCommand {
             SlashCommand::Experimental => "toggle experimental features",
             SlashCommand::AutoReview => "approve one retry of a recent auto-review denial",
             SlashCommand::Memories => "configure memory use and generation",
-            SlashCommand::Mcp => "list MCP tools; use /mcp verbose or /mcp login <name>",
+            SlashCommand::Mcp => {
+                "list MCP tools; /mcp verbose or /mcp login <name> [--environment <id>]"
+            }
             SlashCommand::Apps => "manage apps",
             SlashCommand::Plugins => "browse plugins",
             SlashCommand::Logout => "log out of Xdcode",
@@ -216,6 +228,7 @@ impl SlashCommand {
                 | SlashCommand::Side
                 | SlashCommand::Btw
                 | SlashCommand::Resume
+                | SlashCommand::Rc
         )
     }
 
@@ -231,6 +244,7 @@ impl SlashCommand {
                 | SlashCommand::Mention
                 | SlashCommand::Status
                 | SlashCommand::Daemon
+                | SlashCommand::Rc
                 | SlashCommand::Warnings
                 | SlashCommand::Pwd
                 | SlashCommand::Usage
@@ -260,6 +274,7 @@ impl SlashCommand {
                 | SlashCommand::Quit
                 | SlashCommand::Exit
                 | SlashCommand::Status
+                | SlashCommand::Rc
                 | SlashCommand::Warnings
                 | SlashCommand::DebugConfig
                 | SlashCommand::Pwd
@@ -309,6 +324,7 @@ impl SlashCommand {
             | SlashCommand::Hooks
             | SlashCommand::Status
             | SlashCommand::Daemon
+            | SlashCommand::Rc
             | SlashCommand::Warnings
             | SlashCommand::Pwd
             | SlashCommand::Usage
@@ -368,7 +384,9 @@ mod tests {
 
     #[test]
     fn hosted_commands_cannot_be_parsed_or_listed() {
-        for name in ["app", "apps", "logout", "feedback", "usage", "daybreak"] {
+        for name in [
+            "app", "apps", "logout", "feedback", "usage", "daybreak", "rc", "remote", "voice",
+        ] {
             assert!(SlashCommand::from_str(name).is_err());
             assert!(
                 !super::built_in_slash_commands()

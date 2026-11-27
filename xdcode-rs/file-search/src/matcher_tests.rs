@@ -42,7 +42,7 @@ fn query_update_does_not_relabel_pending_matches() {
     };
     let mut matcher = Matcher::new(Config::DEFAULT.match_paths());
     let snapshot = |nucleo: &Nucleo<IndexedEntry>, query: &str, matcher: &mut Matcher| {
-        snapshot::Ranking::start(nucleo, query, true)?.advance(
+        snapshot::Ranking::start(nucleo, query, /*walk_complete*/ true)?.advance(
             &inner,
             nucleo,
             query,
@@ -83,19 +83,20 @@ fn query_update_does_not_relabel_pending_matches() {
             walk_complete: true,
         }),
     );
-    for index in 0..256 {
+    // Force the pending ranking to span worker turns, then resume it on the same snapshot.
+    for i in 0..256 {
         injector.push(
             IndexedEntry::Ascii {
                 root_idx: 0,
                 match_type: MatchType::File,
             },
-            |_, columns| columns[0] = Utf32String::from(format!("bet/path-{index}")),
+            |_, columns| columns[0] = Utf32String::from(format!("bet/path-{i}")),
         );
     }
-    while nucleo.tick(10).running {
+    while nucleo.tick(/*timeout*/ 10).running {
         work_rx.recv_timeout(Duration::from_secs(5)).unwrap();
     }
-    let mut partial = snapshot::Ranking::start(&nucleo, "bet", true).unwrap();
+    let mut partial = snapshot::Ranking::start(&nucleo, "bet", /*walk_complete*/ true).unwrap();
     assert!(
         partial
             .advance(&inner, &nucleo, "bet", &mut matcher, Duration::ZERO)

@@ -1,9 +1,12 @@
+use std::path::Path;
+
 use xdcode_protocol::protocol::HookCompletedEvent;
 use xdcode_protocol::protocol::HookEventName;
 use xdcode_protocol::protocol::HookOutputEntry;
 use xdcode_protocol::protocol::HookOutputEntryKind;
 use xdcode_protocol::protocol::HookRunStatus;
 use xdcode_protocol::protocol::HookRunSummary;
+use xdcode_utils_path_uri::PathUri;
 
 use crate::engine::ConfiguredHandler;
 use crate::engine::HandlerSourcePath;
@@ -16,6 +19,13 @@ use xdcode_protocol::models::ContentItemMetadata;
 pub struct SubagentHookContext {
     pub agent_id: String,
     pub agent_type: String,
+}
+
+pub(crate) fn command_input_cwd(cwd: &Path, tool_cwd: Option<&PathUri>) -> String {
+    tool_cwd.map_or_else(
+        || cwd.display().to_string(),
+        PathUri::inferred_native_path_string,
+    )
 }
 
 pub(crate) fn join_text_chunks(chunks: Vec<String>) -> Option<String> {

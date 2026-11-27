@@ -17,6 +17,8 @@ use std::ops::DerefMut;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 use tempfile::TempDir;
 use tokio::sync::Notify;
 use tokio::sync::Semaphore;
@@ -67,6 +69,7 @@ struct FailingFileSystem {
 }
 
 struct MetadataCallCounts {
+    batch_calls: Option<Arc<AtomicUsize>>,
     paths: Mutex<Vec<PathUri>>,
     started: Notify,
     release: Semaphore,
@@ -75,6 +78,7 @@ struct MetadataCallCounts {
 impl Default for MetadataCallCounts {
     fn default() -> Self {
         Self {
+            batch_calls: None,
             paths: Mutex::new(Vec::new()),
             started: Notify::new(),
             release: Semaphore::new(0),
@@ -272,6 +276,21 @@ impl ExecutorFileSystem for FailingFileSystem {
         ))
     }
 
+    fn get_metadata_batch<'a>(
+        &'a self,
+        paths: &'a [PathUri],
+        options: GetMetadataOptions,
+        sandbox: Option<&'a FileSystemSandboxContext>,
+    ) -> ExecutorFileSystemFuture<'a, Vec<io::Result<FileMetadata>>> {
+        Box::pin(async move {
+            let Some(calls) = &self.metadata_calls.batch_calls else {
+                return Err(io::ErrorKind::Unsupported.into());
+            };
+            calls.fetch_add(1, Ordering::Relaxed);
+            xdcode_file_system::resolve_metadata_batch(self, paths, options, sandbox).await
+        })
+    }
+
     fn read_directory<'a>(
         &'a self,
         path: &'a PathUri,
@@ -344,7 +363,10 @@ async fn load_agents_md(config: &TestConfig) -> Option<LoadedAgentsMd> {
     load_project_instructions(config, &environments, &mut Vec::new())
         .await
         .expect("project instructions should load")
-        .with_instructions(config.user_instructions.clone(), None)
+        .with_instructions(
+            config.user_instructions.clone(),
+            /*thread_instructions*/ None,
+        )
 }
 
 async fn agents_md_paths(config: &TestConfig) -> std::io::Result<Vec<PathUri>> {
@@ -682,7 +704,7 @@ async fn doc_larger_than_limit_is_truncated() {
     let huge = "A".repeat(LIMIT * 2); // 2 KiB
     fs::write(tmp.path().join("AGENTS.md"), &huge).unwrap();
 
-    let config = make_config(&tmp, LIMIT, None).await;
+    let config = make_config(&tmp, LIMIT, /*instructions*/ None).await;
     let environments = resolved_local_environments([("local", config.cwd.clone())]);
     let mut warnings = Vec::new();
     let loaded = load_project_instructions(&config, &environments, &mut warnings)
@@ -1110,6 +1132,30 @@ async fn finds_doc_in_repo_root() {
 
     let res = get_user_instructions(&cfg).await.expect("doc expected");
     assert_eq!(res, "root level doc");
+    let batch_calls = Arc::new(AtomicUsize::new(0));
+    let metadata_calls = Arc::new(MetadataCallCounts {
+        batch_calls: Some(Arc::clone(&batch_calls)),
+        ..MetadataCallCounts::default()
+    });
+    let filesystem = FailingFileSystem {
+        path: cfg.cwd.join("unused"),
+        failure: InjectedFailure::Read(io::ErrorKind::PermissionDenied),
+        metadata_calls: Arc::clone(&metadata_calls),
+    };
+    let cwd = PathUri::from_abs_path(&cfg.cwd);
+    assert_eq!(
+        super::agents_md_paths(&cfg.config, &cwd, &filesystem, /*sandbox*/ None)
+            .await
+            .expect("batched nested discovery"),
+        vec![PathUri::from_abs_path(&repo.path().join("AGENTS.md").abs())]
+    );
+    assert_eq!(batch_calls.load(Ordering::Relaxed), 3);
+    batch_calls.store(0, Ordering::Relaxed);
+    let cwd = PathUri::from_abs_path(&repo.abs());
+    super::agents_md_paths(&cfg.config, &cwd, &filesystem, /*sandbox*/ None)
+        .await
+        .expect("batched shallow discovery");
+    assert_eq!(batch_calls.load(Ordering::Relaxed), 2);
 }
 
 /// Explicitly setting the byte-limit to zero disables project docs.
@@ -1163,7 +1209,10 @@ async fn multiple_environment_docs_use_labeled_layout_and_preserve_source_order(
     let loaded = load_project_instructions(&config, &environments, &mut Vec::new())
         .await
         .expect("project instructions should load")
-        .with_instructions(config.user_instructions.clone(), None)
+        .with_instructions(
+            config.user_instructions.clone(),
+            /*thread_instructions*/ None,
+        )
         .expect("global instructions");
     let inner = format!(
         r#"global instructions
@@ -1226,7 +1275,10 @@ async fn secondary_only_project_doc_uses_single_contributor_layout() {
     let loaded = load_project_instructions(&config, &environments, &mut Vec::new())
         .await
         .expect("project instructions should load")
-        .with_instructions(config.user_instructions.clone(), None)
+        .with_instructions(
+            config.user_instructions.clone(),
+            /*thread_instructions*/ None,
+        )
         .expect("global instructions");
     let inner = format!("global instructions{AGENTS_MD_SEPARATOR}secondary doc");
 
@@ -1255,7 +1307,10 @@ async fn primary_only_project_doc_preserves_legacy_layout_with_multiple_bound_en
     let loaded = load_project_instructions(&config, &environments, &mut Vec::new())
         .await
         .expect("project instructions should load")
-        .with_instructions(config.user_instructions.clone(), None)
+        .with_instructions(
+            config.user_instructions.clone(),
+            /*thread_instructions*/ None,
+        )
         .expect("global instructions");
     let inner = format!("global instructions{AGENTS_MD_SEPARATOR}primary doc");
 

@@ -41,6 +41,7 @@ uuid = { workspace = true, features = ["serde", "v7"] }
 zstd = { workspace = true }
 
 [dev-dependencies]
+xdcode-protocol-test-support = { workspace = true }
 anyhow = { workspace = true }
 xdcode-utils-cargo-bin = { workspace = true }
 pretty_assertions = { workspace = true }

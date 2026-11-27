@@ -33,6 +33,7 @@ fn resume_history(
         provider_fingerprint: None,
         turn_id: Some(turn_id.clone()),
         root_turn_id: None,
+        direct_only_tool_namespaces: None,
         disabled_plugin_ids: None,
         cwd: config.cwd.clone(),
         approval_policy: config.permissions.approval_policy.value(),

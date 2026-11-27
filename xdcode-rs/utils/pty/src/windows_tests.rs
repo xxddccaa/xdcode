@@ -299,7 +299,7 @@ async fn contained_spawn_owns_immediate_descendant() -> anyhow::Result<()> {
     let process = unsafe {
         OpenProcess(
             PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE,
-            0,
+            /*bInheritHandle*/ 0,
             child_pid,
         )
     };
@@ -321,7 +321,9 @@ async fn contained_spawn_owns_immediate_descendant() -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("missing contained root handle"))?;
     let root_handle = unsafe { BorrowedHandle::borrow_raw(root_handle) }.try_clone_to_owned()?;
     job.terminate_and_wait(&root_handle, Duration::from_secs(10))?;
-    let child_status = unsafe { WaitForSingleObject(process.as_raw_handle().cast(), 0) };
+    let child_status = unsafe {
+        WaitForSingleObject(process.as_raw_handle().cast(), /*dwMilliseconds*/ 0)
+    };
     assert_eq!(child_status, WAIT_OBJECT_0);
     tokio::time::timeout(Duration::from_secs(10), root.wait()).await??;
     Ok(())
@@ -481,11 +483,19 @@ async fn conpty_ctrl_c_interrupts_powershell_foreground_child() -> anyhow::Resul
     .await?;
     let (session, mut output_rx, exit_rx) = combine_spawned_output(spawned);
     let writer = session.writer_sender();
-    writer.send(b"ping.exe -4 -t localhost\n".to_vec()).await?;
-    wait_for_output_contains(&mut output_rx, "127.0.0.1", /*timeout_ms*/ 10_000).await?;
+    // CI may pass its ignored Ctrl-C disposition to children. Reset it in the
+    // foreground process itself before checking delivery through ConPTY.
+    let python = find_python()
+        .ok_or_else(|| anyhow::anyhow!("Python is required for the Ctrl-C fixture"))?;
+    let python = python.replace('\'', "''");
+    let command = format!(
+        r#"& '{python}' -u -c "import ctypes,time; assert ctypes.windll.kernel32.SetConsoleCtrlHandler(None, False); print('__XDCODE_CHILD_'+'READY__'); time.sleep(60)""#
+    );
+    writer.send(format!("{command}\n").into_bytes()).await?;
+    wait_for_output_contains(&mut output_rx, READY_MARKER, /*timeout_ms*/ 10_000).await?;
 
     writer.send(vec![0x03]).await?;
-    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+    wait_for_output_contains(&mut output_rx, "PS ", /*timeout_ms*/ 10_000).await?;
     writer.send(b"cmd.exe /D /C ver\n".to_vec()).await?;
     let mut output = wait_for_output_contains(
         &mut output_rx,

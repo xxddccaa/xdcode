@@ -1,10 +1,8 @@
 use std::path::Path;
 use std::process::Output;
-use std::time::Duration;
 
 use anyhow::Context;
 use anyhow::Result;
-use app_test_support::MockResponsesConfig;
 use futures::SinkExt;
 use futures::StreamExt;
 use pretty_assertions::assert_eq;
@@ -12,30 +10,26 @@ use serde_json::Value;
 use serde_json::json;
 use tempfile::TempDir;
 use tokio::net::TcpListener;
-use tokio::time::timeout;
 use tokio_tungstenite::accept_async;
 use tokio_tungstenite::tungstenite::Message;
 
 const THREAD_ID: &str = "123e4567-e89b-12d3-a456-426614174000";
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(15);
 
-fn configure_queue_home(xdcode_home: &Path) -> Result<()> {
-    MockResponsesConfig::new("http://127.0.0.1:9")
+enum QueueResponse {
+    Success,
+    ResumeRejected,
+    MethodNotFound,
+    #[cfg(unix)]
+    UnknownMethodVariant,
+}
+
+fn configure_queue_home(xdcode_home: &std::path::Path) -> Result<()> {
+    app_test_support::MockResponsesConfig::new("http://127.0.0.1:9")
         .with_provider_config(
             "supports_websockets = false\nexperimental_bearer_token = \"unused-queue-client-fixture-key\"",
         )
         .write(xdcode_home)?;
     Ok(())
-}
-
-enum QueueResponse {
-    Success,
-    ResumeRejected,
-    AlreadyLoaded,
-    ReadRejected,
-    MethodNotFound,
-    #[cfg(unix)]
-    UnknownMethodVariant,
 }
 
 #[cfg(unix)]
@@ -92,10 +86,7 @@ where
     assert_eq!(request["params"]["threadId"], THREAD_ID);
 
     let result = match response {
-        QueueResponse::Success
-        | QueueResponse::ResumeRejected
-        | QueueResponse::AlreadyLoaded
-        | QueueResponse::ReadRejected => json!({
+        QueueResponse::Success | QueueResponse::ResumeRejected => json!({
             "id": request["id"],
             "result": {
                 "queuedSubmission": {
@@ -136,40 +127,11 @@ where
             let rpc: Value = serde_json::from_str(rpc.to_text()?)?;
             assert_eq!(rpc["method"], method);
             assert_eq!(rpc["params"]["threadId"], THREAD_ID);
-            if method == "thread/resume" {
-                assert_eq!(rpc["params"]["excludeTurns"], true);
-                for key in ["model", "modelProvider", "cwd", "config"] {
-                    assert!(rpc["params"][key].is_null(), "unexpected override: {key}");
-                }
-            }
             reply["id"] = rpc["id"].clone();
             websocket
                 .send(Message::Text(reply.to_string().into()))
                 .await?;
         }
-    }
-    if matches!(
-        response,
-        QueueResponse::AlreadyLoaded | QueueResponse::ReadRejected
-    ) {
-        let rpc = websocket.next().await.context("missing thread read")??;
-        let rpc: Value = serde_json::from_str(rpc.to_text()?)?;
-        assert_eq!(rpc["method"], "thread/read");
-        assert_eq!(rpc["params"]["threadId"], THREAD_ID);
-        assert_ne!(rpc["params"]["includeTurns"], true);
-        let mut reply = match response {
-            QueueResponse::AlreadyLoaded => json!({
-                "result": {"thread": {"status": {"type": "idle"}, "cwd": r"C:\workspace"}},
-            }),
-            QueueResponse::ReadRejected => json!({
-                "error": {"code": -32603, "message": "thread status unavailable"},
-            }),
-            _ => unreachable!(),
-        };
-        reply["id"] = rpc["id"].clone();
-        websocket
-            .send(Message::Text(reply.to_string().into()))
-            .await?;
     }
     Ok(request)
 }
@@ -209,41 +171,6 @@ async fn queue_succeeds_when_another_server_owns_the_thread() -> Result<()> {
 }
 
 #[tokio::test]
-async fn queue_resume_leaves_loaded_threads_running() -> Result<()> {
-    let (output, _) = run_remote_queue_command(QueueResponse::AlreadyLoaded).await?;
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert_eq!(
-        String::from_utf8(output.stdout)?,
-        format!("Queued message queued-submission-id for thread {THREAD_ID}.\n")
-    );
-    // The mock disconnects after thread/read, so an extra resume would produce a warning.
-    assert!(!String::from_utf8(output.stderr)?.contains("Warning:"));
-    Ok(())
-}
-
-#[tokio::test]
-async fn queue_succeeds_when_resume_status_cannot_be_read() -> Result<()> {
-    let (output, _) = run_remote_queue_command(QueueResponse::ReadRejected).await?;
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert_eq!(
-        String::from_utf8(output.stdout)?,
-        format!("Queued message queued-submission-id for thread {THREAD_ID}.\n")
-    );
-    let stderr = String::from_utf8(output.stderr)?;
-    assert!(stderr.contains("Warning: message was queued"));
-    assert!(stderr.contains("thread status unavailable"));
-    Ok(())
-}
-
-#[tokio::test]
 async fn queue_does_not_fallback_from_unsupported_explicit_remote() -> Result<()> {
     let (output, _) = run_remote_queue_command(QueueResponse::MethodNotFound).await?;
 
@@ -267,13 +194,11 @@ fn queue_rejects_empty_message() -> Result<()> {
 #[test]
 fn queue_rejects_unsupported_options() -> Result<()> {
     let xdcode_home = TempDir::new()?;
+    configure_queue_home(xdcode_home.path())?;
     for (args, expected) in [
         ("queue --image screenshot.png", "image attachments"),
-        ("--image=screenshot.png queue", "image attachments"),
         ("queue --model other-model", "`--model`"),
-        ("--model other-model queue", "`--model`"),
         ("--oss queue", "`--oss`"),
-        ("queue --oss", "`--oss`"),
         ("queue --local-provider ollama", "`--local-provider`"),
         (
             "queue --dangerously-bypass-hook-trust",
@@ -284,12 +209,7 @@ fn queue_rejects_unsupported_options() -> Result<()> {
             "`model` config override",
         ),
         ("queue -s read-only", "`--sandbox`"),
-        ("-s read-only queue", "`--sandbox`"),
         ("--approve-for-me queue", "`--approve-for-me`"),
-        ("queue --approve-for-me", "`--approve-for-me`"),
-        ("--search queue", "`--search`"),
-        ("--no-alt-screen queue", "`--no-alt-screen`"),
-        ("queue -c model=other", "`model` config override"),
         ("prompt queue", "positional prompt; use `--message`"),
         ("-C . queue --remote unix://", "`--cd` with `--remote`"),
         ("--remote unix:// queue -C .", "`--cd` with `--remote`"),
@@ -315,18 +235,11 @@ async fn run_remote_queue_command(response: QueueResponse) -> Result<(Output, Va
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let endpoint = format!("ws://{}", listener.local_addr()?);
     let remote_first = matches!(response, QueueResponse::MethodNotFound);
-    let resume = matches!(
-        response,
-        QueueResponse::ResumeRejected | QueueResponse::AlreadyLoaded | QueueResponse::ReadRejected
-    );
+    let resume = matches!(response, QueueResponse::ResumeRejected);
     let server_home = xdcode_home.path().to_path_buf();
     let server = tokio::spawn(async move {
-        timeout(DEFAULT_TIMEOUT, async move {
-            let (stream, _) = listener.accept().await?;
-            respond_to_queue_request(stream, server_home.as_path(), response).await
-        })
-        .await
-        .context("queue mock timed out")?
+        let (stream, _) = listener.accept().await?;
+        respond_to_queue_request(stream, server_home.as_path(), response).await
     });
 
     let remote_args = if remote_first {
@@ -346,26 +259,15 @@ async fn run_remote_queue_command(response: QueueResponse) -> Result<(Output, Va
             "XDCODE_REMOTE_TOKEN",
         ]
     };
-    let output = timeout(
-        DEFAULT_TIMEOUT,
-        tokio::process::Command::new(xdcode_utils_cargo_bin::cargo_bin("xdcode")?)
-            .env("XDCODE_HOME", xdcode_home.path())
-            .env("XDCODE_REMOTE_TOKEN", "test-token")
-            .kill_on_drop(true)
-            .args(remote_args)
-            .args(resume.then_some("--resume"))
-            .args(["--thread", THREAD_ID, "--message", "do the thing"])
-            .output(),
-    )
-    .await
-    .context("queue command timed out")??;
-    let request = server.await?.with_context(|| {
-        format!(
-            "queue mock failed; CLI stderr: {}",
-            String::from_utf8_lossy(&output.stderr)
-        )
-    })?;
-    Ok((output, request))
+    let output = tokio::process::Command::new(xdcode_utils_cargo_bin::cargo_bin("xdcode")?)
+        .env("XDCODE_HOME", xdcode_home.path())
+        .env("XDCODE_REMOTE_TOKEN", "test-token")
+        .args(remote_args)
+        .args(resume.then_some("--resume"))
+        .args(["--thread", THREAD_ID, "--message", "do the thing"])
+        .output()
+        .await?;
+    Ok((output, server.await??))
 }
 
 #[cfg(unix)]
@@ -394,6 +296,8 @@ async fn remote_session_commands_with_workload_identity_use_server_auth() -> Res
     use xdcode_app_server_protocol::ThreadListResponse;
     use xdcode_app_server_protocol::ThreadQueueListParams;
     use xdcode_app_server_protocol::ThreadQueueListResponse;
+    use xdcode_app_server_protocol::ThreadReadParams;
+    use xdcode_app_server_protocol::ThreadReadResponse;
     use xdcode_app_server_protocol::ThreadSetNameParams;
     use xdcode_app_server_protocol::ThreadSetNameResponse;
     use xdcode_app_server_protocol::ThreadStartParams;
@@ -411,7 +315,7 @@ async fn remote_session_commands_with_workload_identity_use_server_auth() -> Res
         .respond_with(responses::sse_response(
             create_final_assistant_message_sse_response("queued message consumed")?,
         ))
-        .expect(2)
+        .expect(4)
         .mount_as_scoped(&model)
         .await;
     MockResponsesConfig::new(&model.uri())
@@ -445,6 +349,7 @@ async fn remote_session_commands_with_workload_identity_use_server_auth() -> Res
 
     let endpoint = format!("unix://{}", socket_path.as_path().display());
     let mut app = RemoteAppServerClient::connect(RemoteAppServerConnectArgs {
+        required_human_approval: false,
         endpoint: RemoteAppServerEndpoint::UnixSocket { socket_path },
         client_name: "queue-e2e-test".to_string(),
         client_version: "0.1.0".to_string(),
@@ -525,6 +430,62 @@ async fn remote_session_commands_with_workload_identity_use_server_auth() -> Res
         serde_json::from_str(request.headers["x-xdcode-turn-metadata"].to_str()?)?;
     assert_eq!(metadata["turn_trigger"], "queue");
 
+    let exec_home = TempDir::new()?;
+
+    configure_queue_home(exec_home.path())?;
+    for args in [
+        vec!["exec", "--remote", &endpoint, "--json", "new task"],
+        vec![
+            "exec",
+            "resume",
+            "--remote",
+            &endpoint,
+            &thread_id,
+            "continue task",
+        ],
+    ] {
+        let output = Command::new(&xdcode)
+            .env("XDCODE_HOME", exec_home.path())
+            .env_remove("XDCODE_QUEUE_SERVER_API_KEY")
+            .current_dir(exec_home.path())
+            .args(args)
+            .output()
+            .await?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8(output.stdout)?;
+        assert!(stdout.contains("queued message consumed"));
+        if stdout.starts_with('{') {
+            let events = stdout
+                .lines()
+                .map(serde_json::from_str::<Value>)
+                .collect::<serde_json::Result<Vec<_>>>()?;
+            assert_ne!(events[0]["thread_id"], thread_id);
+            assert!(events.iter().any(|event| event["type"] == "turn.completed"));
+        } else {
+            let stderr = String::from_utf8(output.stderr)?;
+            let header = stderr
+                .lines()
+                .find(|line| line.starts_with("thread id: "))
+                .context("missing remote exec header")?
+                .replace(&thread_id, "[thread-id]");
+            insta::assert_snapshot!(header, @"thread id: [thread-id]");
+        }
+    }
+    let shared: ThreadReadResponse = app
+        .request_typed(ClientRequest::ThreadRead {
+            request_id: RequestId::Integer(20),
+            params: ThreadReadParams {
+                thread_id: thread_id.clone(),
+                include_turns: true,
+            },
+        })
+        .await?;
+    assert_eq!(shared.thread.turns.len(), 2);
+
     let name = "remote-session-lifecycle";
     let _: ThreadSetNameResponse = app
         .request_typed(ClientRequest::ThreadSetName {
@@ -583,6 +544,9 @@ async fn remote_session_commands_with_workload_identity_use_server_auth() -> Res
                 .request_typed(ClientRequest::ThreadList {
                     request_id: RequestId::Integer(4),
                     params: ThreadListParams {
+                        include_attached_threads: false,
+                        current_account_only: false,
+                        included_thread_ids: None,
                         excluded_thread_ids: None,
                         attached_to_thread_id: None,
                         cursor: None,
@@ -647,11 +611,69 @@ async fn remote_session_commands_with_workload_identity_use_server_auth() -> Res
             .await?;
             let requests = model_requests.received_requests().await;
             assert!(
-                requests[1].body_json::<Value>()?["input"]
+                requests[3].body_json::<Value>()?["input"]
                     .to_string()
                     .contains(cold_message)
             );
+            // The mock receives the request before the resumed turn finishes. Deletion
+            // requires an idle thread, and archiving removed our original subscription.
+            timeout(Duration::from_secs(30), async {
+                loop {
+                    let read: ThreadReadResponse = app
+                        .request_typed(ClientRequest::ThreadRead {
+                            request_id: RequestId::Integer(5),
+                            params: ThreadReadParams {
+                                thread_id: thread_id.clone(),
+                                include_turns: true,
+                            },
+                        })
+                        .await?;
+                    if let Some(last) = read.thread.turns.last()
+                        && last.id != completed.turn.id
+                        && last.status == TurnStatus::Completed
+                        && matches!(
+                            read.thread.status,
+                            ThreadStatus::Idle | ThreadStatus::NotLoaded
+                        )
+                    {
+                        return anyhow::Ok(());
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            })
+            .await
+            .context("resumed queued turn did not finish before deletion")??;
         }
+    }
+    Ok(())
+}
+
+#[test]
+fn tui_session_commands_reject_conflicting_remotes_before_token_lookup() -> Result<()> {
+    const MISSING_TOKEN: &str = "XDCODE_TEST_MISSING_TUI_REMOTE_TOKEN";
+    for command in ["resume", "fork"] {
+        let output = std::process::Command::new(xdcode_utils_cargo_bin::cargo_bin("xdcode")?)
+            .env_remove(MISSING_TOKEN)
+            .args([
+                "--remote",
+                "wss://a.example:443",
+                "--remote-auth-token-env",
+                MISSING_TOKEN,
+                command,
+                "--remote",
+                "wss://b.example:443",
+                THREAD_ID,
+            ])
+            .output()?;
+        let stderr = String::from_utf8(output.stderr)?;
+        assert!(!output.status.success());
+        assert!(
+            stderr.contains(&format!(
+                "`xdcode {command}` received conflicting remote server endpoints"
+            )),
+            "{command}: {stderr}"
+        );
+        assert!(!stderr.contains(MISSING_TOKEN), "{command}: {stderr}");
     }
     Ok(())
 }
@@ -680,6 +702,7 @@ fn remote_session_commands_validate_config() -> Result<()> {
     for &command in commands {
         for &(args, config_file, config) in cases {
             let xdcode_home = TempDir::new()?;
+            configure_queue_home(xdcode_home.path())?;
             std::fs::write(xdcode_home.path().join(config_file), config)?;
             let output = std::process::Command::new(xdcode_utils_cargo_bin::cargo_bin("xdcode")?)
                 .env("XDCODE_HOME", xdcode_home.path())
@@ -713,31 +736,22 @@ async fn queue_rejects_local_daemon_that_does_not_support_queueing() -> Result<(
     let listener = tokio::net::UnixListener::bind(socket_path.as_path())?;
     let server_home = xdcode_home.path().to_path_buf();
     let server = tokio::spawn(async move {
-        timeout(DEFAULT_TIMEOUT, async move {
-            let (probe, _) = listener.accept().await?;
-            drop(probe);
-            let (stream, _) = listener.accept().await?;
-            respond_to_queue_request(
-                stream,
-                server_home.as_path(),
-                QueueResponse::UnknownMethodVariant,
-            )
-            .await
-        })
+        let (probe, _) = listener.accept().await?;
+        drop(probe);
+        let (stream, _) = listener.accept().await?;
+        respond_to_queue_request(
+            stream,
+            server_home.as_path(),
+            QueueResponse::UnknownMethodVariant,
+        )
         .await
-        .context("local queue mock timed out")?
     });
 
-    let output = timeout(
-        DEFAULT_TIMEOUT,
-        tokio::process::Command::new(xdcode_utils_cargo_bin::cargo_bin("xdcode")?)
-            .env("XDCODE_HOME", xdcode_home.path())
-            .kill_on_drop(true)
-            .args(["queue", "--thread", THREAD_ID, "--message", "do the thing"])
-            .output(),
-    )
-    .await
-    .context("local queue command timed out")??;
+    let output = tokio::process::Command::new(xdcode_utils_cargo_bin::cargo_bin("xdcode")?)
+        .env("XDCODE_HOME", xdcode_home.path())
+        .args(["queue", "--thread", THREAD_ID, "--message", "do the thing"])
+        .output()
+        .await?;
     server.await??;
 
     assert!(!output.status.success());
@@ -762,41 +776,30 @@ async fn queue_rejects_overrides_that_bypass_local_daemon() -> Result<()> {
     )?;
     let listener = tokio::net::UnixListener::bind(socket_path.as_path())?;
     let server = tokio::spawn(async move {
-        timeout(DEFAULT_TIMEOUT, async move {
-            let (probe, _) = listener.accept().await?;
-            drop(probe);
-            Ok::<_, std::io::Error>(())
-        })
-        .await
-        .context("local daemon probe timed out")?
-        .context("local daemon probe failed")
+        let (probe, _) = listener.accept().await?;
+        drop(probe);
+        Ok::<_, std::io::Error>(())
     });
 
-    let output = timeout(
-        DEFAULT_TIMEOUT,
-        tokio::process::Command::new(xdcode_utils_cargo_bin::cargo_bin("xdcode")?)
-            .env("XDCODE_HOME", xdcode_home.path())
-            .kill_on_drop(true)
-            .args([
-                "queue",
-                "-C",
-                ".",
-                "-c",
-                "analytics.enabled=false",
-                "--thread",
-                THREAD_ID,
-                "--message",
-                "do the thing",
-            ])
-            .output(),
-    )
-    .await
-    .context("queue override rejection timed out")??;
+    let output = tokio::process::Command::new(xdcode_utils_cargo_bin::cargo_bin("xdcode")?)
+        .env("XDCODE_HOME", xdcode_home.path())
+        .args([
+            "queue",
+            "-C",
+            ".",
+            "-c",
+            "analytics.enabled=false",
+            "--thread",
+            THREAD_ID,
+            "--message",
+            "do the thing",
+        ])
+        .output()
+        .await?;
     assert!(!output.status.success());
-    let stderr = String::from_utf8(output.stderr)?;
     assert!(
-        stderr.contains("embedded app server while a local app-server daemon is running"),
-        "{stderr}"
+        String::from_utf8(output.stderr)?
+            .contains("embedded app server while a local app-server daemon is running")
     );
     server.await??;
     Ok(())

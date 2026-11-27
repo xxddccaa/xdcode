@@ -1,4 +1,4 @@
-//! Passive shortcut hints arranged in responsive columns for composer menus and floating workspace overlays.
+//! Passive shortcut hints arranged in responsive columns for composer menus and floating key chord guides.
 
 use super::selection_popup_common::menu_surface_inset;
 use super::selection_popup_common::menu_surface_padding_height;
@@ -27,6 +27,7 @@ const SINGLE_COLUMN_ENTRY_LIMIT: usize = 5;
 
 pub(crate) struct ShortcutHud {
     title: String,
+    pub(crate) viewport: Option<Rect>,
     entries: HudEntries,
     commands: Vec<Line<'static>>,
 }
@@ -44,6 +45,7 @@ impl ShortcutHud {
     ) -> Self {
         Self {
             title: title.into(),
+            viewport: None,
             entries: HudEntries::Flat(entries),
             commands,
         }
@@ -52,6 +54,7 @@ impl ShortcutHud {
     pub(crate) fn leader(title: String, groups: Vec<(&'static str, Vec<Line<'static>>)>) -> Self {
         Self {
             title,
+            viewport: None,
             entries: HudEntries::Grouped(groups),
             commands: vec!["Esc cancel".dim().into()],
         }
@@ -103,12 +106,60 @@ impl ShortcutHud {
         .collect()
     }
 
-    pub(crate) fn render_overlay(self, viewport: Rect, buf: &mut Buffer) -> Rect {
-        let bounds = viewport.inset(Insets::tlbr(0, 0, 1, 2));
+    pub(crate) fn paint(&self, frame: &mut crate::custom_terminal::Frame) -> Rect {
+        let viewport = self
+            .viewport
+            .map_or(frame.area(), |area| area.intersection(frame.area()));
+        let area = self.render_overlay(viewport, frame.buffer);
+        if frame
+            .cursor_position
+            .is_some_and(|cursor| area.contains(cursor))
+        {
+            frame.cursor_position = None;
+        }
+        frame
+            .image_placements
+            .retain(|image| !area.intersects(image.area));
+        area
+    }
+
+    fn render_overlay(&self, viewport: Rect, buf: &mut Buffer) -> Rect {
+        // Inline composers can allocate just a few rows. Put caller commands in the title
+        // when they fit; otherwise reserve rows for them below the completions.
+        if viewport.height < 7
+            && let HudEntries::Flat(entries) = &self.entries
+        {
+            Clear.render(viewport, buf);
+            buf.set_style(viewport, crate::style::shortcut_hud_style());
+            let mut title = Line::from(self.title.as_str().bold());
+            let mut commands = self.command_lines(viewport.width);
+            if commands.len() == 1
+                && title.width() + COMMAND_SEPARATOR.len() + commands[0].width()
+                    <= usize::from(viewport.width)
+            {
+                title.spans.push(COMMAND_SEPARATOR.into());
+                title.spans.extend(commands.remove(/*index*/ 0).spans);
+            }
+            title.render(viewport, buf);
+            let body = viewport.inset(Insets::tlbr(
+                /*top*/ 1, /*left*/ 0, /*bottom*/ 0, /*right*/ 0,
+            ));
+            let lines = grid_lines(entries, body.width, /*max_columns*/ 2);
+            if commands.is_empty() {
+                render_clipped(lines, body, buf);
+            } else {
+                Self::render_lines(lines, commands, body, buf);
+            }
+            return viewport;
+        }
+        let bounds = viewport.inset(Insets::tlbr(
+            /*top*/ 0, /*left*/ 0, /*bottom*/ 1, /*right*/ 2,
+        ));
         let width = viewport.width.div_ceil(2).max(32).min(bounds.width);
         let inner_width = width.saturating_sub(4);
         let body = self.body_lines(inner_width);
         let commands = self.command_lines(inner_width);
+        // Reserve a row for the title and a gap above the commands.
         let height = u16::try_from(body.len() + 2 + commands.len())
             .unwrap_or(u16::MAX)
             .min(bounds.height);
@@ -122,12 +173,19 @@ impl ShortcutHud {
         buf.set_style(area, crate::style::shortcut_hud_style());
         Line::from(vec![
             "─ ".dim(),
-            self.title.bold(),
+            self.title.as_str().bold(),
             " ".into(),
             "─".repeat(usize::from(width)).dim(),
         ])
         .render(area, buf);
-        Self::render_lines(body, commands, area.inset(Insets::tlbr(1, 2, 0, 2)), buf);
+        Self::render_lines(
+            body,
+            commands,
+            area.inset(Insets::tlbr(
+                /*top*/ 1, /*left*/ 2, /*bottom*/ 0, /*right*/ 2,
+            )),
+            buf,
+        );
         area
     }
 
@@ -240,7 +298,7 @@ fn render_clipped(mut lines: Vec<Line<'static>>, area: Rect, buf: &mut Buffer) {
     let height = usize::from(area.height);
     if lines.len() > height {
         lines.truncate(height);
-        lines[height - 1] = "… resize to see all".dim().into();
+        lines[height - 1] = "… more shortcuts".dim().into();
     }
     Paragraph::new(lines).render(area, buf);
 }

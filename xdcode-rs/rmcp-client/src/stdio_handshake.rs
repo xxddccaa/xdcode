@@ -47,7 +47,9 @@ pub(super) fn restart_mode(
         JsonRpcMessage::Error(response) => {
             let mode = offered_restart_mode(&response.error);
             match mode {
+                // rmcp permits one re-offer. A fresh discover verifies it even without an ID.
                 Some(McpProtocolMode::DiscoverLocalStdio) if !after_reoffer => Ok(mode),
+                // Without an ID the error may have rejected initialize itself.
                 Some(McpProtocolMode::Legacy) if response.id.is_some() => Ok(mode),
                 _ => Err(ClientInitializeError::JsonRpcError(response.error)),
             }
@@ -81,6 +83,7 @@ fn should_restart_legacy(
     discovery: Option<DiscoveryOutcome>,
 ) -> bool {
     match error {
+        // A helper that assumes its first request is initialize can answer discover with this.
         ClientInitializeError::ExpectedInitResult(Some(ServerResult::InitializeResult(result))) => {
             !matches!(discovery, Some(DiscoveryOutcome::Reply))
                 && is_known_legacy_protocol_version(&result.protocol_version)
@@ -91,19 +94,19 @@ fn should_restart_legacy(
         ClientInitializeError::LegacyFallbackFailed { discover, fallback } => {
             match fallback.as_ref() {
                 ClientInitializeError::ConnectionClosed(_) => true,
+                // A legacy helper can reject initialize if discover already took its first request.
                 ClientInitializeError::JsonRpcError(_) => matches!(
                     discover.as_ref(),
                     ClientInitializeError::JsonRpcError(error) if error.code == ErrorCode::METHOD_NOT_FOUND
                 ),
-                ClientInitializeError::TransportError { error, .. } => error
-                    .error
-                    .downcast_ref::<io::Error>()
-                    .is_some_and(|error| {
+                ClientInitializeError::TransportError { error, .. } => {
+                    error.error.downcast_ref::<io::Error>().is_some_and(|e| {
                         matches!(
-                            error.kind(),
+                            e.kind(),
                             io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionReset
                         )
-                    }),
+                    })
+                }
                 _ => false,
             }
         }

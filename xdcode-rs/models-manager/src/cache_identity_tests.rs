@@ -19,7 +19,10 @@ async fn initialization_preserves_loaded_and_unsaved_catalogs() {
             .ensure_initialized(DEFAULT_HTTP_CLIENT_FACTORY)
             .await;
         assert_eq!(endpoint.fetch_count(), 1);
-        assert_eq!(manager.remote_models.read().await.models, vec![loaded]);
+        assert_eq!(
+            manager.remote_models.read().await.entry.models,
+            vec![loaded]
+        );
     }
 }
 
@@ -44,7 +47,7 @@ async fn concurrent_initialization_fetches_only_once_even_for_empty_catalogs() {
             result.expect("initialization task");
         }
         assert_eq!(endpoint.fetch_count(), 1);
-        assert_eq!(manager.remote_models.read().await.models, models);
+        assert_eq!(manager.remote_models.read().await.entry.models, models);
     }
 }
 
@@ -65,7 +68,7 @@ async fn initialization_reuses_a_valid_cache_without_fetching() {
         .ensure_initialized(DEFAULT_HTTP_CLIENT_FACTORY)
         .await;
     assert_eq!(endpoint.fetch_count(), 0);
-    assert_eq!(manager.remote_models.read().await.models, models);
+    assert_eq!(manager.remote_models.read().await.entry.models, models);
 }
 
 #[tokio::test]
@@ -80,7 +83,7 @@ async fn disabled_discovery_does_not_initialize_an_api_key_provider() {
         .ensure_initialized(DEFAULT_HTTP_CLIENT_FACTORY)
         .await;
     assert_eq!(endpoint.fetch_count(), 0);
-    assert!(!manager.catalog_initialized.load(Ordering::Acquire));
+    assert!(!manager.remote_models.read().await.initialized);
 }
 use pretty_assertions::assert_eq;
 
@@ -104,12 +107,12 @@ async fn mismatched_and_legacy_cache_entries_fetch_the_current_catalog() {
                 XdcodeAuth::create_dummy_chatgpt_auth_for_testing(),
             )),
         );
+        manager
+            .ensure_initialized(DEFAULT_HTTP_CLIENT_FACTORY)
+            .await;
         assert_eq!(
             manager
-                .raw_model_catalog(
-                    RefreshStrategy::OnlineIfUncached,
-                    DEFAULT_HTTP_CLIENT_FACTORY
-                )
+                .raw_model_catalog(RefreshStrategy::InMemory, DEFAULT_HTTP_CLIENT_FACTORY)
                 .await
                 .models,
             vec![current.clone()]

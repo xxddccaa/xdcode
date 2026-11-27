@@ -3,6 +3,7 @@
 //! The extension owns backend construction, storage and tool registration. This adapter
 //! selects configuration and supplies host capabilities. It never starts or restores
 //! recipients during lookup. Notifications use ordinary agent-message scheduling.
+//! The opt-in local MCP mode uses the generic injection entry point for delivery.
 //! Permanent board deletion uses the thread store's existing host cleanup callback.
 
 #![deny(clippy::print_stdout, clippy::print_stderr)]
@@ -34,6 +35,7 @@ use xdcode_protocol::error::Result;
 use xdcode_protocol::error::XdcodeErr;
 use xdcode_protocol::error::XdcodeErrorDetails;
 use xdcode_protocol::protocol::InterAgentCommunication;
+use xdcode_protocol::protocol::MultiAgentVersion;
 use xdcode_protocol::protocol::Op;
 use xdcode_state::SqliteConfig;
 use xdcode_thread_store::ThreadStoreError;
@@ -66,8 +68,10 @@ pub fn install_agent_message_board(
             let in_memory = config.multi_agent_v2.message_board_in_memory;
             let mcp =
                 config.features.enabled(Feature::AgentMessageBoardMcp) && connection.is_none();
+            // Automatic boards need MAv2. In-memory boards and explicit host
+            // connections also work for isolated, ephemeral runtimes.
             if connection.is_none()
-                && (!config.features.enabled(Feature::AgentMessageBoard)
+                && ((!config.features.enabled(Feature::AgentMessageBoard) && !mcp)
                     || !config.features.enabled(Feature::MultiAgentV2)
                     || (config.ephemeral
                         && !mcp
@@ -97,6 +101,11 @@ pub fn install_agent_message_board(
                     tree,
                     caller,
                     remote_notifications: false,
+                    notification_route: if mcp {
+                        NotificationRoute::Injection
+                    } else {
+                        NotificationRoute::Native
+                    },
                     connection,
                 },
             ))
@@ -122,13 +131,32 @@ pub async fn delete_agent_message_boards(
         })
 }
 
+/// Host membership and clock for a local board in this existing agent tree.
+pub fn local_board_host(manager: Weak<ThreadManager>, root: ThreadId) -> Arc<dyn MessageBoardHost> {
+    Arc::new(LocalBoardHost {
+        manager,
+        tree: root.into(),
+        caller: root,
+        remote_notifications: false,
+        notification_route: NotificationRoute::Native,
+        connection: None,
+    })
+}
+
 #[derive(Clone)]
 struct LocalBoardHost {
     manager: Weak<ThreadManager>,
     tree: SessionId,
     caller: ThreadId,
     remote_notifications: bool,
+    notification_route: NotificationRoute,
     connection: Option<Arc<LocalBoardConnection>>,
+}
+
+#[derive(Clone, Copy)]
+enum NotificationRoute {
+    Native,
+    Injection,
 }
 
 impl LocalBoardHost {
@@ -210,7 +238,7 @@ impl MessageBoardHost for LocalBoardHost {
         Box::pin(async move {
             let actor = self.actor(caller).await?;
             self.registered_path(&actor).await?;
-            actor.current_time().await
+            actor.current_time()
         })
     }
 
@@ -233,8 +261,10 @@ impl MessageBoardHost for LocalBoardHost {
                 recipient_path,
                 Vec::new(),
                 post.notification_text(),
-                false,
+                /*trigger_turn*/ false,
             );
+            // Remote metadata is untrusted. Skip an oversized notice without closing
+            // the receiver; the post remains available through the board tools.
             if self.remote_notifications
                 && communication.content.len()
                     + communication.author.as_str().len()
@@ -245,12 +275,24 @@ impl MessageBoardHost for LocalBoardHost {
                     "remote board notice exceeds the context budget".into(),
                 ));
             }
-            recipient
-                .submit(Op::InterAgentCommunication {
-                    communication,
-                    start_options: Default::default(),
-                })
-                .await?;
+            match self.notification_route {
+                NotificationRoute::Injection
+                    if recipient.multi_agent_version() == Some(MultiAgentVersion::V2)
+                        && !recipient.config().await.multi_agent_v2.disable_native_tools =>
+                {
+                    recipient
+                        .inject_response_items(vec![communication.to_model_input_item()])
+                        .await?;
+                }
+                NotificationRoute::Native | NotificationRoute::Injection => {
+                    recipient
+                        .submit(Op::InterAgentCommunication {
+                            communication,
+                            start_options: Default::default(),
+                        })
+                        .await?;
+                }
+            }
             Ok(NotificationDelivery::Accepted)
         })
     }

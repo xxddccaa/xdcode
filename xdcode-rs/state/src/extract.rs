@@ -39,7 +39,9 @@ pub fn apply_rollout_item(
         | RolloutItem::InterAgentCommunicationMetadata { .. } => {}
         RolloutItem::Compacted(_) => {}
         RolloutItem::WorldState(_) => {}
-        RolloutItem::RetainedContext(_) | RolloutItem::SecurityRiskScore(_) => {}
+        RolloutItem::DynamicToolsUpdated { .. }
+        | RolloutItem::RetainedContext(_)
+        | RolloutItem::SecurityRiskScore(_) => {}
         RolloutItem::RealtimeItem(_) => {}
         RolloutItem::TokenUsageRecord(_) => {}
     }
@@ -73,6 +75,7 @@ pub fn rollout_item_affects_thread_metadata(item: &RolloutItem) -> bool {
         | RolloutItem::Compacted(_)
         | RolloutItem::RealtimeItem(_)
         | RolloutItem::RetainedContext(_)
+        | RolloutItem::DynamicToolsUpdated { .. }
         | RolloutItem::SecurityRiskScore(_)
         | RolloutItem::TokenUsageRecord(_)
         | RolloutItem::WorldState(_) => false,
@@ -309,6 +312,7 @@ mod tests {
         let mut expected = metadata.clone();
         for text in ["  ", "delegated task", "later output"] {
             let item = RolloutItem::EventMsg(EventMsg::ItemCompleted(ItemCompletedEvent {
+                content_token_count: None,
                 thread_id: metadata.id,
                 turn_id: "turn-1".to_string(),
                 item: TurnItem::FunctionCallOutput(
@@ -345,6 +349,7 @@ mod tests {
     fn completed_user_message_items_set_title_and_first_user_message() {
         let mut metadata = metadata_for_test();
         let item = RolloutItem::EventMsg(EventMsg::ItemCompleted(ItemCompletedEvent {
+            content_token_count: None,
             thread_id: ThreadId::default(),
             turn_id: "turn-1".to_string(),
             item: TurnItem::UserMessage(UserMessageItem::new(&[UserInput::Text {
@@ -395,6 +400,7 @@ mod tests {
         for event in [
             EventMsg::UserMessage(user.as_legacy_user_message_event()),
             EventMsg::ItemCompleted(ItemCompletedEvent {
+                content_token_count: None,
                 thread_id,
                 turn_id: "turn-1".to_string(),
                 item: TurnItem::UserMessage(user),
@@ -534,6 +540,7 @@ mod tests {
             &mut metadata,
             &RolloutItem::SessionMeta(Box::new(SessionMetaLine {
                 meta: SessionMeta {
+                    account_scoped: false,
                     creator_user_id: None,
                     attached_thread: false,
                     creator_account_id: None,
@@ -576,6 +583,7 @@ mod tests {
                 provider_fingerprint: None,
                 turn_id: Some("turn-1".to_string()),
                 root_turn_id: None,
+                direct_only_tool_namespaces: None,
                 disabled_plugin_ids: None,
                 cwd: serde_json::from_value(serde_json::json!(
                     std::env::current_dir()
@@ -620,6 +628,7 @@ mod tests {
                 provider_fingerprint: None,
                 turn_id: Some("turn-1".to_string()),
                 root_turn_id: None,
+                direct_only_tool_namespaces: None,
                 disabled_plugin_ids: None,
                 cwd: serde_json::from_value(serde_json::json!(
                     std::env::current_dir()
@@ -664,6 +673,7 @@ mod tests {
                 provider_fingerprint: None,
                 turn_id: Some("turn-1".to_string()),
                 root_turn_id: None,
+                direct_only_tool_namespaces: None,
                 disabled_plugin_ids: None,
                 cwd: serde_json::from_value(serde_json::json!(&fallback_cwd))
                     .expect("absolute fallback cwd"),
@@ -697,6 +707,7 @@ mod tests {
                 provider_fingerprint: None,
                 turn_id: Some("turn-1".to_string()),
                 root_turn_id: None,
+                direct_only_tool_namespaces: None,
                 disabled_plugin_ids: None,
                 cwd: serde_json::from_value(serde_json::json!(
                     std::env::current_dir()
@@ -706,10 +717,8 @@ mod tests {
                 .expect("absolute fallback cwd"),
                 approval_policy: AskForApproval::OnRequest,
                 approvals_reviewer: None,
-                sandbox_policy: SandboxPolicy::new_read_only_policy(),
-                permission_profile: None,
+                permission_profile: PermissionProfile::read_only(),
                 active_permission_profile: None,
-                file_system_sandbox_policy: None,
                 model: "gpt-5".to_string(),
                 comp_hash: None,
                 collaboration_mode: None,
@@ -745,6 +754,7 @@ mod tests {
                     service_tier: None,
                     approval_policy: AskForApproval::Never,
                     approvals_reviewer: ApprovalsReviewer::User,
+                    requested_approvals_reviewer: None,
                     permission_profile: permission_profile.clone(),
                     active_permission_profile: None,
                     cwd: cwd.clone().try_into().expect("absolute settings cwd"),
@@ -789,6 +799,7 @@ mod tests {
             &mut metadata,
             &RolloutItem::SessionMeta(Box::new(SessionMetaLine {
                 meta: SessionMeta {
+                    account_scoped: false,
                     creator_user_id: None,
                     attached_thread: false,
                     creator_account_id: None,
@@ -855,7 +866,8 @@ mod tests {
             title: String::new(),
             name: None,
             preview: None,
-            sandbox_policy: "read-only".to_string(),
+            sandbox_policy: serde_json::to_string(&PermissionProfile::read_only())
+                .unwrap_or_default(),
             approval_mode: "on-request".to_string(),
             tokens_used: 1,
             first_user_message: None,

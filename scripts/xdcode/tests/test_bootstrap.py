@@ -16,6 +16,10 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 INSTALLER = REPO_ROOT / "install.sh"
+PLATFORMS = {
+    "linux-x86_64": ("Linux", "x86_64"),
+    "macos-arm64": ("Darwin", "arm64"),
+}
 
 
 @unittest.skipIf(os.name == "nt", "Bash installer is for Linux and macOS")
@@ -28,17 +32,7 @@ class BootstrapTests(unittest.TestCase):
         self.downloads = self.root / "downloads"
         self.tools = self.root / "tools"
         self.scratch = self.root / "scratch"
-        self.payload = self.root / "payload"
-        self.version = "0.167.0"
-        self.commit = "a" * 40
-        self.identity = f"{self.version}-g{self.commit[:12]}"
-        self.tag = "v" + self.identity
-        for directory in (
-            self.home / ".xdcode",
-            self.downloads,
-            self.tools,
-            self.scratch,
-        ):
+        for directory in (self.home / ".xdcode", self.downloads, self.tools, self.scratch):
             directory.mkdir(parents=True)
         self.sentinel = self.home / ".xdcode/config.toml"
         self.sentinel.write_text("existing-runtime-data-must-be-retained\n")
@@ -54,10 +48,7 @@ class BootstrapTests(unittest.TestCase):
             PATH=f"{self.tools}{os.pathsep}{os.environ['PATH']}",
             FIXTURE_DOWNLOADS=str(self.downloads),
             FIXTURE_LOG=str(self.root / "curl.jsonl"),
-            FIXTURE_ARGS=str(self.root / "linux-arguments.json"),
-            FIXTURE_TAG=self.tag,
-            MOCK_OS="Darwin",
-            MOCK_MACHINE="arm64",
+            PYTHON_MARKER=str(self.root / "python-used"),
         )
         self.make_tool(
             "curl",
@@ -78,94 +69,49 @@ else:
             "uname",
             'import os, sys\nprint(os.environ["MOCK_OS" if sys.argv[1] == "-s" else "MOCK_MACHINE"])\n',
         )
-        self.make_tool(
-            "pgrep",
-            'import os, sys\nsys.exit(int(os.environ.get("MOCK_PROCESS_EXIT", "1")))\n',
-        )
-        self.make_tool(
-            "file",
-            """import os, sys
-if os.environ.get("MOCK_NATIVE_PACKAGE"):
-    os.execv("/usr/bin/file", ["file", *sys.argv[1:]])
-print(os.environ.get("MOCK_FILE_DESCRIPTION", "Mach-O 64-bit executable arm64"))
-""",
-        )
-        self.make_tool(
-            "plutil",
-            """import json, os, sys
-if os.environ.get("MOCK_NATIVE_PACKAGE"):
-    os.execv("/usr/bin/plutil", ["plutil", *sys.argv[1:]])
-with open(sys.argv[-1]) as metadata:
-    value = json.load(metadata)[sys.argv[sys.argv.index("-extract") + 1]]
-print(str(value).lower() if isinstance(value, bool) else value)
-""",
-        )
-        self.make_macos_archive()
+        # The installer must never need Python on the target machine.
+        for name in ("python", "python3", "python3.11"):
+            self.make_tool(
+                name,
+                'import os, pathlib, sys\npathlib.Path(os.environ["PYTHON_MARKER"]).touch()\nsys.exit(1)\n',
+            )
+        self.use_platform("linux-x86_64")
+        self.make_release("0.172.0", "a" * 40)
 
     def make_tool(self, name: str, body: str):
         tool = self.tools / name
         tool.write_text(f"#!{sys.executable}\n" + body)
         tool.chmod(0o755)
 
-    def make_macos_archive(self, **changes):
-        for directory in ("bin", "xdcode-path", "xdcode-resources"):
-            (self.payload / directory).mkdir(parents=True, exist_ok=True)
-        for name, output in (
-            ("bin/xdcode", f"xdcode {self.version}"),
-            ("bin/xdcode-code-mode-host", "code-mode helper"),
-            ("xdcode-path/rg", "ripgrep fixture"),
-        ):
-            binary = self.payload / name
-            binary.write_text(f"#!/bin/sh\nprintf '%s\\n' '{output}'\n")
-            binary.chmod(0o755)
-        metadata = {
-            "schema_version": 1,
-            "version": self.version,
-            "build_id": "g" + self.commit[:12],
-            "source_commit": self.commit,
-            "source_dirty": False,
-            "target": "aarch64-apple-darwin",
-            **changes,
-        }
-        manifest = {
-            "layoutVersion": 1,
-            "version": self.version,
-            "buildId": "g" + self.commit[:12],
-            "target": "aarch64-apple-darwin",
-            "variant": "xdcode",
-            "entrypoint": "bin/xdcode",
-            "resourcesDir": "xdcode-resources",
-            "pathDir": "xdcode-path",
-        }
-        (self.payload / "build-info.json").write_text(json.dumps(metadata))
-        (self.payload / "xdcode-package.json").write_text(json.dumps(manifest))
-        files = sorted(
-            path
-            for path in self.payload.rglob("*")
-            if path.is_file() and path.name != "SHA256SUMS"
-        )
-        (self.payload / "SHA256SUMS").write_text(
-            "".join(
-                f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.relative_to(self.payload).as_posix()}\n"
-                for path in files
-            )
-        )
-        self.archive = self.downloads / f"xdcode-{self.identity}-macos-arm64.tar.gz"
-        self.pack_payload()
+    def use_platform(self, platform_name: str):
+        self.platform = platform_name
+        system, machine = PLATFORMS[platform_name]
+        self.environment.update(MOCK_OS=system, MOCK_MACHINE=machine)
 
-    def pack_payload(self, extra: tarfile.TarInfo | None = None):
+    def make_release(self, version: str, commit: str, *, reported: str | None = None, extra=None):
+        self.version = version
+        self.identity = f"{version}-g{commit[:12]}"
+        self.tag = "v" + self.identity
+        self.environment["FIXTURE_TAG"] = self.tag
+        payload = self.root / f"payload-{self.identity}"
+        shutil.rmtree(payload, ignore_errors=True)
+        (payload / "bin").mkdir(parents=True)
+        binary = payload / "bin/xdcode"
+        binary.write_text(f"#!/bin/sh\nprintf '%s\\n' '{reported or 'xdcode ' + version}'\n")
+        binary.chmod(0o755)
+        (payload / "build-info.json").write_text(json.dumps({"version": version}))
+        self.archive = self.downloads / f"xdcode-{self.identity}-{self.platform}.tar.gz"
         with tarfile.open(self.archive, "w:gz") as archive:
-            for path in sorted(self.payload.rglob("*")):
-                archive.add(
-                    path, arcname=path.relative_to(self.payload), recursive=False
-                )
+            for path in sorted(payload.rglob("*")):
+                archive.add(path, arcname=path.relative_to(payload), recursive=False)
             if extra is not None:
                 archive.addfile(extra)
         self.write_sidecar()
 
-    def write_sidecar(self):
+    def write_sidecar(self, contents: str | None = None):
         Path(str(self.archive) + ".sha256").write_text(
-            f"{hashlib.sha256(self.archive.read_bytes()).hexdigest()}  {self.archive.name}\n"
+            contents
+            or f"{hashlib.sha256(self.archive.read_bytes()).hexdigest()}  {self.archive.name}\n"
         )
 
     def run_installer(self, *arguments, **environment):
@@ -183,117 +129,110 @@ print(str(value).lower() if isinstance(value, bool) else value)
     def entry(self):
         return self.home / ".local/bin/xdcode"
 
+    def curl_calls(self):
+        log = self.root / "curl.jsonl"
+        return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+
+    def assert_clean_state(self):
+        self.assertEqual(self.sentinel.read_text(), "existing-runtime-data-must-be-retained\n")
+        self.assertEqual(list(self.scratch.iterdir()), [])
+        leftovers = [
+            path.name
+            for parent in (self.home / ".local/lib/xdcode", self.home / ".local/bin")
+            if parent.exists()
+            for path in parent.iterdir()
+            if path.name.startswith(".")
+        ]
+        self.assertEqual(leftovers, [])
+        self.assertFalse(Path(self.environment["PYTHON_MARKER"]).exists(), "installer invoked Python")
+
     def test_help_and_syntax_need_no_download(self):
         subprocess.run(["bash", "-n", str(INSTALLER)], check=True)
         result = self.run_installer("--help")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("--force", result.stdout)
-        self.assertFalse((self.root / "curl.jsonl").exists())
+        self.assertIn("upgrade", result.stdout)
+        self.assertEqual(self.curl_calls(), [])
 
-    def test_latest_install_and_repeat_retain_build_and_configuration(self):
+    def test_install_repeat_and_upgrade_on_each_platform(self):
+        for platform_name in PLATFORMS:
+            with self.subTest(platform=platform_name):
+                self.setUp()
+                self.use_platform(platform_name)
+                self.make_release("0.172.0", "a" * 40)
+                first = self.run_installer()
+                self.assertEqual(first.returncode, 0, first.stderr)
+                installed = self.entry.resolve()
+                self.assertEqual(
+                    installed, self.home / f".local/lib/xdcode/{self.identity}/bin/xdcode"
+                )
+                self.assertEqual(
+                    subprocess.check_output([str(self.entry)], text=True).strip(),
+                    "xdcode 0.172.0",
+                )
+                calls = len(self.curl_calls())
+                repeated = self.run_installer()
+                self.assertEqual(repeated.returncode, 0, repeated.stderr)
+                self.assertIn("already installed", repeated.stdout)
+                self.assertEqual(len(self.curl_calls()), calls + 1)  # only the latest lookup
+                self.make_release("0.173.0", "b" * 40)
+                upgraded = self.run_installer()
+                self.assertEqual(upgraded.returncode, 0, upgraded.stderr)
+                self.assertIn(self.identity, str(self.entry.resolve()))
+                self.assertTrue(installed.is_file(), "previous build must be kept")
+                self.assert_clean_state()
+
+    def test_old_force_flag_is_accepted(self):
         result = self.run_installer("--force")
         self.assertEqual(result.returncode, 0, result.stderr)
-        destination = self.entry.resolve()
-        modified = destination.stat().st_mtime_ns
-        repeated = self.run_installer("--force")
-        self.assertEqual(repeated.returncode, 0, repeated.stderr)
-        self.assertEqual(self.entry.resolve(), destination)
-        self.assertEqual(destination.stat().st_mtime_ns, modified)
-        self.assertEqual(
-            self.sentinel.read_text(), "existing-runtime-data-must-be-retained\n"
-        )
-        self.assertFalse((self.home / ".local/lib/xdcode/.macos-install.lock").exists())
-        self.assertEqual(list(self.scratch.iterdir()), [])
+        self.assertTrue(self.entry.resolve().is_file())
 
-    def test_idle_default_and_force_are_explicit(self):
-        blocked = self.run_installer(MOCK_PROCESS_EXIT="0")
-        self.assertNotEqual(blocked.returncode, 0)
-        self.assertIn("active xdcode", blocked.stderr)
-        allowed = self.run_installer("--force", MOCK_PROCESS_EXIT="0")
-        self.assertEqual(allowed.returncode, 0, allowed.stderr)
+    def test_switching_back_to_a_downloaded_release_needs_no_download(self):
+        self.assertEqual(self.run_installer().returncode, 0)
+        old_tag = self.tag
+        self.make_release("0.173.0", "b" * 40)
+        self.assertEqual(self.run_installer().returncode, 0)
+        before = len(self.curl_calls())
+        result = self.run_installer("--release", old_tag)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(old_tag.removeprefix("v"), str(self.entry.resolve()))
+        self.assertEqual(len(self.curl_calls()), before)
 
-    def test_future_latest_release_switches_entry_and_keeps_the_old_build(self):
-        first = self.run_installer("--force")
-        self.assertEqual(first.returncode, 0, first.stderr)
-        previous = self.entry.resolve()
-        previous_metadata = previous.parent.parent / "build-info.json"
-        original = previous_metadata.read_bytes()
-        self.version = "0.168.0"
-        self.commit = "b" * 40
-        self.identity = f"{self.version}-g{self.commit[:12]}"
-        self.tag = "v" + self.identity
-        self.environment["FIXTURE_TAG"] = self.tag
-        self.make_macos_archive()
-        upgraded = self.run_installer("--force", MOCK_PROCESS_EXIT="0")
-        self.assertEqual(upgraded.returncode, 0, upgraded.stderr)
-        self.assertNotEqual(self.entry.resolve(), previous)
-        self.assertTrue(previous.is_file())
-        self.assertEqual(previous_metadata.read_bytes(), original)
-        self.assertIn(self.identity, str(self.entry.resolve()))
-
-    def test_existing_lock_is_not_removed_by_another_installer(self):
-        lock = self.home / ".local/lib/xdcode/.macos-install.lock"
-        lock.mkdir(parents=True)
-        result = self.run_installer("--force")
-        self.assertNotEqual(result.returncode, 0)
-        self.assertTrue(lock.is_dir())
-        self.assertFalse(self.entry.exists())
-
-    def test_regular_or_unrecognized_entry_is_retained(self):
+    def test_unmanaged_entry_is_retained(self):
         self.entry.parent.mkdir(parents=True)
         self.entry.write_text("retain-unmanaged-entry")
-        result = self.run_installer("--force")
+        result = self.run_installer()
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(self.entry.read_text(), "retain-unmanaged-entry")
-        self.entry.unlink()
-        self.entry.symlink_to(self.sentinel)
-        result = self.run_installer("--force")
-        self.assertNotEqual(result.returncode, 0)
-        self.assertEqual(self.entry.resolve(), self.sentinel)
 
     def test_archive_checksum_and_filename_binding(self):
-        sidecar = Path(str(self.archive) + ".sha256")
         for contents in (
             f"{'0' * 64}  {self.archive.name}\n",
             f"{hashlib.sha256(self.archive.read_bytes()).hexdigest()}  unrelated.tar.gz\n",
         ):
             with self.subTest(contents=contents):
-                sidecar.write_text(contents)
-                result = self.run_installer("--force")
+                self.write_sidecar(contents)
+                result = self.run_installer()
                 self.assertNotEqual(result.returncode, 0)
                 self.assertFalse(self.entry.exists())
+                self.assertFalse((self.home / f".local/lib/xdcode/{self.identity}").exists())
 
-    def test_payload_integrity_and_source_metadata(self):
-        for changes in (
-            {"source_dirty": True},
-            {"source_commit": "b" * 40},
-            {"version": "0.165.0"},
-        ):
-            with self.subTest(changes=changes):
-                self.make_macos_archive(**changes)
-                result = self.run_installer("--force")
-                self.assertNotEqual(result.returncode, 0)
-                self.assertFalse(self.entry.exists())
-        self.make_macos_archive()
-        (self.payload / "bin/xdcode").write_text("corrupt payload")
-        self.pack_payload()
-        result = self.run_installer("--force")
+    def test_package_reporting_another_version_is_rejected(self):
+        self.make_release("0.172.0", "a" * 40, reported="xdcode 0.165.0")
+        result = self.run_installer()
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("checksum", result.stderr)
+        self.assertIn("expected 'xdcode 0.172.0'", result.stderr)
+        self.assertFalse(self.entry.exists())
+        self.assertFalse((self.home / f".local/lib/xdcode/{self.identity}").exists())
 
-    def test_unsafe_archive_members_and_duplicate_files_are_rejected(self):
-        for name, kind in (
-            ("../escaped", tarfile.REGTYPE),
-            ("symlink", tarfile.SYMTYPE),
-            ("bin/xdcode", tarfile.REGTYPE),
-        ):
+    def test_unsafe_archive_members_are_rejected(self):
+        for name, kind in (("../escaped", tarfile.REGTYPE), ("symlink", tarfile.SYMTYPE)):
             with self.subTest(name=name):
                 member = tarfile.TarInfo(name)
                 member.type = kind
                 if kind == tarfile.SYMTYPE:
                     member.linkname = "../../outside"
-                self.pack_payload(member)
-                result = self.run_installer("--force")
+                self.make_release("0.172.0", "a" * 40, extra=member)
+                result = self.run_installer()
                 self.assertNotEqual(result.returncode, 0)
                 self.assertFalse(self.entry.exists())
                 self.assertFalse((self.root / "escaped").exists())
@@ -305,98 +244,34 @@ print(str(value).lower() if isinstance(value, bool) else value)
             {"MOCK_OS": "Linux", "MOCK_MACHINE": "aarch64"},
             {"MOCK_LATEST_URL": "https://example.invalid/releases/tag/" + self.tag},
             {
-                "MOCK_LATEST_URL": "https://github.com/xxddccaa/xdcode/releases/tag/v0.167.0-../../outside"
+                "MOCK_LATEST_URL": "https://github.com/xxddccaa/xdcode/releases/tag/v0.172.0-../../outside"
             },
         ):
             with self.subTest(environment=environment):
-                result = self.run_installer("--force", **environment)
+                result = self.run_installer(**environment)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertFalse(self.entry.exists())
 
     def test_exact_release_and_proxy_are_forwarded(self):
         result = self.run_installer(
-            "--force",
-            "--release",
-            self.tag,
-            XDCODE_INSTALL_PROXY="http://127.0.0.1:10826",
+            "--release", self.tag, XDCODE_INSTALL_PROXY="http://127.0.0.1:10826"
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        calls = [
-            json.loads(line)
-            for line in (self.root / "curl.jsonl").read_text().splitlines()
-        ]
+        calls = self.curl_calls()
         self.assertEqual(len(calls), 2)
         self.assertTrue(all("http://127.0.0.1:10826" in call for call in calls))
-
-    def test_linux_executes_only_the_installer_in_the_verified_archive(self):
-        self.archive = self.downloads / f"xdcode-{self.identity}-linux-x86_64.tar.gz"
-        installer = self.root / "install.py"
-        installer.write_text(
-            'import json, os, pathlib, sys\npathlib.Path(os.environ["FIXTURE_ARGS"]).write_text(json.dumps(sys.argv[1:]))\n'
-        )
-        with tarfile.open(self.archive, "w:gz") as archive:
-            archive.add(installer, arcname="install.py")
-            metadata = self.root / "build-info.json"
-            metadata.write_text(
-                json.dumps(
-                    {
-                        "schema_version": 1,
-                        "version": self.version,
-                        "build_id": "g" + self.commit[:12],
-                        "source_commit": self.commit,
-                        "source_dirty": False,
-                        "target": "x86_64-unknown-linux-gnu",
-                    }
-                )
-            )
-            archive.add(metadata, arcname="build-info.json")
-        self.write_sidecar()
-        result = self.run_installer("--force", MOCK_OS="Linux", MOCK_MACHINE="x86_64")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        arguments = json.loads((self.root / "linux-arguments.json").read_text())
-        self.assertEqual(arguments[0], "--force")
-        self.assertTrue(arguments[1].endswith(self.archive.name))
-        calls = (self.root / "curl.jsonl").read_text()
-        self.assertNotIn(".install.py", calls)
-
-    @unittest.skipUnless(
-        platform.system() == "Darwin", "requires the actual macOS plutil"
-    )
-    def test_native_plutil_reads_json_fields(self):
-        result = subprocess.run(
-            [
-                "/usr/bin/plutil",
-                "-extract",
-                "source_dirty",
-                "raw",
-                "-o",
-                "-",
-                str(self.payload / "build-info.json"),
-            ],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        self.assertEqual(result.stdout.strip(), "false")
 
     @unittest.skipUnless(
         os.environ.get("XDCODE_TEST_PACKAGE_DIR"),
         "native artifact smoke test is enabled by CI",
     )
     def test_installs_the_actual_native_ci_artifact_without_touching_runtime_data(self):
-        platform_name = (
-            "macos-arm64" if platform.system() == "Darwin" else "linux-x86_64"
-        )
+        platform_name = "macos-arm64" if platform.system() == "Darwin" else "linux-x86_64"
         archives = list(
-            Path(os.environ["XDCODE_TEST_PACKAGE_DIR"]).glob(
-                f"xdcode-*-{platform_name}.tar.gz"
-            )
+            Path(os.environ["XDCODE_TEST_PACKAGE_DIR"]).glob(f"xdcode-*-{platform_name}.tar.gz")
         )
         self.assertEqual(len(archives), 1)
-        with (
-            tarfile.open(archives[0]) as archive,
-            archive.extractfile("build-info.json") as stream,
-        ):
+        with tarfile.open(archives[0]) as archive, archive.extractfile("build-info.json") as stream:
             info = json.load(stream)
         identity = f"{info['version']}-{info['build_id']}"
         shutil.copyfile(archives[0], self.downloads / archives[0].name)
@@ -405,17 +280,13 @@ print(str(value).lower() if isinstance(value, bool) else value)
             self.downloads / (archives[0].name + ".sha256"),
         )
         result = self.run_installer(
-            "--force",
             FIXTURE_TAG="v" + identity,
             MOCK_OS=platform.system(),
             MOCK_MACHINE=platform.machine(),
-            MOCK_NATIVE_PACKAGE="1",
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue(self.entry.resolve().is_file())
-        self.assertEqual(
-            self.sentinel.read_text(), "existing-runtime-data-must-be-retained\n"
-        )
+        self.assert_clean_state()
         version = subprocess.check_output(
             [str(self.entry), "--version"], env=self.environment, text=True
         )

@@ -5,7 +5,7 @@ use crate::history_cell::ComputerActivityCell;
 use crate::history_cell::HistoryCell;
 use crate::history_cell::McpToolCallCell;
 use std::sync::Arc;
-use xdcode_app_server_protocol::ThreadItem;
+use xdcode_app_server_protocol::ThreadItemPayload;
 use xdcode_app_server_protocol::Turn;
 
 pub(super) fn append(group: &mut ComputerActivityCell, call: McpHistory) {
@@ -40,7 +40,7 @@ pub(crate) fn older_computer_group(
     let items = adjacent_items(older, newer, turns)?;
     let older_items = items
         .iter()
-        .filter(|item| !matches!(item, ThreadItem::Reasoning { .. }))
+        .filter(|entry| !matches!(&entry.payload, ThreadItemPayload::Reasoning { .. }))
         .take(older.call_ids().count())
         .cloned()
         .collect::<Vec<_>>();
@@ -53,7 +53,7 @@ fn adjacent_items<'a>(
     older: &ComputerActivityCell,
     newer: &ComputerActivityCell,
     turns: &'a [Turn],
-) -> Option<&'a [ThreadItem]> {
+) -> Option<&'a [xdcode_app_server_protocol::ThreadItem]> {
     let ids = older.call_ids().chain(newer.call_ids()).collect::<Vec<_>>();
     adjacent_activity_items(&ids, turns)
 }
@@ -62,7 +62,7 @@ fn adjacent_items<'a>(
 pub(super) fn adjacent_activity_items<'a>(
     ids: &[&str],
     turns: &'a [Turn],
-) -> Option<&'a [ThreadItem]> {
+) -> Option<&'a [xdcode_app_server_protocol::ThreadItem]> {
     let first = *ids.first()?;
     let (turn, start) = turns.iter().find_map(|turn| {
         turn.items
@@ -71,9 +71,9 @@ pub(super) fn adjacent_activity_items<'a>(
             .map(|start| (turn, start))
     })?;
     let mut matched = 0;
-    for (offset, item) in turn.items[start..].iter().enumerate() {
+    for (offset, item) in turn.item_payloads().skip(start).enumerate() {
         if item.id() != ids[matched] {
-            if matches!(item, ThreadItem::Reasoning { .. }) {
+            if matches!(item, ThreadItemPayload::Reasoning { .. }) {
                 continue;
             }
             return None;
@@ -86,10 +86,13 @@ pub(super) fn adjacent_activity_items<'a>(
     None
 }
 
-pub(super) fn completed_group(items: &[ThreadItem]) -> Option<ComputerActivityCell> {
+pub(super) fn completed_group(
+    items: &[xdcode_app_server_protocol::ThreadItem],
+) -> Option<ComputerActivityCell> {
     let mut group = None;
-    for item in items {
-        if matches!(item, ThreadItem::Reasoning { .. }) {
+    for entry in items {
+        let item = &entry.payload;
+        if matches!(item, ThreadItemPayload::Reasoning { .. }) {
             continue;
         }
         let call = McpHistory::from_item(item.clone())?;

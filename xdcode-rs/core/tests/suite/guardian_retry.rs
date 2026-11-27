@@ -19,6 +19,7 @@ use xdcode_core::context::UserGoalUpdate;
 use xdcode_protocol::AgentPath;
 use xdcode_protocol::approvals::GuardianAssessmentStatus;
 use xdcode_protocol::config_types::ApprovalsReviewer;
+use xdcode_protocol::models::PermissionProfile;
 use xdcode_protocol::protocol::AskForApproval;
 use xdcode_protocol::protocol::EventMsg;
 use xdcode_protocol::protocol::InterAgentCommunication;
@@ -110,9 +111,23 @@ async fn interrupted_guardian_review_preserves_evidence_once(
             config.model_provider.stream_idle_timeout_ms = Some(600_000);
             config.permissions.approval_policy = Constrained::allow_any(AskForApproval::OnRequest);
             config.approvals_reviewer = ApprovalsReviewer::AutoReview;
+            config.workspace_roots_explicit = false;
+            let permission_profile = PermissionProfile::from_legacy_sandbox_policy_for_cwd(
+                &SandboxPolicy::new_workspace_write_policy(),
+                config.cwd.as_path(),
+            );
             config
-                .set_legacy_sandbox_policy(SandboxPolicy::new_workspace_write_policy())
-                .expect("set sandbox policy");
+                .permissions
+                .can_set_permission_profile(&permission_profile)
+                .expect("set permission profile");
+            config
+                .permissions
+                .set_workspace_roots(vec![config.cwd.clone()]);
+            config
+                .permissions
+                .set_permission_profile(permission_profile)
+                .expect("set permission profile");
+            config.workspace_roots = config.permissions.workspace_roots().to_vec();
         })
         .build_with_auto_env(&server)
         .await?;
@@ -250,9 +265,23 @@ async fn guardian_retry_executes_only_after_a_completed_approval() -> Result<()>
     let mut builder = test_xdcode().with_config(|config| {
         config.permissions.approval_policy = Constrained::allow_any(AskForApproval::OnRequest);
         config.approvals_reviewer = ApprovalsReviewer::AutoReview;
+        config.workspace_roots_explicit = false;
+        let permission_profile = PermissionProfile::from_legacy_sandbox_policy_for_cwd(
+            &SandboxPolicy::new_workspace_write_policy(),
+            config.cwd.as_path(),
+        );
         config
-            .set_legacy_sandbox_policy(SandboxPolicy::new_workspace_write_policy())
-            .expect("set sandbox policy");
+            .permissions
+            .can_set_permission_profile(&permission_profile)
+            .expect("set permission profile");
+        config
+            .permissions
+            .set_workspace_roots(vec![config.cwd.clone()]);
+        config
+            .permissions
+            .set_permission_profile(permission_profile)
+            .expect("set permission profile");
+        config.workspace_roots = config.permissions.workspace_roots().to_vec();
     });
     let test = builder.build_with_auto_env(&server).await?;
     let responses = vec![
@@ -308,9 +337,13 @@ async fn guardian_retry_executes_only_after_a_completed_approval() -> Result<()>
         .await?;
     let mut reviews = Vec::new();
     let mut warnings = Vec::new();
+    let mut command_started_at_ms = None;
     loop {
         match test.xdcode.next_event().await?.msg {
-            EventMsg::GuardianAssessment(review) => reviews.push(review.status),
+            EventMsg::GuardianAssessment(review) => reviews.push(review),
+            EventMsg::ItemCompleted(event) if event.item.id() == "write-marker" => {
+                command_started_at_ms = event.started_at_ms;
+            }
             EventMsg::GuardianWarning(warning) => warnings.push(warning.message),
             EventMsg::TurnComplete(_) => break,
             _ => {}
@@ -338,12 +371,16 @@ async fn guardian_retry_executes_only_after_a_completed_approval() -> Result<()>
         assert_eq!(request.inputs_of_type("agent_message"), expected_messages);
     }
     assert_eq!(
-        reviews,
+        reviews
+            .iter()
+            .map(|review| review.status)
+            .collect::<Vec<_>>(),
         vec![
             GuardianAssessmentStatus::InProgress,
             GuardianAssessmentStatus::Approved,
         ]
     );
+    assert_eq!(command_started_at_ms, Some(reviews[0].started_at_ms));
     assert_eq!(
         warnings.len(),
         1,
@@ -437,9 +474,23 @@ async fn guardian_stale_approval_replaces_review_and_preserves_earlier_context()
             config.model_provider.base_url = Some(base_url);
             config.permissions.approval_policy = Constrained::allow_any(AskForApproval::OnRequest);
             config.approvals_reviewer = ApprovalsReviewer::AutoReview;
+            config.workspace_roots_explicit = false;
+            let permission_profile = PermissionProfile::from_legacy_sandbox_policy_for_cwd(
+                &SandboxPolicy::new_workspace_write_policy(),
+                config.cwd.as_path(),
+            );
             config
-                .set_legacy_sandbox_policy(SandboxPolicy::new_workspace_write_policy())
-                .expect("sandbox policy");
+                .permissions
+                .can_set_permission_profile(&permission_profile)
+                .expect("set permission profile");
+            config
+                .permissions
+                .set_workspace_roots(vec![config.cwd.clone()]);
+            config
+                .permissions
+                .set_permission_profile(permission_profile)
+                .expect("set permission profile");
+            config.workspace_roots = config.permissions.workspace_roots().to_vec();
         })
         .build_with_auto_env(&server)
         .await?;

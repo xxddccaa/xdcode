@@ -10,6 +10,7 @@ pub mod manifest;
 use xdcode_core_plugin_common::plugin_id;
 mod provider;
 
+pub use bundled_hooks::bundled_hook_app_connector_id;
 pub use bundled_hooks::is_allowlisted_bundled_cleanup_hook;
 pub use load_outcome::LoadedPlugin;
 pub use load_outcome::PluginLoadOutcome;

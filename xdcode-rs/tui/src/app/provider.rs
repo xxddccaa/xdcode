@@ -1,310 +1,75 @@
-//! Browse and edit user-owned providers through the owning App Server's configuration APIs.
+//! Browse and edit the connected server's providers and choose a default for new chats.
 
 use super::App;
 use crate::app_event::AppEvent;
 use crate::app_server_session::AppServerSession;
 use crate::backend_id::BackendId;
-use crate::bottom_pane::ListSelectionView;
 use crate::bottom_pane::SelectionItem;
+use crate::bottom_pane::SelectionSecondaryAction;
 use crate::bottom_pane::SelectionViewParams;
+use crate::key_hint;
+use crate::keymap::ListAction;
+use crate::keymap::ListKeymap;
+use crate::pager_overlay::Overlay;
+use crate::pager_overlay::PagerAction;
+use crate::pager_overlay::StaticOverlay;
 use crate::tui::Tui;
-use std::collections::BTreeMap;
+use crossterm::event::KeyCode;
+use ratatui::style::Stylize;
+use ratatui::text::Line;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
 use tokio::sync::watch;
-use uuid::Uuid;
-use xdcode_app_server_protocol::ClientRequest;
-use xdcode_app_server_protocol::ConfigBatchWriteParams;
-use xdcode_app_server_protocol::ConfigEdit;
-use xdcode_app_server_protocol::ConfigLayerSource;
-use xdcode_app_server_protocol::ConfigReadParams;
-use xdcode_app_server_protocol::ConfigReadResponse;
-use xdcode_app_server_protocol::ConfigWriteResponse;
-use xdcode_app_server_protocol::MergeStrategy;
-use xdcode_app_server_protocol::RequestId;
+use xdcode_app_server_protocol::ModelProviderListResponse;
+use xdcode_app_server_protocol::ModelProviderSummary;
+use xdcode_app_server_protocol::ProviderSettings;
 
 mod editor;
+pub(crate) use editor::Draft;
+pub(crate) use editor::ProviderForm;
+mod fields;
+pub(crate) mod rpc;
+mod write;
+use fields::Field;
+use fields::provider_fields;
 
 const LOADING_VIEW: &str = "model_provider_loading";
-const LIST_VIEW: &str = "model_provider_list";
-
-#[derive(Clone, Debug)]
-pub(crate) struct Provider {
-    id: String,
-    name: String,
-    values: BTreeMap<Field, String>,
-    editable: bool,
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct Catalog {
-    providers: Vec<Provider>,
-    file: Option<String>,
-    version: Option<String>,
-}
-
-impl Catalog {
-    fn from_response(response: ConfigReadResponse) -> Self {
-        let user = response.layers.as_ref().and_then(|layers| {
-            layers.iter().find(|layer| {
-                matches!(layer.name, ConfigLayerSource::User { .. })
-                    && layer.disabled_reason.is_none()
-            })
-        });
-        let file = user.and_then(|layer| match &layer.name {
-            ConfigLayerSource::User { file, .. } => Some(file.to_string_lossy().into_owned()),
-            _ => None,
-        });
-        let version = user.map(|layer| layer.version.clone());
-        let providers = response
-            .config
-            .additional
-            .get("model_providers")
-            .and_then(serde_json::Value::as_object)
-            .into_iter()
-            .flatten()
-            .map(|(id, definition)| {
-                let values = [Field::Name, Field::Url, Field::Variable]
-                    .into_iter()
-                    .filter_map(|field| {
-                        definition
-                            .get(field.key())
-                            .and_then(serde_json::Value::as_str)
-                            .map(|value| (field, value.to_string()))
-                    })
-                    .collect::<BTreeMap<_, _>>();
-                let owned = user
-                    .and_then(|layer| layer.config.get("model_providers"))
-                    .and_then(|providers| providers.get(id))
-                    .is_some();
-                let managed = response.origins.iter().any(|(path, origin)| {
-                    (path == &format!("model_providers.{id}")
-                        || path.starts_with(&format!("model_providers.{id}.")))
-                        && !matches!(origin.name, ConfigLayerSource::User { .. })
-                });
-                let responses = definition
-                    .get("wire_api")
-                    .and_then(serde_json::Value::as_str)
-                    .is_none_or(|wire| wire == "responses");
-                Provider {
-                    id: id.clone(),
-                    name: values
-                        .get(&Field::Name)
-                        .cloned()
-                        .unwrap_or_else(|| id.clone()),
-                    values,
-                    editable: owned && !managed && responses,
-                }
-            })
-            .collect();
-        Self {
-            providers,
-            file,
-            version,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub(crate) enum Field {
-    Id,
-    Name,
-    Url,
-    Variable,
-}
-
-impl Field {
-    fn key(self) -> &'static str {
-        match self {
-            Self::Id => "id",
-            Self::Name => "name",
-            Self::Url => "base_url",
-            Self::Variable => "env_key",
-        }
-    }
-    fn label(self) -> &'static str {
-        match self {
-            Self::Id => "Provider ID",
-            Self::Name => "Name",
-            Self::Url => "Base URL",
-            Self::Variable => "API key environment variable",
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct Draft {
-    catalog: Catalog,
-    provider: Option<Provider>,
-    changes: BTreeMap<Field, String>,
-}
-
-impl Draft {
-    fn fields(&self) -> Vec<Field> {
-        let mut fields = vec![Field::Name, Field::Url, Field::Variable];
-        if self.provider.is_none() {
-            fields.insert(0, Field::Id);
-        }
-        fields
-    }
-    fn value(&self, field: Field) -> &str {
-        self.changes
-            .get(&field)
-            .or_else(|| {
-                self.provider
-                    .as_ref()
-                    .and_then(|provider| provider.values.get(&field))
-            })
-            .map(String::as_str)
-            .unwrap_or_default()
-    }
-    fn patch(&self) -> Result<ConfigBatchWriteParams, String> {
-        let file = self
-            .catalog
-            .file
-            .clone()
-            .ok_or("No writable user configuration layer is available.")?;
-        if self
-            .provider
-            .as_ref()
-            .is_some_and(|provider| !provider.editable)
-        {
-            return Err(
-                "This provider is read-only. Edit its owning configuration layer instead.".into(),
-            );
-        }
-        let id = self
-            .provider
-            .as_ref()
-            .map(|provider| provider.id.as_str())
-            .unwrap_or_else(|| self.value(Field::Id));
-        if id.is_empty()
-            || (self.provider.is_none()
-                && !id.chars().all(|character| {
-                    character.is_ascii_alphanumeric() || matches!(character, '-' | '_')
-                }))
-        {
-            return Err(
-                "Use a nonempty provider ID containing letters, numbers, '-' or '_'.".into(),
-            );
-        }
-        if self.provider.is_none()
-            && self
-                .catalog
-                .providers
-                .iter()
-                .any(|provider| provider.id == id)
-        {
-            return Err(
-                "That provider ID already exists. Edit the existing provider instead.".into(),
-            );
-        }
-        if self.value(Field::Name).trim().is_empty() {
-            return Err("Enter a provider name.".into());
-        }
-        if self.provider.is_none() || self.changes.contains_key(&Field::Url) {
-            let url = url::Url::parse(self.value(Field::Url))
-                .map_err(|_| "Enter a valid HTTP(S) base URL.")?;
-            if !matches!(url.scheme(), "http" | "https")
-                || url.host_str().is_none()
-                || !url.username().is_empty()
-                || url.password().is_some()
-            {
-                return Err("Use an HTTP(S) base URL without embedded credentials.".into());
-            }
-        }
-        let variable = self.value(Field::Variable);
-        if !variable.is_empty()
-            && (variable
-                .chars()
-                .next()
-                .is_none_or(|character| character.is_ascii_digit())
-                || !variable
-                    .chars()
-                    .all(|character| character.is_ascii_alphanumeric() || character == '_'))
-        {
-            return Err("Enter an environment variable name, not a credential value.".into());
-        }
-        let mut edits = self
-            .changes
-            .iter()
-            .filter(|(field, _)| **field != Field::Id)
-            .map(|(field, value)| ConfigEdit {
-                key_path: format!("model_providers.{id:?}.{}", field.key()),
-                value: if *field == Field::Variable && value.is_empty() {
-                    serde_json::Value::Null
-                } else {
-                    serde_json::json!(value)
-                },
-                merge_strategy: MergeStrategy::Replace,
-            })
-            .collect::<Vec<_>>();
-        if self.provider.is_none() {
-            edits.extend(
-                [
-                    ("wire_api", serde_json::json!("responses")),
-                    ("requires_hosted_auth", serde_json::json!(false)),
-                ]
-                .map(|(field, value)| ConfigEdit {
-                    key_path: format!("model_providers.{id:?}.{field}"),
-                    value,
-                    merge_strategy: MergeStrategy::Replace,
-                }),
-            );
-        }
-        if edits.is_empty() {
-            return Err("No provider fields have changed.".into());
-        }
-        Ok(ConfigBatchWriteParams {
-            edits,
-            file_path: Some(file),
-            expected_version: self.catalog.version.clone(),
-            reload_user_config: false,
-        })
-    }
-    fn rebase(&mut self, catalog: Catalog) {
-        if let Some(provider) = &self.provider {
-            self.provider = catalog
-                .providers
-                .iter()
-                .find(|current| current.id == provider.id)
-                .cloned()
-                .or_else(|| {
-                    Some(Provider {
-                        editable: false,
-                        ..provider.clone()
-                    })
-                });
-        }
-        self.catalog = catalog;
-    }
-}
+pub(super) const LIST_VIEW: &str = "model_provider_list";
+pub(crate) const CREATE_CUSTOM_PROVIDER: &str = "Create a custom provider or gateway";
 
 #[derive(Debug)]
 pub(crate) enum Event {
-    Load(watch::Receiver<()>),
+    Load {
+        dismissed: watch::Receiver<()>,
+        notice: Option<String>,
+    },
     Loaded {
         backend: BackendId,
         dismissed: watch::Receiver<()>,
-        result: Result<Catalog, String>,
+        result: Result<ModelProviderListResponse, String>,
+        notice: Option<String>,
+    },
+    Details {
+        catalog: Arc<Catalog>,
+        index: usize,
+        dismissed: watch::Receiver<()>,
     },
     Edit {
-        backend: BackendId,
-        draft: Draft,
+        catalog: Arc<Catalog>,
+        index: Option<usize>,
+        dismissed: watch::Receiver<()>,
     },
-    Save {
+    Write {
         backend: BackendId,
-        draft: Draft,
-        alive: Arc<AtomicBool>,
+        dismissed: watch::Receiver<()>,
+        write: write::Write,
     },
-    Saved {
-        backend: BackendId,
-        draft: Draft,
-        alive: Arc<AtomicBool>,
-        result: Result<ConfigWriteResponse, String>,
-        refreshed: Result<Catalog, String>,
-    },
+    Written(write::Completion),
+}
+
+#[derive(Debug)]
+pub(crate) struct Catalog {
+    backend: BackendId,
+    page: ModelProviderListResponse,
 }
 
 fn back() -> SelectionItem {
@@ -315,118 +80,65 @@ fn back() -> SelectionItem {
     }
 }
 
-pub(crate) fn loading() -> (SelectionViewParams, Event) {
-    let (dismiss, dismissed) = watch::channel(());
-    (
-        SelectionViewParams {
-            view_id: Some(LOADING_VIEW),
-            title: Some("Loading model providers…".into()),
-            items: vec![back()],
-            allow_input_when_disconnected: true,
-            on_cancel: Some(Box::new(move |_| {
-                dismiss.send_replace(());
-            })),
-            ..Default::default()
-        },
-        Event::Load(dismissed),
-    )
-}
-
-fn list(backend: BackendId, catalog: Catalog, notice: Option<String>) -> SelectionViewParams {
-    let mut items = catalog
-        .providers
-        .iter()
-        .map(|provider| {
-            let draft = Draft {
-                catalog: catalog.clone(),
-                provider: Some(provider.clone()),
-                changes: BTreeMap::new(),
-            };
-            SelectionItem {
-                name: format!("{} ({})", provider.name, provider.id),
-                description: Some(if provider.editable {
-                    provider
-                        .values
-                        .get(&Field::Url)
-                        .cloned()
-                        .unwrap_or_else(|| "Configured provider".into())
-                } else {
-                    "Read-only provider; configuration and credentials remain server-owned".into()
-                }),
-                dismiss_on_select: false,
-                actions: vec![Box::new(move |tx| {
-                    tx.send(AppEvent::Provider(Event::Edit {
-                        backend,
-                        draft: draft.clone(),
-                    }))
-                })],
-                ..Default::default()
-            }
-        })
-        .collect::<Vec<_>>();
-    if catalog.file.is_some() {
-        items.push(SelectionItem {
-            name: "Add Responses provider".into(),
-            dismiss_on_select: false,
-            actions: vec![Box::new(move |tx| {
-                tx.send(AppEvent::Provider(Event::Edit {
-                    backend,
-                    draft: Draft {
-                        catalog: catalog.clone(),
-                        provider: None,
-                        changes: BTreeMap::new(),
-                    },
-                }))
-            })],
-            ..Default::default()
-        });
-    }
-    items.push(back());
+pub(crate) fn load_error(title: &str, error: String) -> SelectionViewParams {
     SelectionViewParams {
-        view_id: Some(LIST_VIEW),
-        title: Some("Model providers".into()),
-        subtitle: notice.or_else(|| {
-            Some("Edits do not switch the active chat or project model preferences.".into())
-        }),
-        items,
+        title: Some(title.into()),
+        subtitle: Some(error),
+        items: vec![back()],
         allow_input_when_disconnected: true,
         ..Default::default()
     }
 }
 
-async fn read(
-    handle: &xdcode_app_server_client::AppServerRequestHandle,
-) -> Result<Catalog, String> {
-    let response: ConfigReadResponse = handle
-        .request_typed(ClientRequest::ConfigRead {
-            request_id: RequestId::String(Uuid::new_v4().to_string()),
-            params: ConfigReadParams {
-                include_layers: true,
-                cwd: None,
-            },
-        })
-        .await
-        .map_err(|error| error.to_string())?;
-    Ok(Catalog::from_response(response))
+pub(crate) fn loading() -> (SelectionViewParams, Event) {
+    loading_with_notice(/*notice*/ None)
 }
 
-pub(super) fn handle(app: &mut App, _tui: &mut Tui, server: &mut AppServerSession, event: Event) {
+fn loading_with_notice(notice: Option<String>) -> (SelectionViewParams, Event) {
+    let (view, dismissed) = progress(LOADING_VIEW, "Loading model providers…");
+    (view, Event::Load { dismissed, notice })
+}
+
+fn progress(id: &'static str, title: &str) -> (SelectionViewParams, watch::Receiver<()>) {
+    // Destroying a popup invalidates its own request, even if another popup has the same ID.
+    let (dismiss, dismissed) = watch::channel(());
+    let view = SelectionViewParams {
+        view_id: Some(id),
+        title: Some(title.into()),
+        items: vec![back()],
+        allow_input_when_disconnected: true,
+        on_cancel: Some(Box::new(move |_| {
+            dismiss.send_replace(());
+        })),
+        ..Default::default()
+    };
+    (view, dismissed)
+}
+
+pub(super) fn handle(app: &mut App, tui: &mut Tui, server: &AppServerSession, event: Event) {
     let backend = server.backend_id();
     match event {
-        Event::Load(mut dismissed) => {
+        Event::Load {
+            mut dismissed,
+            notice,
+        } => {
             let tx = app.app_event_tx.clone();
             let handle = server.request_handle();
             let offline = app.reconnect.offline;
             tokio::spawn(async move {
                 let result = if offline {
-                    Err("Reconnect to the app server to browse providers.".into())
+                    Err("Reconnect to the app server to browse model providers.".into())
                 } else {
-                    tokio::select! { _ = dismissed.changed() => return, result = read(&handle) => result }
+                    tokio::select! {
+                        _ = dismissed.changed() => return,
+                        result = rpc::list_providers(&handle) => result,
+                    }
                 };
                 tx.send(AppEvent::Provider(Event::Loaded {
                     backend,
                     dismissed,
                     result,
+                    notice,
                 }));
             });
         }
@@ -434,129 +146,274 @@ pub(super) fn handle(app: &mut App, _tui: &mut Tui, server: &mut AppServerSessio
             backend: origin,
             dismissed,
             result,
+            notice,
         } => {
             if origin != backend || !matches!(dismissed.has_changed(), Ok(false)) {
                 return;
             }
+            let chat = &mut app.chat_widget;
             let view = match result {
-                Ok(catalog) => list(backend, catalog, None),
-                Err(error) => SelectionViewParams {
-                    title: Some("Model providers".into()),
-                    subtitle: Some(error),
-                    items: vec![back()],
-                    allow_input_when_disconnected: true,
-                    ..Default::default()
-                },
+                Ok(page) => list(
+                    chat.thread_id()
+                        .map(|_| chat.config_ref().model_provider_id.as_str()),
+                    Arc::new(Catalog { backend, page }),
+                    server.client_provider_override_for_new_chats(&app.config),
+                    &app.keymap.list,
+                    notice,
+                ),
+                Err(error) => load_error("Model providers", error),
             };
-            app.chat_widget
-                .replace_selection_view_if_present(LOADING_VIEW, view);
+            chat.replace_selection_view_if_present(LOADING_VIEW, view);
+        }
+        Event::Details {
+            catalog,
+            index,
+            dismissed,
+        } => {
+            if catalog.backend == backend
+                && matches!(dismissed.has_changed(), Ok(false))
+                && app.overlay.is_none()
+                && app.chat_widget.active_view_is(LIST_VIEW)
+            {
+                let provider = &catalog.page.data[index];
+                let mut pager = StaticOverlay::with_title(
+                    details(provider),
+                    "Model provider details".into(),
+                    app.keymap.pager.clone(),
+                );
+                if provider.can_edit && !matches!(provider.settings, ProviderSettings::Provider) {
+                    let tx = app.app_event_tx.clone();
+                    pager.action = Some(PagerAction {
+                        key: key_hint::plain(KeyCode::Enter),
+                        label: "Edit configuration",
+                        run: Box::new(move || {
+                            tx.send(AppEvent::Provider(Event::Edit {
+                                catalog,
+                                index: Some(index),
+                                dismissed,
+                            }));
+                        }),
+                    });
+                }
+                let _ = tui.enter_alt_screen();
+                app.overlay = Some(Overlay::Static(pager));
+                tui.frame_requester().schedule_frame();
+            }
         }
         Event::Edit {
-            backend: origin,
-            draft,
+            catalog,
+            index,
+            dismissed,
         } => {
-            if origin != backend {
-                return;
+            if backend == catalog.backend
+                && matches!(dismissed.has_changed(), Ok(false))
+                && app.overlay.is_none()
+                && app.chat_widget.active_view_is(LIST_VIEW)
+            {
+                let draft = editor::Draft::new(
+                    index.map(|i| catalog.page.data[i].clone()),
+                    &catalog.page.data,
+                );
+                let view = edit_view(app, backend, draft, /*error*/ None);
+                app.chat_widget.show_bottom_pane_view(view);
             }
-            app.chat_widget
-                .show_bottom_pane_view(editor::view(app, backend, draft, None));
         }
-        Event::Save {
-            backend: origin,
-            draft,
-            alive,
+        Event::Write {
+            backend,
+            dismissed,
+            write,
         } => {
-            if origin != backend || !alive.load(Ordering::Acquire) {
-                return;
+            if backend == server.backend_id() && matches!(dismissed.has_changed(), Ok(false)) {
+                write.start(app, server);
             }
-            let params = match draft.patch() {
-                Ok(params) => params,
-                Err(error) => {
-                    let view = editor::view(app, backend, draft, Some(error));
-                    app.chat_widget
-                        .replace_bottom_pane_view_if_present(editor::VIEW_ID, view);
-                    return;
+        }
+        Event::Written(completion) => completion.finish(app, backend),
+    }
+}
+
+/// Refresh a list opened before the first chat acquired a server-side provider.
+pub(crate) fn refresh_list_if_present(chat: &mut crate::chatwidget::ChatWidget) -> Option<Event> {
+    if chat.no_modal_or_popup_active() {
+        return None;
+    }
+    let (view, event) = loading();
+    chat.replace_selection_view_if_present(LIST_VIEW, view)
+        .then_some(event)
+}
+
+pub(crate) fn provider_item(provider: &ModelProviderSummary, default_id: &str) -> SelectionItem {
+    let is_default = provider.id == default_id;
+    SelectionItem {
+        name: provider.name.clone(),
+        name_prefix_spans: vec![if is_default {
+            "● ".green()
+        } else {
+            "○ ".dim()
+        }],
+        description: Some(provider.id.clone()),
+        ..Default::default()
+    }
+}
+
+fn list(
+    current: Option<&str>,
+    catalog: Arc<Catalog>,
+    client_override: Option<String>,
+    keymap: &ListKeymap,
+    notice: Option<String>,
+) -> SelectionViewParams {
+    let current_label = current.unwrap_or("No active chat");
+    let page = &catalog.page;
+    let can_select = page.can_change_default && client_override.is_none();
+    let default_label = if client_override.is_some() {
+        "Server default"
+    } else {
+        "Default for new chats"
+    };
+    let note = match client_override {
+        Some(id) => format!("This client's launch settings select {id} for new chats."),
+        None if !page.can_change_default => {
+            "The server configuration fixes the default provider.".into()
+        }
+        None => "Use /new to start a chat with the selected provider.".into(),
+    };
+    let (dismiss, dismissed) = watch::channel(());
+    let mut items: Vec<_> = page
+        .data
+        .iter()
+        .enumerate()
+        .map(|(index, provider)| {
+            let is_default = provider.id == page.default_provider_id;
+            let secondary_action = (can_select && !is_default).then(|| {
+                let backend = catalog.backend;
+                let id = provider.id.clone();
+                let name = provider.name.clone();
+                let dismissed = dismissed.clone();
+                SelectionSecondaryAction {
+                    key: key_hint::plain(KeyCode::Char(' ')),
+                    footer_hint: provider_hint(keymap, /*select*/ true),
+                    action: Box::new(move |tx| {
+                        tx.send(AppEvent::Provider(Event::Write {
+                            backend,
+                            dismissed: dismissed.clone(),
+                            write: write::Write::Default {
+                                id: id.clone(),
+                                name: name.clone(),
+                            },
+                        }))
+                    }),
                 }
-            };
-            let handle = server.request_handle();
-            let tx = app.app_event_tx.clone();
-            let offline = app.reconnect.offline;
-            tokio::spawn(async move {
-                let result = if offline {
-                    Err("Disconnected: provider changes were not sent.".into())
-                } else {
-                    handle
-                        .request_typed(ClientRequest::ConfigBatchWrite {
-                            request_id: RequestId::String(Uuid::new_v4().to_string()),
-                            params,
-                        })
-                        .await
-                        .map_err(|error| error.to_string())
-                };
-                let refreshed = if offline {
-                    Err("Reconnect before retrying.".into())
-                } else {
-                    read(&handle).await
-                };
-                tx.send(AppEvent::Provider(Event::Saved {
-                    backend,
-                    draft,
-                    alive,
-                    result,
-                    refreshed,
-                }));
             });
-        }
-        Event::Saved {
-            backend: origin,
-            mut draft,
-            alive,
-            result,
-            refreshed,
-        } => {
-            if origin != backend || !alive.load(Ordering::Acquire) {
-                return;
+            let catalog = Arc::clone(&catalog);
+            let dismissed = dismissed.clone();
+            SelectionItem {
+                is_current: current == Some(provider.id.as_str()),
+                secondary_action,
+                actions: vec![Box::new(move |tx| {
+                    tx.send(AppEvent::Provider(Event::Details {
+                        catalog: Arc::clone(&catalog),
+                        index,
+                        dismissed: dismissed.clone(),
+                    }));
+                })],
+                ..provider_item(provider, &page.default_provider_id)
             }
-            match result {
-                Ok(_) => {
-                    let (catalog, notice) = match refreshed {
-                        Ok(catalog) => (
-                            catalog,
-                            "Saved. The current chat and Default/Plan selections are unchanged."
-                                .into(),
-                        ),
-                        Err(error) => (
-                            draft.catalog,
-                            format!("Saved, but catalog refresh failed: {error}"),
-                        ),
-                    };
-                    let view = ListSelectionView::new(
-                        list(backend, catalog, Some(notice)),
-                        app.app_event_tx.clone(),
-                        app.keymap.list.clone(),
-                    );
-                    app.chat_widget
-                        .replace_bottom_pane_view_if_present(editor::VIEW_ID, Box::new(view));
-                    server.fetch_models(Uuid::new_v4(), app.app_event_tx.clone());
-                }
-                Err(error) => {
-                    if let Ok(catalog) = refreshed {
-                        draft.rebase(catalog);
-                    }
-                    let view = editor::view(
-                        app,
-                        backend,
-                        draft,
-                        Some(format!(
-                            "Save was not confirmed: {error}. Draft retained; review and save explicitly to retry."
-                        )),
-                    );
-                    app.chat_widget
-                        .replace_bottom_pane_view_if_present(editor::VIEW_ID, view);
-                }
+        })
+        .collect();
+    items.push(SelectionItem {
+        name: CREATE_CUSTOM_PROVIDER.into(),
+        footer_hint: Some(crate::bottom_pane::popup_consts::picker_hint_line_for_keymap(keymap)),
+        actions: vec![Box::new({
+            let catalog = Arc::clone(&catalog);
+            move |tx| {
+                tx.send(AppEvent::Provider(Event::Edit {
+                    catalog: Arc::clone(&catalog),
+                    index: None,
+                    dismissed: dismissed.clone(),
+                }));
             }
+        })],
+        ..Default::default()
+    });
+    SelectionViewParams {
+        view_id: Some(LIST_VIEW),
+        title: Some("Model providers".into()),
+        subtitle: Some(format!(
+            "Current chat: {current_label} · {default_label}: {}",
+            page.default_provider_id
+        )),
+        footer_note: Some(notice.unwrap_or(note).into()),
+        footer_hint: Some(provider_hint(keymap, /*select*/ false)),
+        items,
+        on_cancel: Some(Box::new(move |_| {
+            dismiss.send_replace(());
+        })),
+        allow_input_when_disconnected: true,
+        ..Default::default()
+    }
+}
+
+fn edit_view(
+    app: &App,
+    backend: BackendId,
+    draft: editor::Draft,
+    error: Option<String>,
+) -> Box<dyn crate::bottom_pane::BottomPaneView> {
+    let tx = app.app_event_tx.clone();
+    let (owner, _) = watch::channel(());
+    editor::view(app, draft, error, move |draft, params| {
+        tx.send(AppEvent::Provider(Event::Write {
+            backend,
+            dismissed: owner.subscribe(),
+            write: write::Write::Settings(Box::new((draft, params))),
+        }));
+    })
+}
+
+fn provider_hint(keymap: &ListKeymap, select: bool) -> Line<'static> {
+    let keys = [
+        (keymap.primary_hint(ListAction::Accept), " details"),
+        (
+            select.then(|| key_hint::plain(KeyCode::Char(' ')).into()),
+            " set default",
+        ),
+        (keymap.primary_hint(ListAction::Cancel), " back"),
+    ];
+    let mut hints = Vec::new();
+    for (key, label) in keys {
+        if let Some(key) = key {
+            if !hints.is_empty() {
+                hints.push(" · ".dim());
+            }
+            hints.extend(key.spans());
+            hints.push(label.dim());
         }
     }
+    hints.into()
+}
+
+fn details(provider: &ModelProviderSummary) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::from(provider.name.clone().bold()), Line::default()];
+    let mut field = |label: &str, value: &str| {
+        lines.push(Line::from(vec![
+            format!("{label}  ").bold(),
+            value.to_owned().into(),
+        ]));
+    };
+    field("Provider ID", &provider.id);
+    if matches!(provider.settings, ProviderSettings::Provider) {
+        field("Type", "Built-in Provider provider");
+    }
+    for (kind, value) in provider_fields(provider) {
+        let absent = match kind {
+            Field::Url | Field::ManagedUrl => "Not reported",
+            Field::ExternalAuth => "Managed externally",
+            Field::Variable => "None",
+            _ => "Not set",
+        };
+        field(kind.label(), value.unwrap_or(absent));
+    }
+    lines
 }
 
 #[cfg(test)]

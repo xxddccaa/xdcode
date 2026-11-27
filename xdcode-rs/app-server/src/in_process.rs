@@ -45,7 +45,9 @@ use std::io::Error as IoError;
 use std::io::ErrorKind;
 use std::io::Result as IoResult;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::RwLock;
+use std::sync::Weak;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -85,19 +87,23 @@ use xdcode_app_server_protocol::RequestId;
 use xdcode_app_server_protocol::Result;
 use xdcode_app_server_protocol::ServerNotification;
 use xdcode_app_server_protocol::ServerRequest;
-use xdcode_app_server_protocol::ThreadItem;
+use xdcode_app_server_protocol::ThreadItemPayload;
 use xdcode_arg0::Arg0DispatchPaths;
 use xdcode_config::CloudConfigBundleLoader;
 use xdcode_config::LoaderOverrides;
 use xdcode_config::ThreadConfigLoader;
+use xdcode_core::ThreadManager;
 use xdcode_core::check_execpolicy_for_warnings;
 use xdcode_core::config::Config;
 use xdcode_core::resolve_installation_id;
 use xdcode_exec_server::EnvironmentManager;
 use xdcode_feedback::XdcodeFeedback;
+use xdcode_protocol::ThreadId;
+use xdcode_protocol::models::PermissionProfile;
 use xdcode_protocol::protocol::SessionSource;
 pub use xdcode_rollout::StateDbHandle;
 pub use xdcode_state::log_db::LogDbLayer;
+use xdcode_utils_path_uri::PathUri;
 
 #[path = "in_process_bootstrap.rs"]
 mod bootstrap;
@@ -122,8 +128,11 @@ fn server_notification_requires_delivery(notification: &ServerNotification) -> b
             | ServerNotification::ThreadAttachmentUpdated(_)
             | ServerNotification::ExternalAgentConfigImportCompleted(_)
             | ServerNotification::ItemCompleted(ItemCompletedNotification {
-                item: ThreadItem::AgentMessage {
-                    delivery: Some(AgentMessageDelivery::Async),
+                item: xdcode_app_server_protocol::ThreadItem {
+                    payload: ThreadItemPayload::AgentMessage {
+                        delivery: Some(AgentMessageDelivery::Async),
+                        ..
+                    },
                     ..
                 },
                 ..
@@ -189,9 +198,9 @@ pub enum InProcessServerEvent {
 
 /// Internal message sent from [`InProcessClientHandle`] methods to the runtime task.
 ///
-/// Requests carry a oneshot sender for the response; notifications and server-request
-/// replies are fire-and-forget from the caller's perspective (transport errors are
-/// caught by `try_send` on the outer channel).
+/// Requests carry a oneshot sender for the response. Startup notifications can
+/// acknowledge processing; ordinary notifications and server-request replies are
+/// fire-and-forget (transport errors are caught by `try_send` on the outer channel).
 enum InProcessClientMessage {
     Request {
         request: Box<ClientRequest>,
@@ -200,6 +209,7 @@ enum InProcessClientMessage {
     },
     Notification {
         notification: ClientNotification,
+        processed_tx: Option<oneshot::Sender<()>>,
     },
     ServerRequestResponse {
         request_id: RequestId,
@@ -216,7 +226,59 @@ enum InProcessClientMessage {
 
 enum ProcessorCommand {
     Request(Box<ClientRequest>, tokio_util::sync::CancellationToken),
-    Notification(ClientNotification),
+    Notification {
+        notification: ClientNotification,
+        processed_tx: Option<oneshot::Sender<()>>,
+    },
+}
+
+/// Effective permissions and workspace roots reported by a loaded embedded thread.
+pub struct ThreadPermissions {
+    pub profile: PermissionProfile,
+    pub workspace_roots: Vec<PathUri>,
+}
+
+/// Read access to effective permissions in a single embedded app-server runtime.
+#[derive(Clone, Default)]
+pub struct ThreadPermissionsReader {
+    thread_manager: Arc<OnceLock<Weak<ThreadManager>>>,
+}
+
+impl ThreadPermissionsReader {
+    pub async fn read(&self, thread_id: ThreadId) -> IoResult<ThreadPermissions> {
+        let thread_manager = self
+            .thread_manager
+            .get()
+            .and_then(Weak::upgrade)
+            .ok_or_else(|| {
+                IoError::new(
+                    ErrorKind::BrokenPipe,
+                    "in-process app-server runtime is closed",
+                )
+            })?;
+        let thread = thread_manager
+            .get_thread(thread_id)
+            .await
+            .map_err(|err| IoError::new(ErrorKind::NotFound, err))?;
+        let snapshot = thread.config_snapshot().await;
+        let mut seen = HashSet::new();
+        let workspace_roots = snapshot
+            .workspace_roots
+            .iter()
+            .map(PathUri::from_abs_path)
+            .chain(
+                snapshot
+                    .profile_workspace_roots
+                    .iter()
+                    .map(|root| root.as_uri().clone()),
+            )
+            .filter(|root| seen.insert(root.to_string()))
+            .collect();
+        Ok(ThreadPermissions {
+            profile: snapshot.permission_profile,
+            workspace_roots,
+        })
+    }
 }
 
 #[derive(Clone)]
@@ -243,7 +305,10 @@ impl InProcessClientSender {
     }
 
     pub fn notify(&self, notification: ClientNotification) -> IoResult<()> {
-        self.try_send_client_message(InProcessClientMessage::Notification { notification })
+        self.try_send_client_message(InProcessClientMessage::Notification {
+            notification,
+            processed_tx: None,
+        })
     }
 
     pub fn respond_to_server_request(&self, request_id: RequestId, result: Result) -> IoResult<()> {
@@ -286,6 +351,7 @@ impl InProcessClientSender {
 /// request/response helpers, and surface-specific startup policy.
 pub struct InProcessClientHandle {
     client: InProcessClientSender,
+    thread_permissions_reader: ThreadPermissionsReader,
     event_rx: mpsc::Receiver<InProcessServerEvent>,
     runtime_handle: tokio::task::JoinHandle<()>,
     #[cfg(test)]
@@ -293,6 +359,10 @@ pub struct InProcessClientHandle {
 }
 
 impl InProcessClientHandle {
+    pub fn thread_permissions_reader(&self) -> ThreadPermissionsReader {
+        self.thread_permissions_reader.clone()
+    }
+
     /// Sends a typed client request into the in-process runtime.
     ///
     /// The returned value is a transport-level `IoResult` containing either a
@@ -376,9 +446,10 @@ impl InProcessClientHandle {
 
 /// Starts an in-process app-server runtime and performs initialize handshake.
 ///
-/// This function sends `initialize` followed by `initialized` before returning
-/// the handle, so callers receive a ready-to-use runtime. If initialize fails,
-/// the runtime is shut down and an `InvalidData` error is returned.
+/// This function waits for `initialize` and `initialized` to be processed before
+/// returning the handle, so callers receive a ready-to-use runtime. Rejected
+/// initialization shuts down the runtime and returns an `InvalidData` error.
+/// Transport failures while processing `initialized` also shut down the runtime.
 pub async fn start(mut args: InProcessStartArgs) -> IoResult<InProcessClientHandle> {
     if let Ok(Some(err)) = check_execpolicy_for_warnings(&args.config.config_layer_stack).await {
         let (path, range) = crate::exec_policy_warning_location(&err);
@@ -390,6 +461,7 @@ pub async fn start(mut args: InProcessStartArgs) -> IoResult<InProcessClientHand
         });
     }
     let initialize = args.initialize.clone();
+    // Keep embedded startup state off callers' stacks, which are smaller on Windows.
     let client = Box::pin(start_uninitialized(args)).await?;
 
     let initialize_response = client
@@ -405,7 +477,26 @@ pub async fn start(mut args: InProcessStartArgs) -> IoResult<InProcessClientHand
             format!("in-process initialize failed: {}", error.message),
         ));
     }
-    client.notify(ClientNotification::Initialized)?;
+    let (processed_tx, processed_rx) = oneshot::channel();
+    let initialized_result = async {
+        client
+            .client
+            .try_send_client_message(InProcessClientMessage::Notification {
+                notification: ClientNotification::Initialized,
+                processed_tx: Some(processed_tx),
+            })?;
+        processed_rx.await.map_err(|err| {
+            IoError::new(
+                ErrorKind::BrokenPipe,
+                format!("in-process initialized acknowledgment channel closed: {err}"),
+            )
+        })
+    }
+    .await;
+    if let Err(error) = initialized_result {
+        let _ = client.shutdown().await;
+        return Err(error);
+    }
 
     Ok(client)
 }
@@ -453,11 +544,21 @@ async fn start_uninitialized(mut args: InProcessStartArgs) -> IoResult<InProcess
     let installation_id = resolve_installation_id(&args.config.xdcode_home).await?;
     let (client_tx, mut client_rx) = mpsc::channel::<InProcessClientMessage>(channel_capacity);
     let (event_tx, event_rx) = mpsc::channel::<InProcessServerEvent>(channel_capacity);
+    let thread_permissions_reader = ThreadPermissionsReader::default();
+    let thread_manager = Arc::clone(&thread_permissions_reader.thread_manager);
 
     let runtime_handle = tokio::spawn(async move {
         let (outgoing_tx, outgoing_rx) = mpsc::channel::<OutgoingEnvelope>(channel_capacity);
-        let analytics_events_client =
-            analytics_events_client_from_config(Arc::clone(&auth_manager), args.config.as_ref());
+        let runtime_auth_slot = args
+            .config
+            .features
+            .enabled(xdcode_features::Feature::RuntimeAgentInstances)
+            .then(xdcode_runtime_agent_instance::RuntimeAuthSlot::default);
+        let analytics_events_client = analytics_events_client_from_config(
+            Arc::clone(&auth_manager),
+            args.config.as_ref(),
+            runtime_auth_slot.clone(),
+        );
         let analytics_events_flush_client = analytics_events_client.clone();
         // A client can be waiting for process/kill while nobody is polling next_event.
         let (process_reply_tx, mut process_reply_rx) = mpsc::channel(channel_capacity);
@@ -504,6 +605,7 @@ async fn start_uninitialized(mut args: InProcessStartArgs) -> IoResult<InProcess
         let processor_outgoing = Arc::clone(&outgoing_message_sender);
         let (processor_tx, mut processor_rx) = mpsc::channel::<ProcessorCommand>(channel_capacity);
         let mut processor_handle = tokio::spawn(async move {
+            let (startup_warnings_tx, mut startup_warnings_rx) = mpsc::unbounded_channel();
             let processor = Arc::new(MessageProcessor::new(MessageProcessorArgs {
                 cloud_skill_provider: None,
                 outgoing: Arc::clone(&processor_outgoing),
@@ -517,17 +619,20 @@ async fn start_uninitialized(mut args: InProcessStartArgs) -> IoResult<InProcess
                 log_db: args.log_db,
                 state_db: args.state_db,
                 config_warnings: args.config_warnings,
+                startup_warnings_tx,
                 session_source: args.session_source,
                 user_verification: Arc::new(crate::user_verification::Service::new(Arc::clone(
                     &auth_manager,
                 ))),
                 auth_manager,
+                runtime_auth_slot,
                 installation_id,
                 code_mode_session_provider: None,
                 rpc_transport: AppServerRpcTransport::InProcess,
                 remote_control_handle: None,
                 plugin_startup_tasks: Some(PluginStartupConfig::Current),
             }));
+            thread_manager.get_or_init(|| processor.thread_manager());
             let mut thread_created_rx = processor.thread_created_receiver();
             let session = Arc::new(ConnectionSessionState::new(
                 crate::transport::ConnectionOrigin::InProcess,
@@ -570,13 +675,19 @@ async fn start_uninitialized(mut args: InProcessStartArgs) -> IoResult<InProcess
                                     processor.send_initialize_notifications().await;
                                 }
                             }
-                            Some(ProcessorCommand::Notification(notification)) => {
+                            Some(ProcessorCommand::Notification { notification, processed_tx }) => {
                                 processor.process_client_notification(notification).await;
+                                if let Some(processed_tx) = processed_tx {
+                                    let _ = processed_tx.send(());
+                                }
                             }
                             None => {
                                 break;
                             }
                         }
+                    }
+                    Some(message) = startup_warnings_rx.recv(), if session.initialized() => {
+                        crate::startup_warnings::send_warning(&processor_outgoing, message).await;
                     }
                     created = thread_created_rx.recv(), if listen_for_threads => {
                         match created {
@@ -660,8 +771,8 @@ async fn start_uninitialized(mut args: InProcessStartArgs) -> IoResult<InProcess
                                 }
                             }
                         }
-                        Some(InProcessClientMessage::Notification { notification }) => {
-                            match processor_tx.try_send(ProcessorCommand::Notification(notification)) {
+                        Some(InProcessClientMessage::Notification { notification, processed_tx }) => {
+                            match processor_tx.try_send(ProcessorCommand::Notification { notification, processed_tx }) {
                                 Ok(()) => {}
                                 Err(mpsc::error::TrySendError::Full(_)) => {
                                     warn!("dropping in-process client notification (queue full)");
@@ -841,6 +952,7 @@ async fn start_uninitialized(mut args: InProcessStartArgs) -> IoResult<InProcess
 
     Ok(InProcessClientHandle {
         client: InProcessClientSender { client_tx },
+        thread_permissions_reader,
         event_rx,
         runtime_handle,
         #[cfg(test)]
@@ -1034,29 +1146,24 @@ wire_api = "responses"
         }
     }
 
+    #[test_case::test_case(0; "zero_capacity_is_clamped")]
+    #[test_case::test_case(1; "one_slot_capacity")]
     #[tokio::test]
-    async fn in_process_start_clamps_zero_channel_capacity() {
+    async fn in_process_start_accepts_immediate_request(channel_capacity: usize) {
         let client = start_test_client_with_options(
             SessionSource::Cli,
-            /*channel_capacity*/ 0,
+            channel_capacity,
             /*capabilities*/ None,
         )
         .await;
-        let response = loop {
-            match client
-                .request(ClientRequest::ConfigRequirementsRead {
-                    request_id: RequestId::Integer(4),
-                    params: None,
-                })
-                .await
-            {
-                Ok(response) => break response.expect("request should succeed"),
-                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                    tokio::task::yield_now().await;
-                }
-                Err(err) => panic!("request transport should work: {err}"),
-            }
-        };
+        let response = client
+            .request(ClientRequest::ConfigRequirementsRead {
+                request_id: RequestId::Integer(4),
+                params: None,
+            })
+            .await
+            .expect("the first request should not compete with the initialize handshake")
+            .expect("request should succeed");
         let _parsed: ConfigRequirementsReadResponse =
             serde_json::from_value(response).expect("response should match v2 schema");
         client
@@ -1106,6 +1213,7 @@ wire_api = "responses"
         });
         let client = InProcessClientHandle {
             client: InProcessClientSender { client_tx },
+            thread_permissions_reader: ThreadPermissionsReader::default(),
             event_rx,
             runtime_handle,
             _test_xdcode_home: None,
@@ -1159,8 +1267,11 @@ wire_api = "responses"
             })
         ));
         assert!(server_notification_requires_delivery(
-            &ServerNotification::ItemCompleted(ItemCompletedNotification {
-                item: ThreadItem::AgentMessage {
+            &ServerNotification::ItemCompleted(ItemCompletedNotification::new(
+                "thread-1".to_string(),
+                "turn-1".to_string(),
+                ThreadItemPayload::AgentMessage {
+                    moderation: None,
                     id: "item-1".to_string(),
                     text: "Still working".to_string(),
                     phase: None,
@@ -1168,10 +1279,9 @@ wire_api = "responses"
                     delivery: Some(AgentMessageDelivery::Async),
                     questions: None,
                 },
-                thread_id: "thread-1".to_string(),
-                turn_id: "turn-1".to_string(),
-                completed_at_ms: 0,
-            })
+                /*started_at_ms*/ None,
+                /*completed_at_ms*/ 0
+            ))
         ));
     }
 

@@ -30,7 +30,7 @@ impl ChatComposer {
         if !text.is_empty() && self.sparkle.draft.get() == sparkle::SparkleDraft::Untouched {
             self.dismiss_sparkle();
         }
-        let started_vim_edit = self.begin_direct_vim_edit();
+        let started_edit = self.begin_direct_edit();
         let elements_before = target
             .replaces_text()
             .then(|| self.draft.textarea.element_payloads());
@@ -45,8 +45,8 @@ impl ChatComposer {
             self.sync_bash_mode_from_text();
         }
         self.sync_popups();
-        if started_vim_edit {
-            self.finish_vim_edit();
+        if started_edit {
+            self.finish_edit();
         }
     }
 
@@ -92,6 +92,9 @@ impl ChatComposer {
     /// Classify an explicit paste before integrating text shared with the buffered key path.
     pub fn handle_paste(&mut self, pasted: String) -> bool {
         self.flush_pending_paste_burst();
+        if !self.draft.textarea.is_vim_enabled() {
+            self.finish_edit();
+        }
         self.note_sparkle_paste(&pasted);
         self.apply_paste(pasted)
     }
@@ -100,6 +103,31 @@ impl ChatComposer {
         if let Some(pasted) = self.draft.paste_burst.flush_before_modified_input() {
             self.apply_paste(pasted);
         }
+    }
+
+    pub(in crate::bottom_pane) fn paste_handoff_deadline(&self) -> Option<Instant> {
+        if self.draft.disable_paste_burst {
+            return None;
+        }
+        self.draft.paste_burst.handoff_deadline()
+    }
+
+    pub(in crate::bottom_pane) fn has_paste_window(&self, now: Instant) -> bool {
+        !self.draft.disable_paste_burst
+            && self
+                .draft
+                .paste_burst
+                .newline_should_insert_instead_of_submit(now)
+    }
+
+    /// Display flushed text without losing the window for its trailing paste keys.
+    pub(in crate::bottom_pane) fn flush_handoff_paste(&mut self, now: Instant) -> bool {
+        let deadline = self.paste_handoff_deadline();
+        let flushed = self.handle_paste_burst_flush(now);
+        if flushed && let Some(deadline) = deadline.filter(|deadline| *deadline >= now) {
+            self.draft.paste_burst.preserve_window_until(deadline);
+        }
+        flushed
     }
 
     /// Enable or disable paste-burst handling.
@@ -143,17 +171,20 @@ impl ChatComposer {
         match self.draft.paste_burst.flush_if_due(now) {
             FlushResult::Paste(pasted) => {
                 self.apply_paste(pasted);
+                if !self.draft.textarea.is_vim_enabled() {
+                    self.finish_edit();
+                }
                 true
             }
             FlushResult::Typed(ch) => {
                 let completion_space = self.draft.skill_completion_space_for_char(ch);
-                let started_vim_edit = completion_space.is_some() && self.begin_direct_vim_edit();
+                let started_edit = completion_space.is_some() && self.begin_direct_edit();
                 if let Some(space) = completion_space {
                     self.draft.textarea.replace_range(space..space + 1, "");
                 }
                 self.insert_str(ch.to_string().as_str());
-                if started_vim_edit {
-                    self.finish_vim_edit();
+                if started_edit || !self.draft.textarea.is_vim_enabled() {
+                    self.finish_edit();
                 }
                 true
             }
@@ -203,7 +234,7 @@ impl ChatComposer {
             return true;
         }
         self.draft.textarea_state.get_mut().follow_cursor();
-        let started_vim_edit = self.begin_direct_vim_edit();
+        let started_edit = self.begin_direct_edit();
         let elements_before = self.draft.textarea.element_payloads();
         let target = self.draft.textarea.edit_target();
         let before_cursor = &self.draft.textarea.text()[..target.start()];
@@ -246,18 +277,20 @@ impl ChatComposer {
         self.draft.paste_burst.clear_after_explicit_paste();
         self.reconcile_deleted_elements(elements_before);
         self.sync_popups();
-        if started_vim_edit {
-            self.finish_vim_edit();
+        if started_edit {
+            self.finish_edit();
         }
         true
     }
 
     pub(super) fn handle_paste_tab(&mut self, key: KeyEvent, now: Instant) -> bool {
-        if key.code != KeyCode::Tab
-            || !key.modifiers.is_empty()
-            || self.draft.disable_paste_burst
-            || !self.draft.textarea.allows_paste_burst()
-        {
+        key.code == KeyCode::Tab
+            && key.modifiers.is_empty()
+            && self.append_recent_paste_separator('\t', now)
+    }
+
+    pub(super) fn append_recent_paste_separator(&mut self, separator: char, now: Instant) -> bool {
+        if self.draft.disable_paste_burst || !self.draft.textarea.allows_paste_burst() {
             return false;
         }
 
@@ -265,8 +298,9 @@ impl ChatComposer {
         if self
             .draft
             .paste_burst
-            .append_control_char_if_active('\t', now)
+            .append_control_char_if_active(separator, now)
         {
+            self.begin_promoted_paste_edit();
             return true;
         }
 
@@ -282,7 +316,7 @@ impl ChatComposer {
             return self
                 .draft
                 .paste_burst
-                .append_control_char_if_active('\t', now);
+                .append_control_char_if_active(separator, now);
         }
 
         false

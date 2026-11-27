@@ -1,8 +1,12 @@
-//! Snapshots pending mail across remote compaction, restart, and normal inference.
+//! Snapshots context retention across compaction, interruption, restart, and normal inference.
 
 use super::*;
+use core_test_support::responses::ev_function_call;
 use core_test_support::responses::strip_metadata_from_json;
+use core_test_support::streaming_sse::StreamingSseChunk;
+use core_test_support::streaming_sse::start_streaming_sse_server;
 use pretty_assertions::assert_eq;
+use xdcode_protocol::turn_input::InjectedResponseItem;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn remote_slash_compact_preserves_context_across_windows() -> Result<()> {
@@ -37,17 +41,12 @@ async fn remote_slash_compact_preserves_context_across_windows() -> Result<()> {
     .await;
     let configure = |config: &mut Config| {
         configure_scenario_catalog(config);
-        config.model_provider.capabilities =
-            Some(xdcode_model_provider_info::ModelProviderCapabilities {
-                remote_compaction: Some(xdcode_model_provider_info::RemoteCompactionSupport::V2),
-                ..Default::default()
-            });
         config.workspace_roots = vec![config.cwd.clone()];
         config.model_auto_compact_token_limit = Some(i64::MAX);
     };
     let mut builder = test_xdcode()
         .with_model("gpt-6-astra")
-        .with_auth(XdcodeAuth::from_api_key("xdcode-test-credential"))
+        .with_auth(XdcodeAuth::create_dummy_chatgpt_auth_for_testing())
         .with_config(configure);
     let mut test = builder.build_with_auto_env(&server).await?;
 
@@ -57,8 +56,20 @@ async fn remote_slash_compact_preserves_context_across_windows() -> Result<()> {
         "author": "/root/worker", "recipient": "/root",
         "content": [{"type": "input_text", "text": "Message Type: FINAL_ANSWER\nThe worker found a release blocker."}],
     });
+    let call: InjectedResponseItem = serde_json::from_value(json!({
+        "item": {"type": "function_call", "call_id": "release-check", "name": "check_release", "arguments": "{}"},
+        "retention": "always"
+    }))?;
+    let result: InjectedResponseItem = serde_json::from_value(json!({
+        "item": {"type": "function_call_output", "call_id": "release-check", "output": "The release candidate passed."},
+        "retention": "always"
+    }))?;
     test.xdcode
-        .inject_response_items(vec![serde_json::from_value(mail.clone())?])
+        .inject_response_items_with_retention(vec![
+            call,
+            result,
+            serde_json::from_value::<ResponseItem>(mail.clone())?.into(),
+        ])
         .await?;
     for compaction in 0..2 {
         test.xdcode.submit(Op::Compact).await?;

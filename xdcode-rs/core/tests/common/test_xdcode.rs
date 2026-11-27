@@ -19,11 +19,15 @@ use futures::future::BoxFuture;
 use serde_json::Value;
 use tempfile::TempDir;
 use wiremock::MockServer;
+use xdcode_agent_graph_store::AgentGraphStore;
 use xdcode_analytics::AnalyticsEventsClient;
 use xdcode_attachment_store::AttachmentStore;
 use xdcode_config::CloudConfigBundleLoader;
+use xdcode_config::ConfigLayerSource;
+use xdcode_config::ConfigLayerStack;
 pub use xdcode_core::StartThreadOptions;
 use xdcode_core::ThreadManager;
+use xdcode_core::ThreadStoreBuilder;
 use xdcode_core::TimeProvider;
 pub use xdcode_core::TurnInputRequest;
 use xdcode_core::XdcodeThread;
@@ -31,7 +35,6 @@ use xdcode_core::config::Config;
 use xdcode_core::resolve_installation_id;
 use xdcode_core::shell::Shell;
 use xdcode_core::shell::get_shell_by_model_provided_path;
-use xdcode_core::thread_store_from_config_with_cleanup;
 use xdcode_core::windows_sandbox::WindowsSandboxLevelExt;
 use xdcode_exec_server::CreateDirectoryOptions;
 use xdcode_exec_server::ExecutorFileSystem;
@@ -46,6 +49,7 @@ use xdcode_login::AuthManager;
 use xdcode_login::XdcodeAuth;
 use xdcode_model_provider_info::ModelProviderInfo;
 use xdcode_models_manager::bundled_models_response;
+use xdcode_models_manager::manager::ModelCatalogSettings;
 use xdcode_models_manager::manager::SharedModelsManager;
 use xdcode_protocol::config_types::CollaborationMode;
 use xdcode_protocol::config_types::ModeKind;
@@ -404,6 +408,8 @@ impl TestAuth {
 }
 
 pub struct TestXdcodeBuilder {
+    request_country: xdcode_protocol::RequestCountry,
+    apps_tools_cache: xdcode_core::XdcodeAppsToolsCache,
     config_mutators: Vec<Box<ConfigMutator>>,
     thread_manager_configurer: Option<Box<dyn FnOnce(ThreadManager) -> ThreadManager + Send>>,
     auth: TestAuth,
@@ -421,13 +427,34 @@ pub struct TestXdcodeBuilder {
     code_mode_host_program: Option<PathBuf>,
     history_mode: Option<ThreadHistoryMode>,
     models_manager: Option<SharedModelsManager>,
+    model_catalog_settings: Option<ModelCatalogSettings>,
     thread_store: Option<Arc<dyn ThreadStore>>,
+    agent_graph_store: Option<Arc<dyn AgentGraphStore>>,
     image_store: Arc<dyn AttachmentStore>,
 }
 
 impl TestXdcodeBuilder {
+    /// Set the initial country when creating a new thread.
+    pub fn with_request_country(
+        mut self,
+        request_country: xdcode_protocol::RequestCountry,
+    ) -> Self {
+        self.request_country = request_country;
+        self
+    }
+
+    pub fn with_apps_tools_cache(mut self, cache: xdcode_core::XdcodeAppsToolsCache) -> Self {
+        self.apps_tools_cache = cache;
+        self
+    }
+
     pub fn with_thread_store(mut self, thread_store: Arc<dyn ThreadStore>) -> Self {
         self.thread_store = Some(thread_store);
+        self
+    }
+
+    pub fn with_agent_graph_store(mut self, agent_graph_store: Arc<dyn AgentGraphStore>) -> Self {
+        self.agent_graph_store = Some(agent_graph_store);
         self
     }
 
@@ -462,6 +489,11 @@ impl TestXdcodeBuilder {
         analytics_events_client: AnalyticsEventsClient,
     ) -> Self {
         self.analytics_events_client = Some(analytics_events_client);
+        self
+    }
+
+    pub fn with_model_catalog_settings(mut self, settings: ModelCatalogSettings) -> Self {
+        self.model_catalog_settings = Some(settings);
         self
     }
 
@@ -833,16 +865,18 @@ impl TestXdcodeBuilder {
         let state_db = xdcode_core::init_state_db(&config).await;
         let thread_store = self.thread_store.clone().unwrap_or_else(|| {
             let sqlite = config.sqlite_config().clone();
-            thread_store_from_config_with_cleanup(&config, state_db.clone(), move |thread_ids| {
-                let sqlite = sqlite.clone();
-                Box::pin(async move {
-                    xdcode_agent_message_board_host::delete_agent_message_boards(
-                        &sqlite,
-                        &thread_ids,
-                    )
-                    .await
+            ThreadStoreBuilder::from_config(&config, state_db.clone())
+                .with_additional_cleanup(move |thread_ids| {
+                    let sqlite = sqlite.clone();
+                    Box::pin(async move {
+                        xdcode_agent_message_board_host::delete_agent_message_boards(
+                            &sqlite,
+                            &thread_ids,
+                        )
+                        .await
+                    })
                 })
-            })
+                .build()
         });
         let installation_id = resolve_installation_id(&config.xdcode_home).await?;
         let user_instructions_provider =
@@ -852,14 +886,23 @@ impl TestXdcodeBuilder {
                 ))
             });
         let auth_manager = self.auth.manager_for_home(config.xdcode_home.as_path());
-        let models_manager = self
-            .models_manager
-            .clone()
-            .unwrap_or_else(|| xdcode_core::build_models_manager(&config, auth_manager.clone()));
         let code_mode_host_program = self
             .code_mode_host_program
             .take()
             .or_else(|| xdcode_utils_cargo_bin::cargo_bin("xdcode-code-mode-host").ok());
+        let factory =
+            match &self.models_manager {
+                Some(models) => xdcode_core::test_support::fixed_model_catalog(Arc::clone(models)),
+                None => Arc::new(self.model_catalog_settings.clone().unwrap_or_else(|| {
+                    ModelCatalogSettings::disk(config.xdcode_home.to_path_buf())
+                })),
+            };
+        let startup = xdcode_core::build_startup_models(
+            &config,
+            Arc::clone(&auth_manager),
+            installation_id,
+            factory,
+        );
         let thread_manager = Arc::new_cyclic(|manager| {
             let mut extensions = self.extensions.to_builder();
             xdcode_agent_message_board_host::install_agent_message_board(
@@ -873,9 +916,8 @@ impl TestXdcodeBuilder {
             }
             let thread_manager = ThreadManager::new(
                 &config,
-                auth_manager.clone(),
-                models_manager,
-                xdcode_core::XdcodeAppsToolsCache::default(),
+                startup,
+                self.apps_tools_cache.clone(),
                 SessionSource::Exec,
                 Arc::clone(&environment_manager),
                 Arc::new(extensions.build()),
@@ -883,8 +925,9 @@ impl TestXdcodeBuilder {
                 self.analytics_events_client.clone(),
                 Arc::clone(&self.image_store),
                 Arc::clone(&thread_store),
-                xdcode_core::local_agent_graph_store_from_state_db(state_db.as_ref()),
-                installation_id,
+                self.agent_graph_store.clone().or_else(|| {
+                    xdcode_core::local_agent_graph_store_from_state_db(state_db.as_ref())
+                }),
                 /*attestation_provider*/ None,
                 /*external_time_provider*/ self.external_time_provider.clone(),
             );
@@ -966,6 +1009,7 @@ impl TestXdcodeBuilder {
                     None
                 };
                 Box::pin(thread_manager.start_thread(StartThreadOptions {
+                    request_country: self.request_country.clone(),
                     history_mode: self.history_mode,
                     client_mcp_extensions: client_mcp_extensions(),
                     environments: environment_requests,
@@ -1040,6 +1084,24 @@ impl TestXdcodeBuilder {
 
         Ok((config, cwd))
     }
+}
+
+pub fn configure_scenario_catalog(config: &mut Config) {
+    // Keep the fixture independent of the checkout's project configuration.
+    let stack = &config.config_layer_stack;
+    config.config_layer_stack = ConfigLayerStack::new(
+        stack
+            .all_layers_low_to_high()
+            .filter(|layer| !matches!(&layer.name, ConfigLayerSource::Project { .. }))
+            .cloned()
+            .collect(),
+        stack.requirements().clone(),
+        stack.requirements_toml().clone(),
+    )
+    .expect("fixture config layers")
+    .with_cloud_config_binding(stack.cloud_config_binding().cloned());
+    config.model_catalog = Some(bundled_models_response().expect("bundled model catalog"));
+    config.cloud_skill_enabled = false;
 }
 
 fn ensure_test_model_catalog(config: &mut Config) -> Result<()> {
@@ -1535,6 +1597,8 @@ fn function_call_output<'a>(bodies: &'a [Value], call_id: &str) -> &'a Value {
 
 pub fn test_xdcode() -> TestXdcodeBuilder {
     TestXdcodeBuilder {
+        request_country: Default::default(),
+        apps_tools_cache: Default::default(),
         thread_manager_configurer: None,
         config_mutators: vec![Box::new(|config| {
             config
@@ -1563,7 +1627,9 @@ pub fn test_xdcode() -> TestXdcodeBuilder {
         // These fixtures exercise legacy-only resume/fork helpers; store-default tests opt out.
         history_mode: Some(ThreadHistoryMode::Legacy),
         models_manager: None,
+        model_catalog_settings: None,
         thread_store: None,
+        agent_graph_store: None,
         image_store: xdcode_core::passthrough_image_store(),
     }
 }

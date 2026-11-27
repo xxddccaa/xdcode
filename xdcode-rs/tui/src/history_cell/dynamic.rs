@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::sync::RwLock;
 use xdcode_app_server_protocol::DynamicToolCallOutputContentItem;
 use xdcode_app_server_protocol::DynamicToolCallStatus;
-use xdcode_app_server_protocol::ThreadItem;
+use xdcode_app_server_protocol::ThreadItemPayload;
 
 #[derive(Clone, Debug)]
 pub(crate) struct DynamicToolCallCell {
@@ -36,7 +36,7 @@ struct DynamicToolCallData {
 }
 
 impl DynamicToolCallCell {
-    pub(crate) fn from_item(item: ThreadItem) -> Option<Self> {
+    pub(crate) fn from_item(item: ThreadItemPayload) -> Option<Self> {
         let (call_id, data) = DynamicToolCallData::from_item(item)?;
         Some(Self {
             call_id,
@@ -56,7 +56,7 @@ impl DynamicToolCallCell {
     }
 
     /// Updates the original retained row when concurrent calls complete in a different order.
-    pub(crate) fn update_from_item(&self, item: ThreadItem) -> bool {
+    pub(crate) fn update_from_item(&self, item: ThreadItemPayload) -> bool {
         let Some((call_id, data)) = DynamicToolCallData::from_item(item) else {
             return false;
         };
@@ -87,8 +87,8 @@ impl DynamicToolCallCell {
 }
 
 impl DynamicToolCallData {
-    fn from_item(item: ThreadItem) -> Option<(String, Self)> {
-        let ThreadItem::DynamicToolCall {
+    fn from_item(item: ThreadItemPayload) -> Option<(String, Self)> {
+        let ThreadItemPayload::DynamicToolCall {
             id,
             namespace,
             tool,
@@ -173,6 +173,19 @@ impl DynamicToolCallData {
 }
 
 impl HistoryCell for DynamicToolCallCell {
+    fn tool_call_labels(&self) -> Vec<String> {
+        let data = self
+            .data
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        vec![
+            data.header()
+                .to_string()
+                .trim_start_matches("• ")
+                .to_owned(),
+        ]
+    }
+
     fn has_stable_transcript_height(&self) -> bool {
         false
     }

@@ -33,6 +33,8 @@ use std::thread::sleep;
 use std::thread::spawn;
 use std::time::Duration;
 
+use crate::local_stdio_io;
+use crate::local_stdio_transport::DiscoveryOutcome;
 use anyhow::Result;
 use anyhow::anyhow;
 use futures::FutureExt;
@@ -74,8 +76,6 @@ use xdcode_utils_pty::process_group::terminate_process_group;
 use xdcode_utils_pty::process_group::wait_for_process_group_exit;
 
 use crate::executor_process_transport::ExecutorProcessTransport;
-use crate::local_stdio_io;
-use crate::local_stdio_transport::DiscoveryOutcome;
 use crate::local_stdio_transport::LocalStdioTransport;
 use crate::program_resolver;
 use crate::protocol_mode::McpProtocolMode;
@@ -137,6 +137,8 @@ impl DiscoveryCleanup {
     fn start(&self, runtime: &Handle, reason: StdioTermination) -> &DiscoveryCleanupResult {
         self.result.get_or_init(|| {
             let process = self.process.upgrade();
+            // The owner waits for this worker on shutdown. Its grace periods must also advance
+            // when the caller leaves a current-thread runtime idle.
             runtime
                 .spawn_blocking(move || {
                     process
@@ -228,6 +230,8 @@ impl Transport<RoleClient> for StdioServerTransport {
 
 impl Drop for StdioServerTransport {
     fn drop(&mut self) {
+        // A client or handshake still holding this result may retry after the SDK drops a
+        // failed transport. Otherwise the process handle runs its ordinary shutdown on drop.
         if let Some(cleanup) = &self.discovery_cleanup
             && Arc::strong_count(cleanup) > 1
             && !self.process.terminated.load(Ordering::Acquire)
@@ -334,6 +338,8 @@ impl StdioServerLauncher for LocalStdioServerLauncher {
     ) -> BoxFuture<'static, io::Result<StdioServerTransport>> {
         let fallback_cwd = self.fallback_cwd.clone();
         async move {
+            // Cancel queued launches when startup is dropped. A worker that already started
+            // drops its transport and cleans up the child when it finishes.
             AbortOnDropHandle::new(tokio::task::spawn_blocking(move || {
                 Self::launch_server(command, fallback_cwd)
             }))
@@ -359,6 +365,7 @@ const STDERR_READER_DRAIN_GRACE_PERIOD: Duration = Duration::from_millis(250);
 #[cfg(unix)]
 enum LocalProcessTerminator {
     ProcessGroup(u32),
+    // The SDK may drop the failed transport before the caller can decide whether to restart it.
     DiscoveryLeader {
         leader: Mutex<Option<Box<Child>>>,
         runtime: Handle,
@@ -376,6 +383,7 @@ impl KillDiscoveryGroupOnDrop {
     }
 
     fn kill(&self) -> io::Result<()> {
+        // Runtime teardown must wait for a timer that has already started sending the signal.
         let mut leader = self
             .0
             .lock()
@@ -488,6 +496,7 @@ impl LocalStdioServerLauncher {
             }
         };
 
+        // The async caller can be cancelled while this blocking worker is inside spawn.
         let slot = replacement_slot.as_ref().map(|slot| slot.blocking_lock());
         if slot.as_ref().is_some_and(|slot| slot.closed) {
             return Err(io::Error::new(
@@ -520,11 +529,13 @@ impl LocalStdioServerLauncher {
         #[cfg(windows)]
         let protocol_mode = if job.is_none() && protocol_mode == McpProtocolMode::DiscoverLocalStdio
         {
+            // A probe can require a restart. Without a job we cannot stop its descendants.
             McpProtocolMode::Legacy
         } else {
             protocol_mode
         };
         let process_id = stdio.child.id();
+        // A legacy replacement still belongs to the discovery startup that launched it.
         let discovery_owned = (protocol_mode == McpProtocolMode::DiscoverLocalStdio
             || replacement_slot.is_some())
             && process_id.is_some();
@@ -636,6 +647,8 @@ impl LocalProcessTerminator {
             .id()
             .ok_or_else(|| io::Error::other("missing Unix MCP discovery leader PID"))?;
         let cleanup = KillDiscoveryGroupOnDrop::new(child);
+        // A failed transport closed stdin. Let the helper release its endpoint before TERM,
+        // and reserve its PID through the last group signal.
         let term_grace = match reason {
             StdioTermination::Restart => {
                 sleep(RESTART_DRAIN_GRACE_PERIOD);
@@ -644,6 +657,7 @@ impl LocalProcessTerminator {
             StdioTermination::Shutdown => PROCESS_GROUP_TERM_GRACE_PERIOD,
         };
         if terminate_process_group(pid)? {
+            // A wrapper may exit before a child handling SIGTERM has released its own endpoint.
             wait_for_process_group_exit(pid, term_grace);
         }
         cleanup.kill()?;
@@ -687,6 +701,7 @@ impl LocalProcessTerminator {
                 }));
                 (on_timeout, finished)
             });
+            // A caller can leave a current-thread runtime idle for the entire grace period.
             spawn(move || {
                 sleep(PROCESS_GROUP_TERM_GRACE_PERIOD);
                 if let Some((on_timeout, finished)) = discovery {
@@ -777,6 +792,7 @@ impl StdioServerProcessHandle {
         let StdioServerProcessKind::Local(Some(terminator)) = &self.kind else {
             return Err(io::Error::other("missing local MCP discovery process"));
         };
+        // Stop an uncontained replacement, but don't permit a retry on it.
         terminator
             .terminate_discovery(reason)
             .inspect_err(|_| terminator.terminate())
@@ -1021,6 +1037,44 @@ mod tests {
     use xdcode_protocol::config_types::EnvironmentVariablePattern;
     use xdcode_protocol::config_types::ShellEnvironmentPolicy;
     use xdcode_protocol::shell_environment;
+
+    #[cfg(windows)]
+    #[test]
+    fn idle_local_mcp_pipe_reads_leave_blocking_io_available() -> anyhow::Result<()> {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .max_blocking_threads(1)
+            .enable_all()
+            .build()?;
+        runtime.block_on(async {
+            let cwd = std::env::current_dir()?;
+            let launcher = LocalStdioServerLauncher::new(cwd.clone());
+            for mode in [McpProtocolMode::Legacy, McpProtocolMode::V20260728] {
+                // set /p waits for stdin and leaves both output pipes open and quiet.
+                let command = StdioServerCommand::new(
+                    "cmd.exe".into(),
+                    ["/d", "/q", "/c", "set /p idle="]
+                        .map(OsString::from)
+                        .into(),
+                    None,
+                    Vec::new(),
+                    None,
+                    mode,
+                );
+                let mut transport = launcher.launch(command).await?;
+                // Poll the stdout read before scheduling the filesystem operation. The
+                // launcher also drains stderr. A blocking read can occupy the only slot.
+                let pending = transport.receive().now_or_never().is_none();
+                let metadata =
+                    tokio::time::timeout(Duration::from_secs(5), tokio::fs::metadata(&cwd)).await;
+                // Release the child even on the failing, pre-fix path.
+                transport.close().await?;
+                anyhow::ensure!(pending, "helper exited before its idle read");
+                metadata??;
+            }
+            Ok(())
+        })
+    }
 
     #[test]
     fn remote_env_policy_uses_core_env_without_remote_source_vars() {

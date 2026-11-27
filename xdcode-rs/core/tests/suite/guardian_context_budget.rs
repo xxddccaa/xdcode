@@ -26,6 +26,7 @@ use xdcode_core::config::RolloutBudgetConfig;
 use xdcode_core::context::GuardianContextMode;
 use xdcode_extension_api::ExtensionRegistryBuilder;
 use xdcode_features::Feature;
+use xdcode_guardian_context::MAX_TEXT_PART_ESTIMATED_TOKENS;
 use xdcode_history::RolloutItem;
 use xdcode_protocol::config_types::ApprovalsReviewer;
 use xdcode_protocol::model_types::AutoReviewMessages;
@@ -35,6 +36,7 @@ use xdcode_protocol::protocol::AskForApproval;
 use xdcode_protocol::protocol::EventMsg;
 use xdcode_protocol::protocol::Op;
 use xdcode_protocol::protocol::ReviewDecision;
+use xdcode_protocol::protocol::TruncationPolicy;
 use xdcode_protocol::user_input::UserInput;
 
 use super::image_rollout::RecordingFileAttachmentStore;
@@ -277,7 +279,9 @@ async fn review_respects_complete_context_budget(
                 .expect("test permits time reminders");
             config.current_time_reminder = Some(CurrentTimeReminderConfig::default());
             config.rollout_budget = Some(RolloutBudgetConfig {
-                limit_tokens: 1_000_000,
+                enforce_limit: true,
+                limit_budget: 1_000_000.0,
+                reminder_at_context_start: true,
                 reminder_at_remaining_tokens: Vec::new(),
                 sampling_token_weight: 1.0,
                 prefill_token_weight: 1.0,
@@ -698,11 +702,26 @@ async fn oversized_action_preserves_review_policy_and_next_review(
         "justification": "Run the requested command.",
     })
     .to_string();
+    let assistant_evidence = [
+        "commentary evidence ".repeat(/*n*/ 1_300),
+        "final evidence ".repeat(/*n*/ 1_600),
+    ];
+    let mut parent_events = Vec::new();
+    if matches!(review, OversizedActionReview::Fits) {
+        let mut commentary = ev_assistant_message("history-commentary", &assistant_evidence[0]);
+        commentary["item"]["phase"] = json!("commentary");
+        parent_events.push(commentary);
+        parent_events.push(ev_assistant_message(
+            "history-final",
+            &assistant_evidence[1],
+        ));
+    }
+    parent_events.extend([
+        ev_function_call("oversized", "exec_command", &oversized),
+        ev_completed("oversized"),
+    ]);
     let mut events = vec![
-        sse(vec![
-            ev_function_call("oversized", "exec_command", &oversized),
-            ev_completed("oversized"),
-        ]),
+        sse(parent_events),
         sse(vec![
             ev_function_call("next", "exec_command", &next),
             ev_completed("next"),
@@ -800,8 +819,21 @@ async fn oversized_action_preserves_review_policy_and_next_review(
     assert_eq!(reviews.len(), if fits { 2 } else { 1 });
     if fits {
         let parts = reviews[0].message_input_texts("user");
-        assert!(parts.concat().contains(&oversized_command));
-        assert!(parts.iter().all(|part| part.len() <= 36_000));
+        let context = parts.concat();
+        assert!(context.contains(&oversized_command));
+        assert!(parts.iter().all(|part| part.len()
+            <= TruncationPolicy::Tokens(MAX_TEXT_PART_ESTIMATED_TOKENS).byte_budget()));
+        let transcript = context
+            .split_once(">>> TRANSCRIPT START\n")
+            .expect("full transcript")
+            .1
+            .split_once(">>> TRANSCRIPT END\n")
+            .expect("full transcript end")
+            .0;
+        for text in &assistant_evidence {
+            let capped = xdcode_guardian_context::truncate_text(text, /*max_tokens*/ 5_000);
+            assert!(transcript.contains(&format!("assistant: {capped}\n")));
+        }
     }
     let context = reviews
         .last()
@@ -809,6 +841,9 @@ async fn oversized_action_preserves_review_policy_and_next_review(
         .message_input_texts("user")
         .concat();
     assert!(context.contains("echo complete-action-review"));
+    let historical_arguments =
+        xdcode_guardian_context::truncate_text(&oversized, /*max_tokens*/ 1_000);
+    assert!(context.contains(&format!("tool exec_command call: {historical_arguments}\n")));
     assert!(
         requests
             .last()

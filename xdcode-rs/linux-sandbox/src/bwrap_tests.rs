@@ -3,6 +3,8 @@
 use super::*;
 
 use pretty_assertions::assert_eq;
+use std::ffi::OsString;
+use std::os::unix::ffi::OsStringExt;
 use tempfile::TempDir;
 use xdcode_protocol::models::PermissionProfile;
 use xdcode_protocol::protocol::FileSystemAccessMode;
@@ -1438,7 +1440,7 @@ fn unreadable_globs_expand_existing_matches_with_configured_depth() {
             expand_unreadable_globs(
                 &[format!("{}/{glob}", temp_dir.path().display())],
                 temp_dir.path(),
-                Some(2),
+                /*max_depth*/ Some(2),
             )
             .expect("expand scanner glob"),
             expected
@@ -1480,18 +1482,45 @@ fn unreadable_glob_root_metadata_errors_fail_before_scanning() {
     let temp_dir = TempDir::new().expect("temp dir");
     let root = temp_dir.path().join("loop");
     std::os::unix::fs::symlink(&root, &root).expect("create symlink loop");
-    let error = expand_unreadable_globs_with_ripgrep(
-        &[format!("{}.env", root.display())],
+    let error = expand_unreadable_globs(
+        &[format!("{}/**/.env", root.display())],
         temp_dir.path(),
-        || Some(temp_dir.path().join("scanner-must-not-run")),
-        None,
-        |_| panic!("scanner must not run after a root metadata error"),
+        /*max_depth*/ None,
     )
     .expect_err("metadata errors must reject deny-glob expansion")
     .to_string();
 
     assert!(error.contains(&root.display().to_string()));
     assert!(error.contains(&io::Error::from_raw_os_error(libc::ELOOP).to_string()));
+}
+
+#[test]
+fn unreadable_glob_traversal_errors_fail_closed() {
+    use std::os::unix::fs::PermissionsExt;
+
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("skipping permission fixture as root");
+        return;
+    }
+    let temp = TempDir::new().expect("temp dir");
+    let denied = temp.path().join("denied");
+    fs::create_dir(&denied).expect("create denied directory");
+    fs::set_permissions(&denied, fs::Permissions::from_mode(0o0)).expect("deny traversal");
+    // Keep the denied directory within the scan depth: ignore versions differ
+    // on whether parallel walks report errors at the depth boundary.
+    let results = [None, Some(2)].map(|max_depth| {
+        expand_unreadable_globs(
+            &[format!("{}/**/*.env", temp.path().display())],
+            temp.path(),
+            max_depth,
+        )
+    });
+    fs::set_permissions(&denied, fs::Permissions::from_mode(0o700)).expect("restore traversal");
+    for result in results {
+        let error = result.expect_err("incomplete scans must fail").to_string();
+        assert!(error.contains(&denied.display().to_string()));
+        assert!(error.contains(&io::Error::from_raw_os_error(libc::EACCES).to_string()));
+    }
 }
 
 #[test]
@@ -1502,12 +1531,10 @@ fn unreadable_globs_skip_absent_and_non_directory_roots() {
     fs::write(&file, "ordinary file").expect("write file");
 
     for root in [missing, file.join("child"), file] {
-        let paths = expand_unreadable_globs_with_ripgrep(
-            &[format!("{}.env", root.display())],
+        let paths = expand_unreadable_globs(
+            &[format!("{}/**/.env", root.display())],
             temp_dir.path(),
-            || None,
-            None,
-            |_| {},
+            /*max_depth*/ None,
         )
         .expect("roots without possible matches should be skipped");
 
@@ -1516,7 +1543,7 @@ fn unreadable_globs_skip_absent_and_non_directory_roots() {
 }
 
 #[test]
-fn unreadable_globs_follow_symlink_roots_without_ripgrep() {
+fn unreadable_globs_follow_symlink_roots() {
     let temp_dir = TempDir::new().expect("temp dir");
     let root = temp_dir.path().join("data");
     fs::create_dir(&root).expect("create directory");
@@ -1525,12 +1552,14 @@ fn unreadable_globs_follow_symlink_roots_without_ripgrep() {
     let link = temp_dir.path().join("link");
     std::os::unix::fs::symlink(&root, &link).expect("create directory symlink");
 
-    let paths = expand_unreadable_globs_with_ripgrep(
-        &[format!("{}.env", link.display())],
+    std::os::unix::fs::symlink(&root, root.join("cycle")).expect("child directory link");
+    let outside = temp_dir.path().join("outside.txt");
+    fs::write(&outside, "public").expect("outside file");
+    std::os::unix::fs::symlink(outside, root.join("alias.env")).expect("matching child symlink");
+    let paths = expand_unreadable_globs(
+        &[format!("{}/**/*.env", link.display())],
         temp_dir.path(),
-        || None,
-        None,
-        |_| panic!("fallback scanner must not launch ripgrep"),
+        /*max_depth*/ None,
     )
     .expect("expand deny glob");
     let expected = [secret, link.join(".env")]
@@ -1557,22 +1586,6 @@ fn root_prefix_unreadable_globs_fail_closed_on_linux() {
         error.to_string(),
         "Fatal error: unreadable glob `/**/*.env` cannot be safely expanded; use a pattern with a non-root directory prefix"
     );
-}
-
-#[test]
-fn unclosed_character_classes_are_escaped_for_ripgrep() {
-    let (search_root, glob) =
-        split_pattern_for_ripgrep("/tmp/[*.env", Path::new("/")).expect("split pattern");
-
-    assert_eq!(search_root.as_path(), Path::new("/tmp"));
-    assert_eq!(glob, r"\[*.env");
-}
-
-fn ripgrep_available() -> bool {
-    Command::new(GLOB_SCAN_PROGRAM)
-        .arg("--version")
-        .output()
-        .is_ok_and(|output| output.status.success())
 }
 
 /// Assert that `path` is masked due to a bwrap arg sequence like:

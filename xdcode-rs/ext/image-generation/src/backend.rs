@@ -19,7 +19,7 @@ const X_XDCODE_IMAGE_TURN_ID_HEADER: &str = "x-xdcode-image-turn-id";
 
 pub(crate) struct ImageBackendError {
     message: String,
-    xdcode_error: XdcodeErr,
+    xdcode_error: Box<XdcodeErr>,
     imagegen_request_id: Option<String>,
 }
 
@@ -29,14 +29,14 @@ impl ImageBackendError {
         let message = error.to_string();
         Self {
             message,
-            xdcode_error: map_api_error(error),
+            xdcode_error: Box::new(map_api_error(error)),
             imagegen_request_id,
         }
     }
 
     fn from_message(message: String) -> Self {
         Self {
-            xdcode_error: XdcodeErr::Stream(message.clone()),
+            xdcode_error: Box::new(XdcodeErr::Stream(message.clone())),
             message,
             imagegen_request_id: None,
         }
@@ -78,23 +78,26 @@ impl XdcodeImagesBackend {
 
     /// Resolves the provider and auth required for the current image API request.
     async fn client(&self) -> Result<ImagesClient<ReqwestTransport>, ImageBackendError> {
-        let provider = self
-            .provider
-            .api_provider()
-            .await
-            .map_err(|err| ImageBackendError::from_message(err.to_string()))?;
-        let auth = self
-            .provider
-            .api_auth()
-            .await
-            .map_err(|err| ImageBackendError::from_message(err.to_string()))?;
-        let transport = create_transport_for_routes_async(
+        let setup = xdcode_model_provider::resolve_request(
+            self.provider.as_ref(),
+            /*scope*/ None,
+            /*routing*/ None,
             self.http_client_factory.clone(),
-            ClientRouteClass::Api,
         )
         .await
         .map_err(|err| ImageBackendError::from_message(err.to_string()))?;
-        Ok(ImagesClient::new(transport, provider, auth))
+        let transport = create_transport_for_routes_async(
+            setup.http_client_factory,
+            ClientRouteClass::Api,
+            setup.redirect_policy,
+        )
+        .await
+        .map_err(|err| ImageBackendError::from_message(err.to_string()))?;
+        Ok(ImagesClient::new(
+            transport,
+            setup.api_provider,
+            setup.api_auth,
+        ))
     }
 
     /// Sends a standalone image generation request through the configured Images client.

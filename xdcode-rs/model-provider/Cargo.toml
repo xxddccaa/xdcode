@@ -13,6 +13,7 @@ path = "src/lib.rs"
 workspace = true
 
 [dependencies]
+anyhow = { workspace = true }
 xdcode-utils-process = { workspace = true }
 chrono = { workspace = true }
 xdcode-api = { workspace = true }
@@ -20,7 +21,9 @@ xdcode-agent-identity = { workspace = true }
 xdcode-aws-auth = { workspace = true }
 xdcode-http-client = { workspace = true }
 xdcode-feedback = { workspace = true }
+xdcode-features = { workspace = true }
 xdcode-login = { workspace = true }
+xdcode-runtime-agent-instance = { workspace = true }
 xdcode-keyring-store = { workspace = true }
 xdcode-model-provider-info = { workspace = true }
 xdcode-models-manager = { workspace = true }
@@ -40,7 +43,10 @@ url = { workspace = true }
 base64 = { workspace = true }
 xdcode-utils-cargo-bin = { workspace = true }
 xdcode-utils-redacted-string = { workspace = true }
+xdcode-utils-rustls-provider = { workspace = true }
 pretty_assertions = { workspace = true }
+rcgen = { workspace = true }
+rustls = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt"] }
 wiremock = { workspace = true }

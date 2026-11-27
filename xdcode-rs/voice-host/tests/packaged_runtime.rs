@@ -1,12 +1,14 @@
 //! Exercise native initialization with real prepared libraries in a relocated package.
 
+mod common;
+
 use std::fs;
 use std::time::Duration;
 
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::ensure;
-use tokio::process::Command;
+use common::voice_host_command;
 use tokio::time::timeout;
 use xdcode_install_context::InstallContext;
 use xdcode_realtime_webrtc::VoiceHost;
@@ -68,7 +70,7 @@ async fn relocated_runtime_initializes_closes_and_rejects_duplicate_initializati
     .context("package layout")?;
     let output = timeout(
         DEADLINE,
-        Command::new(&helper_source)
+        voice_host_command()?
             .arg("--build-commit")
             .kill_on_drop(true)
             .output(),

@@ -26,6 +26,7 @@ xdcode-image-generation-extension = { workspace = true }
 xdcode-exec-server = { workspace = true }
 xdcode-features = { workspace = true }
 xdcode-login = { workspace = true }
+xdcode-model-provider = { workspace = true }
 xdcode-model-provider-info = { workspace = true }
 xdcode-models-manager = { workspace = true }
 xdcode-protocol = { workspace = true }

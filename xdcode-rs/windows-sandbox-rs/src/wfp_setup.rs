@@ -2,6 +2,7 @@ use crate::install_wfp_filters_for_account;
 use crate::setup_error::sanitize_setup_metric_tag_value;
 use anyhow::Result;
 use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::path::Path;
 use xdcode_otel::OtelExporter;
 use xdcode_otel::OtelProvider;
@@ -47,6 +48,7 @@ fn build_wfp_metrics_provider(
     // Statsig environment in the elevation payload. Other exporters are
     // intentionally omitted from this helper path.
     OtelProvider::try_new(&OtelSettings {
+        headers_helper: None,
         http_client_factory: xdcode_http_client::HttpClientFactory::new(
             xdcode_http_client::OutboundProxyPolicy::ReqwestDefault,
         ),
@@ -58,7 +60,7 @@ fn build_wfp_metrics_provider(
         trace_exporter: OtelExporter::None,
         metrics_exporter: OtelExporter::Statsig,
         runtime_metrics: false,
-        span_attributes: BTreeMap::new(),
+        span_attributes: HashMap::new(),
         tracestate: BTreeMap::new(),
     })
     .map_err(|err| anyhow::anyhow!("failed to initialize WFP setup metrics provider: {err}"))

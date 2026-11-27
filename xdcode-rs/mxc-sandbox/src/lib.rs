@@ -22,6 +22,9 @@ use serde::Deserialize;
 use serde::Serialize;
 use xdcode_network_proxy::ManagedNetworkSandboxContext;
 use xdcode_protocol::models::PermissionProfile;
+use xdcode_utils_absolute_path::AbsolutePathBuf;
+#[cfg(windows)]
+use xdcode_utils_absolute_path::AbsolutePathBufGuard;
 use xdcode_windows_sandbox::environment_transport;
 
 pub const XDCODE_WINDOWS_MXC_ARG1: &str = "--__xdcode-windows-mxc";
@@ -91,7 +94,21 @@ pub fn create_command_args(args: CreateMxcCommandArgsParams<'_>) -> Result<Vec<S
         },
         env,
     )?;
-    Ok(vec![XDCODE_WINDOWS_MXC_ARG1.to_owned()])
+    // The workload environment can omit or override the host's XDCODE_HOME.
+    #[cfg(windows)]
+    let xdcode_home = match std::env::var("XDCODE_HOME").as_deref() {
+        Ok(home) if !home.is_empty() => std::fs::canonicalize(home)
+            .ok()
+            .filter(|home| home.is_dir()),
+        _ => AbsolutePathBufGuard::home_directory().map(|home| home.join(".xdcode")),
+    }
+    .and_then(|home| AbsolutePathBuf::from_absolute_path(home).ok());
+    #[cfg(not(windows))]
+    let xdcode_home: Option<AbsolutePathBuf> = None;
+    Ok(std::iter::once(XDCODE_WINDOWS_MXC_ARG1)
+        .chain(xdcode_home.as_deref().and_then(Path::to_str))
+        .map(str::to_owned)
+        .collect())
 }
 
 /// Whether the executor can create a native MXC process security environment.
@@ -107,16 +124,13 @@ pub fn is_available() -> bool {
     }
 }
 
-#[cfg(windows)]
-pub use xdcode_windows_sandbox::GLOB_SCAN_PROGRAM;
-
 /// Resolve configured symbols and snapshot deny globs for policy inspection.
 /// Reuses MXC's resolution without adding native grants or protections.
 #[cfg(windows)]
 pub fn prepare_file_system_policy(
     policy: xdcode_protocol::permissions::FileSystemSandboxPolicy,
     env: &HashMap<String, String>,
-    policy_cwd: &xdcode_utils_absolute_path::AbsolutePathBuf,
+    policy_cwd: &AbsolutePathBuf,
     command_cwd: &Path,
 ) -> Result<xdcode_protocol::permissions::FileSystemSandboxPolicy> {
     use xdcode_utils_path_uri::PathUri;
@@ -126,13 +140,8 @@ pub fn prepare_file_system_policy(
         .map(|(key, value)| format!("{key}={value}"))
         .collect::<Vec<_>>();
     let mut policy = policy::materialize_temporary_paths(policy, &env_entries)?;
-    let denied = xdcode_windows_sandbox::resolve_windows_deny_read_paths_in_environment(
-        &policy,
-        policy_cwd,
-        env,
-        command_cwd,
-    )
-    .map_err(anyhow::Error::msg)?;
+    let denied = xdcode_windows_sandbox::resolve_windows_deny_read_paths(&policy, policy_cwd)
+        .map_err(anyhow::Error::msg)?;
     policy = policy.with_expanded_deny_globs(denied);
     if policy.has_full_disk_write_access() {
         return Ok(policy);
@@ -157,6 +166,7 @@ pub fn run_main() -> ! {
         match windows::run() {
             Ok(exit_code) => std::process::exit(exit_code),
             Err(error) => {
+                windows::log_launch(format_args!("launch failed: {error:#}"));
                 eprintln!("MXC launcher: {error:#}");
                 std::process::exit(1);
             }

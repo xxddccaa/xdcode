@@ -4,6 +4,7 @@ use crate::PROVIDER_BUNDLED_MARKETPLACE_NAME;
 use crate::PluginInstallRequest;
 use crate::PluginsConfigInput;
 use crate::PluginsManager;
+use crate::remote::InstalledPluginDisplayAssets;
 use crate::remote::REMOTE_GLOBAL_MARKETPLACE_NAME;
 use crate::remote::RemotePluginServiceConfig;
 use crate::remote::fetch_and_cache_global_remote_plugin_catalog;
@@ -649,7 +650,7 @@ async fn discovery_warns_once_per_invalid_manifest() {
     write_provider_curated_marketplace(&curated_root, &["slack", "gmail", "provider-developers"]);
     install_marketplace_plugin(xdcode_home.path(), curated_root.as_path(), "slack").await;
 
-    let too_long_prompt = "x".repeat(129);
+    let too_long_prompt = "x".repeat(513);
     for plugin_name in ["gmail", "provider-developers"] {
         write_file(
             &curated_root.join(format!("plugins/{plugin_name}/.xdcode-plugin/plugin.json")),
@@ -851,6 +852,18 @@ source = "/tmp/{sales_marketplace_name}"
 
 #[tokio::test]
 async fn cached_remote_discovery_requires_installed_cache_and_filters_candidates() {
+    assert_cached_remote_discovery_filters_candidates(InstalledPluginDisplayAssets::Include).await;
+}
+
+/// Tool suggestions need installed IDs even when display enrichment was skipped.
+#[tokio::test]
+async fn cached_remote_discovery_accepts_snapshot_without_display_assets() {
+    assert_cached_remote_discovery_filters_candidates(InstalledPluginDisplayAssets::Skip).await;
+}
+
+async fn assert_cached_remote_discovery_filters_candidates(
+    display_assets: InstalledPluginDisplayAssets,
+) {
     let xdcode_home = tempdir().expect("tempdir should succeed");
     write_file(
         &xdcode_home.path().join(CONFIG_TOML_FILE),
@@ -984,10 +997,19 @@ plugins = true
         Vec::new()
     );
 
-    Mock::given(method("GET"))
+    let installed_request = Mock::given(method("GET"))
         .and(path("/backend-api/ps/plugins/installed"))
         .and(query_param_is_missing("scope"))
-        .and(query_param_is_missing("includeDownloadUrls"))
+        .and(query_param_is_missing("includeDownloadUrls"));
+    let installed_request = match display_assets {
+        InstalledPluginDisplayAssets::Include => {
+            installed_request.and(query_param_is_missing("includeDisplayAssets"))
+        }
+        InstalledPluginDisplayAssets::Skip => {
+            installed_request.and(query_param("includeDisplayAssets", "false"))
+        }
+    };
+    installed_request
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "plugins": [],
             "pagination": {
@@ -998,11 +1020,12 @@ plugins = true
         .mount(&server)
         .await;
     plugins_manager
-        .build_and_cache_remote_installed_plugin_marketplaces(
+        .build_and_cache_remote_installed_plugin_marketplaces_with_display_assets(
             &plugins,
             Some(&auth),
             &[REMOTE_GLOBAL_MARKETPLACE_NAME],
             /*on_effective_plugins_changed*/ None,
+            display_assets,
         )
         .await
         .expect("remote installed plugin cache should write");

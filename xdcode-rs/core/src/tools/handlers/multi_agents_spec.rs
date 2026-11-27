@@ -19,7 +19,8 @@ const SPAWN_AGENT_INHERITED_MODEL_GUIDANCE_V2: &str = "Spawned agents inherit yo
 const SPAWN_AGENT_MODEL_CATALOG_GUIDANCE: &str =
     "Pick model overrides from the latest <model_catalog> listing.";
 const SPAWN_AGENT_TYPE_OVERRIDE_DESCRIPTION_V1: &str = "Agent type override for the new agent. Omit to inherit the parent agent type with a full-history fork; otherwise, `default` is used.";
-const SPAWN_AGENT_MODEL_OVERRIDE_DESCRIPTION: &str = "Model override for the new agent. Use an exact configured model catalog ID to select its provider and model, or an advertised model name to use the inherited provider. Omit unless an explicit override is needed.";
+const SPAWN_AGENT_MODEL_OVERRIDE_DESCRIPTION: &str =
+    "Model override for the new agent. Omit unless an explicit override is needed.";
 const MAX_REASONING_EFFORT_CHARS_IN_SPAWN_AGENT_DESCRIPTION: usize = 64;
 
 #[derive(Debug, Clone)]
@@ -422,21 +423,9 @@ fn spawn_agent_output_schema_v1() -> Value {
             "nickname": {
                 "type": ["string", "null"],
                 "description": "User-facing nickname for the spawned agent when available."
-            },
-            "selection": {
-                "type": "object",
-                "description": "Effective child settings after model selection and role overrides; contains no credentials.",
-                "properties": {
-                    "catalog_id": {"type": ["string", "null"]},
-                    "model": {"type": "string"},
-                    "provider": {"type": "string"},
-                    "reasoning_effort": {"type": ["string", "null"]}
-                },
-                "required": ["catalog_id", "model", "provider", "reasoning_effort"],
-                "additionalProperties": false
             }
         },
-        "required": ["agent_id", "nickname", "selection"],
+        "required": ["agent_id", "nickname"],
         "additionalProperties": false
     })
 }

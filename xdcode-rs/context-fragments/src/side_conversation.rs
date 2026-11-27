@@ -88,7 +88,7 @@ impl ContextualUserFragment for SideConversationPolicy {
     }
 
     fn body(&self) -> ContentItem {
-        input_text(self.instructions(None))
+        input_text(self.instructions(/*existing*/ None))
     }
 }
 

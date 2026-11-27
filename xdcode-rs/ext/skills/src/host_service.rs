@@ -106,6 +106,7 @@ pub struct HostSkillsService {
     cache_by_cwd: RwLock<HashMap<AbsolutePathBuf, HostSkillsSnapshot>>,
     cache_by_config: RwLock<VecDeque<ConfigSkillsCacheEntry>>,
     empty_remote_roots: Mutex<EmptyRemoteRootsCache>,
+    // Shared across cwds so root scheduling cannot multiply per-root I/O fanout.
     root_scan_slots: Arc<Semaphore>,
 }
 
@@ -234,6 +235,8 @@ impl HostSkillsService {
         project_markers: Option<&dyn EnvironmentAccess>,
     ) -> HostSkillsSnapshot {
         let host = FileSystemEnvironmentAccessor::unrestricted(&LOCAL_FS);
+        // A local repository accessor carries the turn's filesystem permissions; host
+        // (user/plugin) roots must honor them too instead of reading unrestricted.
         let host_access = repository
             .filter(|access| access.cache_key().same_file_system(&host.cache_key()))
             .unwrap_or(&host);
@@ -248,8 +251,15 @@ impl HostSkillsService {
             .await;
         let skill_config_rules = skill_config_rules_from_stack(&input.config_layer_stack);
         let cache_key = config_skills_cache_key(&roots, &skill_config_rules, input);
-        self.snapshot_for_skill_roots(input, roots, &skill_config_rules, cache_key, false, None)
-            .await
+        self.snapshot_for_skill_roots(
+            input,
+            roots,
+            &skill_config_rules,
+            cache_key,
+            /*force_reload*/ false,
+            /*request_root_snapshots*/ None,
+        )
+        .await
     }
 
     /// Returns filesystem roots whose changes should invalidate discovered host skills.
@@ -263,12 +273,18 @@ impl HostSkillsService {
     ) -> Vec<AbsolutePathBuf> {
         let repository = FileSystemEnvironmentAccessor::unrestricted(&fs);
         let host = FileSystemEnvironmentAccessor::unrestricted(&LOCAL_FS);
-        self.skill_roots_for_config(input, Some(&repository), Some(&repository), &host, None)
-            .await
-            .into_iter()
-            .filter(|root| root.plugin_identity().is_none() && root.scope != SkillScope::System)
-            .map(|root| root.path)
-            .collect()
+        self.skill_roots_for_config(
+            input,
+            Some(&repository),
+            Some(&repository),
+            &host,
+            /*empty_remote_roots*/ None,
+        )
+        .await
+        .into_iter()
+        .filter(|root| root.plugin_identity().is_none() && root.scope != SkillScope::System)
+        .map(|root| root.path)
+        .collect()
     }
 
     async fn skill_roots_for_config<'a>(

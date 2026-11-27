@@ -1,4 +1,4 @@
-//! Message-board records shared by backends and tool adapters.
+//! Message-board records and notification text shared by backends and tool adapters.
 
 use crate::BoardPermissions;
 use crate::ChannelPermissions;

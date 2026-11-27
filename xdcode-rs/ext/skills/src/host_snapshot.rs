@@ -1,9 +1,9 @@
 use std::io;
 use std::sync::Arc;
-use xdcode_exec_server::EnvironmentAccess;
-use xdcode_extension_api::ExtensionData;
 
 use crate::SkillLoadOutcome;
+use xdcode_exec_server::EnvironmentAccess;
+use xdcode_extension_api::ExtensionData;
 use xdcode_skills::SkillMetadata;
 
 /// Immutable snapshot of host-owned skills and their source filesystems.

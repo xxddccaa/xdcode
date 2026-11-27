@@ -19,6 +19,7 @@ xdcode-api = { workspace = true }
 xdcode-config = { workspace = true }
 xdcode-exec-server = { workspace = true }
 xdcode-http-client = { workspace = true }
+xdcode-http-headers-helper = { workspace = true }
 xdcode-keyring-store = { workspace = true }
 xdcode-network-proxy = { workspace = true }
 xdcode-otel = { workspace = true }

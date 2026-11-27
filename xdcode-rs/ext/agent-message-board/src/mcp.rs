@@ -2,8 +2,9 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::Weak;
-use tokio::sync::Mutex;
+use tokio::sync::OnceCell;
 use xdcode_config::AppToolApproval;
 use xdcode_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID;
 use xdcode_config::McpServerConfig;
@@ -29,9 +30,9 @@ use xdcode_protocol::error::XdcodeErr;
 /// Shared launchers opened by the existing board factory when the MCP flag is enabled.
 #[derive(Default)]
 pub struct McpBoards {
-    servers: Mutex<HashMap<SessionId, Weak<LocalServer>>>,
+    servers: Mutex<HashMap<SessionId, Weak<OnceCell<LocalServer>>>>,
 }
-struct Binding(Arc<LocalServer>);
+struct Binding(Arc<OnceCell<LocalServer>>);
 struct PendingMcpRefresh;
 
 impl McpBoards {
@@ -42,25 +43,28 @@ impl McpBoards {
         caller: ThreadId,
         host: Arc<dyn MessageBoardHost>,
     ) -> Result<()> {
-        let mut servers = self.servers.lock().await;
-        servers.retain(|_, server| server.strong_count() > 0);
-        let server = match servers.get(&tree).and_then(Weak::upgrade) {
-            Some(server) => server,
-            None => {
-                let server = Arc::new(
-                    launch_in_memory()
-                        .await
-                        .map_err(|error| XdcodeErr::Io(std::io::Error::other(error)))?,
-                );
-                servers.insert(tree, Arc::downgrade(&server));
-                server
-            }
+        let slot = {
+            let mut servers = self
+                .servers
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            servers.retain(|_, server| server.strong_count() > 0);
+            let entry = servers.entry(tree).or_default();
+            entry.upgrade().unwrap_or_else(|| {
+                let slot = Arc::new(OnceCell::new());
+                *entry = Arc::downgrade(&slot);
+                slot
+            })
         };
+        let server = slot
+            .get_or_try_init(launch_in_memory)
+            .await
+            .map_err(|error| XdcodeErr::Io(std::io::Error::other(error)))?;
         server
             .bind_agent(tree, caller, host)
             .await
             .map_err(|error| XdcodeErr::Io(std::io::Error::other(error)))?;
-        store.insert(Binding(server));
+        store.insert(Binding(slot));
         store.insert(PendingMcpRefresh);
         Ok(())
     }
@@ -79,6 +83,7 @@ impl TurnLifecycleContributor for McpBoards {
         &'a self,
         input: CatalogRefreshInput<'a>,
     ) -> ExtensionFuture<'a, bool> {
+        // Initial MCP projection precedes the board factory's startup hook.
         Box::pin(async move { input.thread_store.remove::<PendingMcpRefresh>().is_some() })
     }
 }
@@ -95,18 +100,21 @@ impl<C: Sync> McpServerContributor<C> for McpBoards {
         Box::pin(async move {
             let Some(binding) = context
                 .thread_store()
-                .and_then(|store| store.get::<Binding>())
+                .and_then(ExtensionData::get::<Binding>)
             else {
                 return Vec::new();
             };
-            let Ok(authorization) = binding.0.authorization().to_str() else {
+            let Some(server) = binding.0.get() else {
+                return Vec::new();
+            };
+            let Ok(authorization) = server.authorization().to_str() else {
                 return Vec::new();
             };
             vec![McpServerContribution::Set {
                 name: "xdcode_message_board".into(),
                 config: Box::new(McpServerConfig {
                     transport: McpServerTransportConfig::StreamableHttp {
-                        url: binding.0.url().into(),
+                        url: server.url().into(),
                         bearer_token_env_var: None,
                         http_headers: Some([("Authorization".into(), authorization.into())].into()),
                         env_http_headers: None,

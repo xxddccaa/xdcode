@@ -39,6 +39,7 @@ use crate::tool_catalog_cache::McpToolCatalogCacheContext;
 /// Opt-in resource lifecycle for negotiated stdio connections. Tool calls and resource reads
 /// carry a host-owned lease ID. Catalog requests remain independent of a particular lease.
 pub(crate) const LEASE_CAPABILITY: &str = "codex/connection-lease";
+/// Request metadata set by the host when a connection lease is negotiated.
 pub const LEASE_META_KEY: &str = "codex/connectionLease";
 const LEASE_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -54,6 +55,8 @@ impl ServerLease {
         if self.opened.await.is_err() {
             return;
         }
+        // MCP cancellation has no acknowledgement. The server owns any handler still
+        // winding down after it receives these cancellation writes and then release.
         self.requests.cancel_and_wait().await;
         if let Err(error) = client
             .send_custom_request(
@@ -109,6 +112,7 @@ struct Entry {
     key: ConnectionKey,
     client: ManagedClientFuture,
     capabilities: Arc<Mutex<Option<serde_json::Value>>>,
+    // Share immutable definitions; every chat owns its catalog revisions and refresh locks.
     catalog: Mutex<Option<ToolCatalogSnapshot>>,
     cancellation: CancellationToken,
     /// Wakes joiners without cancelling the creator's startup.
@@ -142,6 +146,7 @@ impl Entry {
         role: AcquisitionRole,
         cache_context: Option<&McpToolCatalogCacheContext>,
     ) -> Result<Arc<ClientToolCatalog>, StartupOutcomeError> {
+        // Listing must not update another chat's catalog or wait for its calls.
         let listed = if role == AcquisitionRole::Creator {
             client.tool_catalog.read(|snapshot| snapshot).await
         } else {
@@ -179,7 +184,7 @@ impl Entry {
         Ok(Arc::new(ClientToolCatalog::new(
             Arc::clone(&catalog.tools),
             catalog.meta.clone(),
-            None,
+            /*updates*/ None,
         )))
     }
 }
@@ -317,8 +322,10 @@ impl McpConnectionPool {
             }
             Some(Err(error)) if role == AcquisitionRole::Creator => Err(error),
             _ => {
+                // Older or failed servers leave other chats to initialize privately
+                // with their own elicitation authority.
                 drop(lease);
-                start(cancellation, None).await
+                start(cancellation, /*sharing_declined*/ None).await
             }
         }
     }
@@ -369,6 +376,7 @@ impl McpConnectionPool {
                     let sharing_declined = CancellationToken::new();
                     let client =
                         start(startup_cancellation.clone(), Some(sharing_declined.clone()));
+                    // Startup belongs to the connection, including if its first chat is cancelled.
                     tokio::spawn(client.clone());
                     let owner = Arc::new(LeaseOwners);
                     let entry = Arc::new(Entry {
@@ -429,6 +437,7 @@ impl ConnectionLease {
         .boxed()
         .shared();
         let opened = {
+            // Publish while we still own the lease so a racing unload will wait for this open.
             let owner = self
                 .owner
                 .lock()
@@ -448,6 +457,7 @@ impl ConnectionLease {
                 .opened
                 .clone()
         };
+        // Bound chat startup while preserving the actual reply for a racing release.
         tokio::time::timeout(LEASE_REQUEST_TIMEOUT, opened)
             .await
             .map_err(|_| {
@@ -471,6 +481,7 @@ impl ConnectionLease {
             Some(self.server_lease.get()?.clone())
         };
         let entry = Arc::clone(&self.entry);
+        // The chat must be able to await its final release even when cancellation drops the lease.
         let tasks = self.slot.shutdown_tasks.get_or_init(TaskTracker::new);
         let completion = tasks.token();
         self.entry.runtime.spawn(async move {
@@ -485,6 +496,8 @@ impl ConnectionLease {
                         .await
                         .is_err()
                     {
+                        // Let the chat unload. A late open reply or cancellation write
+                        // must still precede release while other chats own the connection.
                         entry.remove_from_pool();
                         drop(completion);
                         let _ = release.await;
@@ -524,6 +537,7 @@ impl SharingNegotiation {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some(callback) = callback.as_ref() {
+                // Client input binds this startup to its original chat.
                 sharing_declined.cancel();
                 callback(id, request)
             } else {

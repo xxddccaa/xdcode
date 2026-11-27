@@ -13,7 +13,7 @@ use xdcode_protocol::protocol::HookRunSummary as CoreHookRunSummary;
 use xdcode_protocol::protocol::HookScope as CoreHookScope;
 use xdcode_protocol::protocol::HookSource as CoreHookSource;
 use xdcode_protocol::protocol::HookTrustStatus as CoreHookTrustStatus;
-use xdcode_utils_absolute_path::AbsolutePathBuf;
+use xdcode_utils_path_uri::LegacyAppPathString;
 
 v2_enum_from_core!(
     pub enum HookEventName from CoreHookEventName {
@@ -106,7 +106,7 @@ pub struct HookRunSummary {
     pub handler_type: HookHandlerType,
     pub execution_mode: HookExecutionMode,
     pub scope: HookScope,
-    pub source_path: AbsolutePathBuf,
+    pub source_path: LegacyAppPathString,
     #[serde(default = "default_hook_source")]
     pub source: HookSource,
     pub display_order: i64,

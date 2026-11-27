@@ -10,12 +10,16 @@ use tokio::sync::watch;
 use tracing::info;
 use tracing::warn;
 use xdcode_api::SharedAuthProvider;
+use xdcode_features::RuntimeAuthMode;
 use xdcode_login::AuthManager;
 use xdcode_login::UnauthorizedRecovery;
+use xdcode_login::XdcodeAuth;
+use xdcode_runtime_agent_instance::RuntimeAuthSlot;
 
 #[derive(Clone)]
 pub(super) struct RemoteControlAuth {
     manager: Arc<AuthManager>,
+    runtime_auth: Option<(RuntimeAuthSlot, RuntimeAuthMode)>,
     pub(super) owner: crate::ConnectionAuth,
     pub(super) network_policy: xdcode_http_client::NetworkPolicy,
 }
@@ -26,7 +30,10 @@ pub(super) struct RemoteControlRecovery {
 }
 
 impl RemoteControlAuth {
-    pub(super) fn capture(manager: Arc<AuthManager>) -> (Self, bool) {
+    pub(super) fn capture(
+        manager: Arc<AuthManager>,
+        runtime_auth: Option<(RuntimeAuthSlot, RuntimeAuthMode)>,
+    ) -> (Self, bool) {
         loop {
             let owner = crate::ConnectionAuth::capture(&manager);
             let authenticated = manager
@@ -37,6 +44,7 @@ impl RemoteControlAuth {
                     Self {
                         network_policy: manager.application_network_policy(),
                         manager,
+                        runtime_auth,
                         owner,
                     },
                     authenticated,
@@ -61,44 +69,92 @@ impl RemoteControlAuth {
     }
 }
 
-pub(super) const REMOTE_CONTROL_ACCOUNT_ID_HEADER: &str = "chatgpt-account-id";
+pub(super) use xdcode_http_client::CHATGPT_ACCOUNT_ID_HEADER as REMOTE_CONTROL_ACCOUNT_ID_HEADER;
 
 pub(super) struct RemoteControlConnectionAuth {
     pub(super) http_client_factory: xdcode_http_client::HttpClientFactory,
-    pub(super) auth_provider: SharedAuthProvider,
+    pub(super) auth: XdcodeAuth,
+    pub(super) runtime_auth: Option<(RuntimeAuthSlot, RuntimeAuthMode)>,
     pub(super) account_id: String,
 }
 
 impl RemoteControlConnectionAuth {
-    pub(super) fn request_headers(&self) -> io::Result<HeaderMap> {
-        let mut headers = HeaderMap::new();
-        self.auth_provider
-            .add_auth_headers(&mut headers)
+    pub(super) async fn request_context(
+        &self,
+        endpoint: &str,
+    ) -> io::Result<(xdcode_http_client::HttpClient, HeaderMap)> {
+        if self.runtime_auth.is_some() {
+            xdcode_model_provider::validate_runtime_destination(Some(endpoint))
+                .map_err(io::Error::other)?;
+        }
+        let runtime = self
+            .runtime_auth
+            .as_ref()
+            .filter(|_| xdcode_runtime_agent_instance::is_hosted_provider_api_url(endpoint))
+            .map(|(slot, mode)| {
+                slot.get()
+                    .cloned()
+                    .map(|manager| (manager, *mode))
+                    .ok_or_else(|| {
+                        io::Error::new(
+                            ErrorKind::WouldBlock,
+                            "runtime authentication is not initialized",
+                        )
+                    })
+            })
+            .transpose()?;
+        // Keep runtime auth resolution from growing the caller's stack frame.
+        let resolved = Box::pin(xdcode_model_provider::auth_provider_for_request(
+            &self.auth,
+            runtime.as_ref(),
+            &HeaderMap::new(),
+        ))
+        .await
+        .map_err(|error| auth_error(error.into()))?;
+        let factory = resolved
+            .bind_http_client_factory(self.http_client_factory.clone())
+            .map_err(auth_error)?;
+        let client = request_client(&factory, endpoint).await?;
+        let headers = request_headers(&resolved.auth, &self.account_id).await?;
+        resolved
+            .validate_headers(&headers)
             .map_err(io::Error::other)?;
-        headers.insert(
-            REMOTE_CONTROL_ACCOUNT_ID_HEADER,
-            HeaderValue::from_str(&self.account_id).map_err(|err| {
-                io::Error::new(
-                    ErrorKind::InvalidInput,
-                    format!("invalid remote control account id header: {err}"),
-                )
-            })?,
-        );
-        Ok(headers)
+        Ok((client, headers))
     }
+}
+
+async fn request_headers(
+    auth_provider: &SharedAuthProvider,
+    account_id: &str,
+) -> io::Result<HeaderMap> {
+    let mut headers = auth_provider
+        .apply_auth_headers(xdcode_login::default_client::default_headers())
+        .await
+        .map_err(auth_error)?;
+    headers.insert(
+        REMOTE_CONTROL_ACCOUNT_ID_HEADER,
+        HeaderValue::from_str(account_id).map_err(|err| {
+            io::Error::new(
+                ErrorKind::InvalidInput,
+                format!("invalid remote control account id header: {err}"),
+            )
+        })?,
+    );
+    Ok(headers)
 }
 
 pub(super) async fn load_remote_control_auth(
     auth: &RemoteControlAuth,
 ) -> io::Result<RemoteControlConnectionAuth> {
     auth.ensure_current()?;
-    let credentials = load_auth_manager(&auth.manager).await?;
+    let credentials = load_auth_manager(&auth.manager, auth.runtime_auth.clone()).await?;
     auth.ensure_current()?;
     Ok(credentials)
 }
 
 async fn load_auth_manager(
     auth_manager: &Arc<AuthManager>,
+    runtime_auth: Option<(RuntimeAuthSlot, RuntimeAuthMode)>,
 ) -> io::Result<RemoteControlConnectionAuth> {
     let mut reloaded = false;
     let (auth, http_client_factory) = loop {
@@ -134,13 +190,14 @@ async fn load_auth_manager(
 
     Ok(RemoteControlConnectionAuth {
         http_client_factory,
-        auth_provider: xdcode_model_provider::auth_provider_from_auth(&auth),
+        runtime_auth,
         account_id: auth.get_account_id().ok_or_else(|| {
             io::Error::new(
                 ErrorKind::WouldBlock,
                 "remote control enrollment is waiting for a ChatGPT account id",
             )
         })?,
+        auth,
     })
 }
 
@@ -165,6 +222,15 @@ pub(super) fn is_policy_denial(error: &io::Error) -> bool {
 
 pub(super) fn is_auth_error(error: &io::Error) -> bool {
     error.kind() == ErrorKind::PermissionDenied && !is_policy_denial(error)
+}
+
+fn auth_error(error: xdcode_api::AuthError) -> io::Error {
+    match error {
+        xdcode_api::AuthError::Policy(denied) => {
+            io::Error::new(ErrorKind::PermissionDenied, denied)
+        }
+        error => io::Error::other(error),
+    }
 }
 
 pub(super) fn request_error(error: xdcode_http_client::HttpError) -> io::Error {
@@ -254,25 +320,118 @@ mod tests {
         }
     }
 
-    fn remote_control_auth(
+    async fn headers_for(
         account_id: &str,
-        provider_account_ids: Vec<&'static str>,
-    ) -> RemoteControlConnectionAuth {
-        RemoteControlConnectionAuth {
-            http_client_factory: xdcode_http_client::HttpClientFactory::new(
-                xdcode_http_client::OutboundProxyPolicy::ReqwestDefault,
-            ),
-            auth_provider: Arc::new(TestAuthProvider {
-                account_ids: provider_account_ids,
-            }),
-            account_id: account_id.to_string(),
-        }
+        account_ids: Vec<&'static str>,
+    ) -> io::Result<HeaderMap> {
+        let provider: SharedAuthProvider = Arc::new(TestAuthProvider { account_ids });
+        request_headers(&provider, account_id).await
     }
 
-    #[test]
-    fn request_headers_adds_account_header_when_provider_omits_it() {
-        let headers = remote_control_auth("selected-account", Vec::new())
-            .request_headers()
+    #[tokio::test]
+    async fn runtime_requests_reject_unsupported_provider_origins() -> anyhow::Result<()> {
+        let credentials =
+            AuthManager::from_auth_for_testing(XdcodeAuth::create_dummy_chatgpt_auth_for_testing());
+        for mode in [RuntimeAuthMode::DualHeader, RuntimeAuthMode::AssertionOnly] {
+            let (owner, _) = RemoteControlAuth::capture(
+                Arc::clone(&credentials),
+                Some((RuntimeAuthSlot::default(), mode)),
+            );
+            let auth = load_remote_control_auth(&owner).await?;
+            for endpoint in [
+                "https://chatgpt.com:8443/backend-api",
+                "http://chatgpt.com/backend-api",
+            ] {
+                assert!(
+                    auth.request_context(endpoint).await.is_err(),
+                    "unsupported Provider origins must not fall back to bearer auth"
+                );
+            }
+
+            let (_, headers) = auth
+                .request_context("https://remote.example/control")
+                .await?;
+            assert_eq!(
+                headers[axum::http::header::AUTHORIZATION],
+                "Bearer Access Token"
+            );
+            assert_eq!(headers[REMOTE_CONTROL_ACCOUNT_ID_HEADER], "account_id");
+            assert!(!headers.contains_key("x-openai-agent-assertion"));
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn runtime_request_rejects_a_different_registered_account() -> anyhow::Result<()> {
+        use serde_json::json;
+        use wiremock::Mock;
+        use wiremock::MockServer;
+        use wiremock::ResponseTemplate;
+        use wiremock::matchers::method;
+        use wiremock::matchers::path;
+        use xdcode_features::RuntimeAuthMode;
+        use xdcode_runtime_agent_instance::AgentHostAuthorization;
+        use xdcode_runtime_agent_instance::RuntimeAuthManager;
+        use xdcode_runtime_agent_instance::RuntimeRegistrationMetadata;
+        use xdcode_runtime_agent_instance::RuntimeRole;
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/agent/register"))
+            .respond_with(ResponseTemplate::new(/*s*/ 200).set_body_json(json!({
+                "runtime_agent_instance_id": "runtime-other-account", "agent_host_id": "host",
+                "actor": {"kind": "chatgpt", "user_id": "actor", "account_id": "another-account"},
+            })))
+            .expect(/*r*/ 1)
+            .mount(&server)
+            .await;
+        let credentials =
+            AuthManager::from_auth_for_testing(XdcodeAuth::create_dummy_chatgpt_auth_for_testing());
+        let runtime = Arc::new(RuntimeAuthManager::new(
+            Arc::clone(&credentials),
+            AgentHostAuthorization::InstallationId {
+                installation_id: uuid::Uuid::nil(),
+            },
+            RuntimeRegistrationMetadata {
+                harness: None,
+                harness_version: None,
+                role: RuntimeRole::Orchestrator,
+            },
+            format!("{}/agent/register", server.uri()).parse()?,
+        ));
+        let slot = RuntimeAuthSlot::default();
+        assert!(
+            slot.set(runtime).is_ok(),
+            "the runtime slot should be empty"
+        );
+        for mode in [RuntimeAuthMode::DualHeader, RuntimeAuthMode::AssertionOnly] {
+            let (owner, _) = RemoteControlAuth::capture(
+                Arc::clone(&credentials),
+                Some((Arc::clone(&slot), mode)),
+            );
+            let auth = load_remote_control_auth(&owner).await?;
+            let Err(error) = auth
+                .request_context(
+                    "https://chatgpt.com/backend-api/wham/remote/control/server/enroll",
+                )
+                .await
+            else {
+                panic!("a different registered account must not authorize enrollment");
+            };
+            assert!(
+                error
+                    .to_string()
+                    .contains("chatgpt-account-id does not match")
+            );
+        }
+        server.verify().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn request_headers_adds_account_header_when_provider_omits_it() {
+        let headers = headers_for("selected-account", Vec::new())
+            .await
             .expect("request headers should build");
 
         assert_eq!(
@@ -285,13 +444,13 @@ mod tests {
         );
     }
 
-    #[test]
-    fn request_headers_replaces_provider_accounts_and_preserves_other_headers() {
-        let headers = remote_control_auth(
+    #[tokio::test]
+    async fn request_headers_replaces_provider_accounts_and_preserves_other_headers() {
+        let headers = headers_for(
             "selected-account",
             vec!["provider-account-a", "provider-account-b"],
         )
-        .request_headers()
+        .await
         .expect("request headers should build");
 
         assert_eq!(
@@ -316,10 +475,10 @@ mod tests {
         );
     }
 
-    #[test]
-    fn request_headers_rejects_invalid_account_header_value() {
-        let err = remote_control_auth("invalid\naccount", Vec::new())
-            .request_headers()
+    #[tokio::test]
+    async fn request_headers_rejects_invalid_account_header_value() {
+        let err = headers_for("invalid\naccount", Vec::new())
+            .await
             .expect_err("invalid account header should fail");
 
         assert_eq!(err.kind(), ErrorKind::InvalidInput);

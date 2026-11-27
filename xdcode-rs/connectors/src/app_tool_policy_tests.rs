@@ -8,6 +8,8 @@ use xdcode_config::AppToolRequirementToml;
 use xdcode_config::AppToolsRequirementsToml;
 use xdcode_config::AppsRequirementsToml;
 use xdcode_config::CONFIG_TOML_FILE;
+use xdcode_config::ConfigLayerEntry;
+use xdcode_config::ConfigLayerSource;
 use xdcode_config::ConfigLayerStack;
 use xdcode_config::ConfigRequirements;
 use xdcode_config::ConfigRequirementsToml;
@@ -20,6 +22,91 @@ use xdcode_config::types::AppsConfigToml;
 use xdcode_config::types::AppsDefaultConfig;
 
 use super::*;
+
+#[test]
+fn nested_apps_respect_plugin_enablement_and_top_level_overrides() -> anyhow::Result<()> {
+    let user_source = ConfigLayerSource::User {
+        file: AbsolutePathBuf::try_from(std::env::temp_dir().join(CONFIG_TOML_FILE))?,
+        profile: None,
+    };
+    for defaults in ["", "[plugins._default]\nenabled = false"] {
+        let stack = ConfigLayerStack::new(
+            vec![
+                ConfigLayerEntry::new(
+                    user_source.clone(),
+                    TomlValue::Table(
+                        format!(
+                            r#"
+{defaults}
+[plugins.inherited.apps.inherited]
+enabled = false
+[plugins.disabled]
+enabled = false
+[plugins.disabled.apps.mail]
+enabled = false
+[plugins.z]
+enabled = true
+[plugins.z.apps.calendar]
+enabled = true
+default_tools_enabled = false
+[plugins.a]
+enabled = true
+[plugins.a.apps._default]
+enabled = false
+[plugins.a.apps.calendar]
+enabled = false
+omit_tools_from = ["deferred"]
+tools.list = {{ enabled = false, approval_mode = "approve" }}
+"#
+                        )
+                        .parse()?,
+                    ),
+                ),
+                ConfigLayerEntry::new(
+                    ConfigLayerSource::SessionFlags,
+                    TomlValue::Table(
+                        r#"
+[apps.calendar]
+omit_tools_from = []
+tools.list.enabled = true
+"#
+                        .parse()?,
+                    ),
+                ),
+            ],
+            ConfigRequirements::default(),
+            ConfigRequirementsToml::default(),
+        )?;
+        let mut expected: AppsConfigToml = TomlValue::Table(
+            r#"
+[calendar]
+enabled = false
+omit_tools_from = []
+default_tools_enabled = false
+tools.list = { enabled = true, approval_mode = "approve" }
+"#
+            .parse()?,
+        )
+        .try_into()?;
+        if defaults.is_empty() {
+            expected.apps.insert(
+                "inherited".into(),
+                AppConfig {
+                    enabled: false,
+                    ..Default::default()
+                },
+            );
+        }
+        assert_eq!(apps_config_from_layer_stack(&stack), Some(expected));
+        let origins = apps_config_origins_from_layer_stack(&stack);
+        assert_eq!(origins["apps.calendar.enabled"].name, user_source);
+        assert_eq!(
+            origins["apps.calendar.tools.list.enabled"].name,
+            ConfigLayerSource::SessionFlags
+        );
+    }
+    Ok(())
+}
 
 #[test]
 fn evaluator_reuses_one_snapshot_across_tools() {
@@ -36,6 +123,7 @@ fn evaluator_reuses_one_snapshot_across_tools() {
                         AppToolConfig {
                             enabled: Some(true),
                             approval_mode: Some(AppToolApproval::Prompt),
+                            approvals_reviewer: None,
                         },
                     )]),
                 }),
@@ -459,6 +547,7 @@ fn managed_approval_overrides_user_tool_approval() {
                         AppToolConfig {
                             enabled: None,
                             approval_mode: Some(AppToolApproval::Prompt),
+                            approvals_reviewer: None,
                         },
                     )]),
                 }),
@@ -611,6 +700,7 @@ fn per_tool_enable_overrides_app_level_hints() {
                         AppToolConfig {
                             enabled: Some(true),
                             approval_mode: None,
+                            approvals_reviewer: None,
                         },
                     )]),
                 }),
@@ -784,6 +874,7 @@ fn evaluator_matches_tool_title_for_user_config() {
                         AppToolConfig {
                             enabled: Some(true),
                             approval_mode: Some(AppToolApproval::Approve),
+                            approvals_reviewer: None,
                         },
                     )]),
                 }),

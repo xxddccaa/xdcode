@@ -45,7 +45,7 @@ async fn gcp_account_is_reported_without_resolving_credentials(overrides: &str) 
         let received: Value = timeout(READ_TIMEOUT, app_server.read_response(request_id)).await??;
         assert_eq!(
             received,
-            json!({"account": {"type": "gcp"}, "requiresHostedAuth": false, "workspaceRouting": null})
+            json!({"account": {"type": "gcp"}, "userId": null, "requiresHostedAuth": false, "workspaceRouting": null})
         );
     }
     Ok(())
@@ -60,6 +60,7 @@ async fn gcp_account_tracks_provider_changes_with_saved_chatgpt_credentials() ->
         xdcode_home.path(),
         ChatGptAuthFixture::new("access-chatgpt")
             .email("user@example.com")
+            .chatgpt_user_id("user-saved")
             .plan_type("pro"),
         AuthCredentialsStoreMode::File,
     )?;
@@ -72,19 +73,19 @@ async fn gcp_account_tracks_provider_changes_with_saved_chatgpt_credentials() ->
     for (provider, expected) in [
         (
             "gcp",
-            json!({"account": {"type": "gcp"}, "requiresHostedAuth": false, "workspaceRouting": null}),
+            json!({"account": {"type": "gcp"}, "userId": null, "requiresHostedAuth": false, "workspaceRouting": null}),
         ),
         (
             "amazon-bedrock",
-            json!({"account": {"type": "amazonBedrock", "usesXdcodeManagedCredentials": false}, "requiresHostedAuth": false, "workspaceRouting": null}),
+            json!({"account": {"type": "amazonBedrock", "usesXdcodeManagedCredentials": false}, "userId": null, "requiresHostedAuth": false, "workspaceRouting": null}),
         ),
         (
             "provider",
-            json!({"account": {"type": "chatgpt", "email": "user@example.com", "planType": "pro"}, "requiresHostedAuth": true, "workspaceRouting": null}),
+            json!({"account": {"type": "chatgpt", "email": "user@example.com", "planType": "pro", "workspaceName": null}, "userId": "user-saved", "requiresHostedAuth": true, "workspaceRouting": null}),
         ),
         (
             "gcp",
-            json!({"account": {"type": "gcp"}, "requiresHostedAuth": false, "workspaceRouting": null}),
+            json!({"account": {"type": "gcp"}, "userId": null, "requiresHostedAuth": false, "workspaceRouting": null}),
         ),
     ] {
         std::fs::write(&config_path, format!("model_provider = \"{provider}\"\n"))?;

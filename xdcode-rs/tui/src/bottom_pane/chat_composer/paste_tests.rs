@@ -1,4 +1,4 @@
-//! Raw paste tabs remain draft text until the user explicitly submits or queues it.
+//! Composer paste handling for literal paths and raw tabs.
 
 use super::tests::new_test_composer;
 use super::*;

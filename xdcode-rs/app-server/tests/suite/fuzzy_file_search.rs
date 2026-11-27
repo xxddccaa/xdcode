@@ -269,6 +269,7 @@ async fn test_fuzzy_file_search_sorts_and_includes_indices() -> Result<()> {
     .await??;
 
     let value = resp.result;
+    // Each basename matches, so its score includes one filename priority bonus.
     let filename_bonus = u32::from(u16::MAX) + 1;
 
     assert_eq!(

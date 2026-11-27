@@ -1,8 +1,4 @@
 //! Drives modern request continuations, including the native verification extension.
-//! Inputs use the existing client service; proofs never bypass its validation.
-//! Session recovery cannot replay a submitted proof; connection closure drops pending inputs.
-
-//! Drives modern request continuations, including the native verification extension.
 //! Inputs use the caller's client service; proofs never bypass its validation.
 //! Session recovery cannot replay a submitted proof; connection closure drops pending inputs.
 
@@ -111,6 +107,9 @@ async fn request(
                     Some(StreamableHttpError::AuthRequired(_))
                 )
             {
+                // Session recovery must not replay the original operation after a
+                // continuation (which may already have consumed a signed proof).
+                // Auth challenges already return without replaying the operation.
                 invalid("MCP continuation failed; the operation was not restarted")
             } else {
                 error
@@ -123,6 +122,7 @@ async fn request(
             ServerResult::InputRequiredResult(result) => {
                 serde_json::to_value(result).map_err(|_| invalid("invalid MCP input request"))?
             }
+            // RMCP's InputRequest union intentionally excludes custom methods.
             ServerResult::CustomResult(result)
                 if result.0.get("resultType").and_then(Value::as_str) == Some("input_required") =>
             {
@@ -139,6 +139,8 @@ async fn request(
         if requests.is_empty() && input.request_state.is_none() {
             return Err(ServiceError::UnexpectedResponse);
         }
+        // Parse the whole round before presenting any prompts. Only standard MCP
+        // inputs and supported Provider elicitation modes are accepted.
         let requests = requests
             .into_iter()
             .map(|(key, value)| parse_input(value).map(|request| (key, request)))
@@ -152,6 +154,8 @@ async fn request(
         }
         let responses =
             futures::future::try_join_all(requests.into_iter().map(|(key, mut request)| {
+                // Prompts outlive individual transport requests, including across
+                // session recovery, so their IDs must not reuse a peer's counter.
                 let native_verification = matches!(&request, ServerRequest::CustomRequest(request)
                     if request.params.as_ref().and_then(|params| params.get("mode"))
                         .and_then(Value::as_str) == Some(crate::user_verification::MODE));
@@ -175,6 +179,9 @@ async fn request(
         let responses = tokio::select! {
             biased;
             _ = async {
+                // RMCP exposes closure status but no awaitable closure notification.
+                // Include explicit cancellation and transport EOF; dropping the joined
+                // handlers releases both their UI callbacks and timeout pause guards.
                 while !service.is_closed() && !service.peer().is_transport_closed() {
                     tokio::time::sleep(Duration::from_millis(/*millis*/ 50)).await;
                 }

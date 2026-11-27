@@ -191,12 +191,13 @@ def main() -> None:
         check=True,
     )
     inputs = PackageInputs(
-        outputs / "xdcode.exe",
-        outputs / "xdcode-code-mode-host.exe",
-        resolve_rg_bin(spec, None),
-        None,
-        outputs / "xdcode-command-runner.exe",
-        outputs / "xdcode-windows-sandbox-setup.exe",
+        entrypoint_bin=outputs / "xdcode.exe",
+        code_mode_host_bin=outputs / "xdcode-code-mode-host.exe",
+        exec_server_bin=None,
+        rg_bin=resolve_rg_bin(spec, None),
+        bwrap_bin=None,
+        xdcode_command_runner_bin=outputs / "xdcode-command-runner.exe",
+        xdcode_windows_sandbox_setup_bin=outputs / "xdcode-windows-sandbox-setup.exe",
     )
     package.mkdir(parents=True)
     build_package_dir(package, upstream["version"], variant, spec, inputs)

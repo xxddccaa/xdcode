@@ -34,6 +34,8 @@ use xdcode_exec_server::ReadFileOptions;
 use xdcode_extension_api::Instructions;
 use xdcode_file_system::FileSystemSandboxContext;
 use xdcode_file_system::FindUpErrorPolicy;
+use xdcode_file_system::MAX_METADATA_BATCH_BYTES;
+use xdcode_file_system::MAX_METADATA_BATCH_PROBES;
 use xdcode_file_system::find_nearest_ancestor_with_markers;
 use xdcode_utils_absolute_path::AbsolutePathBuf;
 use xdcode_utils_path_uri::PathConvention;
@@ -77,7 +79,7 @@ pub(crate) async fn load_project_instructions(
             break;
         }
 
-        let filesystem = turn_environment.environment.get_filesystem();
+        let filesystem = turn_environment.environment().get_filesystem();
         let sandbox = (!turn_environment
             .permission_profile()
             .file_system_sandbox_policy()
@@ -219,6 +221,13 @@ async fn agents_md_paths(
             default_project_root_markers()
         }
     };
+    let filenames = candidate_filenames(config, cwd);
+    match batched_instruction_paths(fs, cwd, &project_root_markers, &filenames, sandbox).await {
+        Ok(paths) => return Ok(paths),
+        Err(err) if err.kind() == io::ErrorKind::Unsupported => {}
+        Err(err) => return Err(err),
+    }
+
     let project_root = find_nearest_ancestor_with_markers(
         fs,
         &dir,
@@ -246,22 +255,18 @@ async fn agents_md_paths(
         vec![dir]
     };
 
-    let candidate_filenames = candidate_filenames(config, cwd);
-    let candidate_filenames = &candidate_filenames;
+    let candidate_filenames = &filenames;
     let mut results = futures::stream::iter(search_dirs)
         .map(|directory| async move {
             for name in candidate_filenames {
                 let candidate = directory
                     .join(name)
                     .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
-                match fs
+                let metadata = fs
                     .get_metadata(&candidate, GetMetadataOptions::default(), sandbox)
-                    .await
-                {
-                    Ok(metadata) if metadata.is_file => return Ok(Some(candidate)),
-                    Ok(_) => {}
-                    Err(err) if err.kind() == io::ErrorKind::NotFound => {}
-                    Err(err) => return Err(err),
+                    .await;
+                if let Some(result) = select_instruction(candidate, metadata) {
+                    return result.map(Some);
                 }
             }
             Ok(None)
@@ -274,6 +279,96 @@ async fn agents_md_paths(
         }
     }
     Ok(found)
+}
+
+/// Start with the working directory, which is always in scope. The first batch
+/// also checks root markers to find any other directories to include. Each round
+/// checks just the next filename in each unresolved directory.
+async fn batched_instruction_paths(
+    fs: &dyn ExecutorFileSystem,
+    cwd: &PathUri,
+    markers: &[String],
+    names: &[&str],
+    sandbox: Option<&FileSystemSandboxContext>,
+) -> io::Result<Vec<PathUri>> {
+    let search_directory = |dir| (dir, names.iter(), None);
+    let mut directories = vec![search_directory(cwd.clone())];
+    let mut check_markers = !markers.is_empty();
+
+    loop {
+        let mut paths = Vec::new();
+        let mut bytes = 0usize;
+        let mut add_path = |dir: &PathUri, name: &str| {
+            let path = dir.join(name).map_err(|_| io::ErrorKind::Unsupported)?;
+            bytes = bytes.saturating_add(path.to_string().len());
+            if paths.len() >= MAX_METADATA_BATCH_PROBES || bytes > MAX_METADATA_BATCH_BYTES {
+                return Err(io::ErrorKind::Unsupported);
+            }
+            paths.push(path);
+            Ok(())
+        };
+        let mut instruction_slots = Vec::new();
+        for (dir, remaining, found) in directories.iter_mut().rev() {
+            if matches!(found, Some(Err(_))) {
+                break;
+            }
+            if found.is_none()
+                && let Some(name) = remaining.next()
+            {
+                add_path(dir, name)?;
+                instruction_slots.push(found);
+            }
+        }
+        if instruction_slots.is_empty() {
+            break;
+        }
+
+        if check_markers {
+            for dir in cwd.ancestors() {
+                for marker in markers {
+                    add_path(&dir, marker)?;
+                }
+            }
+            check_markers = false;
+        }
+
+        let results = fs
+            .get_metadata_batch(&paths, GetMetadataOptions::default(), sandbox)
+            .await?;
+        if results.len() != paths.len() {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+
+        // Marker results, when present, follow the instruction results, nearest directory first.
+        let nearest_marker = results[instruction_slots.len()..]
+            .iter()
+            .position(Result::is_ok);
+        for ((slot, path), result) in instruction_slots.into_iter().zip(paths).zip(results) {
+            *slot = select_instruction(path, result);
+        }
+
+        if let Some(index) = nearest_marker {
+            let depth = index / markers.len();
+            directories.extend(cwd.ancestors().skip(1).take(depth).map(search_directory));
+        }
+    }
+    directories
+        .into_iter()
+        .rev()
+        .filter_map(|(_, _, found)| found)
+        .collect()
+}
+
+fn select_instruction(
+    path: PathUri,
+    result: io::Result<xdcode_file_system::FileMetadata>,
+) -> Option<io::Result<PathUri>> {
+    match result {
+        Ok(metadata) if metadata.is_file => Some(Ok(path)),
+        Ok(_) => None,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => None,
+        Err(err) => Some(Err(err)),
+    }
 }
 
 fn candidate_filenames<'a>(config: &'a Config, cwd: &PathUri) -> Vec<&'a str> {
@@ -307,10 +402,10 @@ fn candidate_filenames<'a>(config: &'a Config, cwd: &PathUri) -> Vec<&'a str> {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LoadedAgentsMd {
     /// Account- or home-scoped instructions supplied by the host.
-    user_instructions: Option<Instructions>,
+    pub(crate) user_instructions: Option<Instructions>,
 
     /// Thread-scoped instructions supplied by the host.
-    thread_instructions: Option<Instructions>,
+    pub(crate) thread_instructions: Option<Instructions>,
 
     /// Ordered instructions and their provenance.
     entries: Vec<InstructionEntry>,

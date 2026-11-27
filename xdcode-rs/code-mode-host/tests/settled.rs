@@ -16,12 +16,12 @@ use xdcode_code_mode::ExecuteRequest;
 use xdcode_code_mode::FunctionCallOutputContentItem;
 use xdcode_code_mode::GrpcCodeModeSessionProvider;
 use xdcode_code_mode::NotificationFuture;
-use xdcode_code_mode::ProcessOwnedCodeModeSessionProvider;
 use xdcode_code_mode::RuntimeResponse;
 use xdcode_code_mode::ToolDefinition;
 use xdcode_code_mode::ToolInvocationFuture;
 use xdcode_code_mode::WaitOutcome;
 use xdcode_code_mode::WaitRequest;
+use xdcode_core::ProcessOwnedGrpcCodeModeSessionProvider;
 use xdcode_protocol::ToolName;
 
 #[path = "support/host.rs"]
@@ -109,6 +109,7 @@ async fn assert_partial_results(provider: &dyn CodeModeSessionProvider) {
                     WaitRequest {
                         cell_id: cell_id.clone(),
                         yield_time_ms: 10,
+                        max_output_tokens: None,
                     },
                     /*preempt*/ None,
                 )
@@ -133,6 +134,7 @@ async fn assert_partial_results(provider: &dyn CodeModeSessionProvider) {
                 WaitRequest {
                     cell_id: cell_id.clone(),
                     yield_time_ms: 5_000,
+                    max_output_tokens: None,
                 },
                 /*preempt*/ None,
             )
@@ -158,7 +160,7 @@ async fn assert_partial_results(provider: &dyn CodeModeSessionProvider) {
 
 #[tokio::test]
 async fn settled_results_stream_over_stdio() {
-    let provider = ProcessOwnedCodeModeSessionProvider::with_host_program(
+    let provider = ProcessOwnedGrpcCodeModeSessionProvider::with_host_program(
         xdcode_utils_cargo_bin::cargo_bin("xdcode-code-mode-host").expect("host binary"),
     );
     tokio::time::timeout(

@@ -73,4 +73,40 @@ for a remote hostname (repeat for multiple names); loopback hosts remain allowed
 Library callers configure this through `StreamableHttpServerConfig`. Normal MCP
 approval policy applies.
 Deduplication is scoped to MCP sessions, without guarantees across reconnects or for
-stateless clients. Plugin packaging, defaults and in-memory launching are separate.
+stateless clients.
+
+## Plugin
+
+Install `plugin/` through the normal plugin flow. Its MCP declaration defaults to
+`http://127.0.0.1:7777/mcp` and `XDCODE_MESSAGE_BOARD_TOKEN`. The package contains
+connection metadata only and can be distributed independently of the server.
+Override `mcp_servers.xdcode_message_board` in ordinary config to point the same
+plugin at a local or deployed implementation of the contract.
+
+Installing the plugin does not start the HTTP process. Generic app-server default
+installation remains separate work.
+
+## In-memory launcher
+
+To start the launcher automatically in Xdcode, enable both features:
+
+```toml
+[features]
+multi_agent_v2 = true
+agent_message_board_mcp = true
+```
+
+The MCP flag defaults off and takes precedence over `agent_message_board`.
+No plugin or endpoint configuration is needed. Boards are temporary and use the
+existing launcher lifecycle; explicit host-supplied board connections are unchanged.
+
+A runner calls `launch_in_memory()`, then registers each tree with
+`server.add_board(session_id, host)`. It supplies the existing `MessageBoardHost`
+for membership and notification delivery. Timestamps use the MCP backend's system
+clock, as in the standalone SQLite server. Configure the same MCP server
+with `server.url()` and the `Authorization` header from `server.authorization()`;
+this overrides the plugin endpoint through normal configuration.
+
+The launcher reuses `serve_http` and `InMemoryAgentMessageBoard` without a SQLite
+registry or new Core hooks. Keep its handle alive for the run. Dropping it cancels
+HTTP and MCP sessions; `server.shutdown().await` also waits for completion.

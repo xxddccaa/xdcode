@@ -1,6 +1,7 @@
 use crate::auth::SharedAuthProvider;
 use crate::common::ResponseStream;
 use crate::common::ResponsesApiRequest;
+use crate::common::with_tool_results;
 use crate::endpoint::session::EndpointSession;
 use crate::error::ApiError;
 use crate::provider::Provider;
@@ -13,6 +14,7 @@ use crate::telemetry::SseTelemetry;
 use http::HeaderMap;
 use http::HeaderValue;
 use http::Method;
+use http::StatusCode;
 use serde_json::Value;
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -21,6 +23,8 @@ use xdcode_client::EncodedJsonBody;
 use xdcode_client::HttpTransport;
 use xdcode_client::RequestCompression;
 use xdcode_client::RequestTelemetry;
+use xdcode_client::TransportError;
+use xdcode_protocol::models::ToolResultBody;
 use xdcode_protocol::protocol::SessionSource;
 
 pub struct ResponsesClient<T: HttpTransport> {
@@ -35,6 +39,7 @@ pub struct ResponsesOptions {
     pub session_source: Option<SessionSource>,
     pub extra_headers: HeaderMap,
     pub compression: Compression,
+    pub tool_results: Vec<(usize, usize, Arc<ToolResultBody>)>,
     pub turn_state: Option<Arc<OnceLock<String>>>,
 }
 
@@ -57,6 +62,16 @@ impl<T: HttpTransport> ResponsesClient<T> {
         }
     }
 
+    pub async fn stream_request(
+        &self,
+        request: ResponsesApiRequest,
+        options: ResponsesOptions,
+    ) -> Result<ResponseStream, ApiError> {
+        self.stream_request_with_observer(request, options, |_| {})
+            .await
+    }
+
+    /// Observes the encoded request before private connector results are attached.
     #[instrument(
         name = "responses.stream_request",
         level = "info",
@@ -67,10 +82,11 @@ impl<T: HttpTransport> ResponsesClient<T> {
             api.path = "/responses"
         )
     )]
-    pub async fn stream_request(
+    pub async fn stream_request_with_observer(
         &self,
         request: ResponsesApiRequest,
         options: ResponsesOptions,
+        on_encoded: impl FnOnce(&bytes::Bytes),
     ) -> Result<ResponseStream, ApiError> {
         let ResponsesOptions {
             session_id,
@@ -78,11 +94,13 @@ impl<T: HttpTransport> ResponsesClient<T> {
             session_source,
             extra_headers,
             compression,
+            tool_results,
             turn_state,
         } = options;
         let body = EncodedJsonBody::encode(&request)
             .map_err(|e| ApiError::Stream(format!("failed to encode responses request: {e}")))?;
 
+        on_encoded(body.shared_bytes());
         let mut headers = extra_headers;
         if let Some(ref thread_id) = thread_id {
             insert_header(&mut headers, "x-client-request-id", thread_id);
@@ -92,6 +110,30 @@ impl<T: HttpTransport> ResponsesClient<T> {
             insert_header(&mut headers, "x-openai-subagent", &subagent);
         }
 
+        if !tool_results.is_empty()
+            && let Ok(json) = std::str::from_utf8(body.as_bytes())
+            && let Some(json) = with_tool_results(json, &tool_results)
+        {
+            let stream = self
+                .stream_encoded(
+                    body.with_private_json(json),
+                    headers.clone(),
+                    compression,
+                    turn_state.clone(),
+                )
+                .await;
+            // A redirect that preserves the request body must start over without private results.
+            if !matches!(
+                stream,
+                Err(ApiError::Transport(TransportError::Http {
+                    status: StatusCode::TEMPORARY_REDIRECT | StatusCode::PERMANENT_REDIRECT,
+                    headers: Some(ref headers),
+                    ..
+                })) if headers.get(http::header::LOCATION).is_some_and(|location| !location.is_empty())
+            ) {
+                return stream;
+            }
+        }
         self.stream_encoded(body, headers, compression, turn_state)
             .await
     }

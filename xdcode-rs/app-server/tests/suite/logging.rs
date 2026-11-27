@@ -30,15 +30,19 @@ use tokio::time::timeout;
 use wiremock::Mock;
 use wiremock::MockServer;
 use wiremock::ResponseTemplate;
+use wiremock::matchers::header;
 use wiremock::matchers::method;
 use wiremock::matchers::path;
 use xdcode_app_server_protocol::ApprovalsReviewer;
 use xdcode_app_server_protocol::AskForApproval;
 use xdcode_app_server_protocol::ClientInfo;
 use xdcode_app_server_protocol::ClientRequest;
+use xdcode_app_server_protocol::ConfigValueWriteParams;
+use xdcode_app_server_protocol::ConfigWriteResponse;
 use xdcode_app_server_protocol::InitializeCapabilities;
 use xdcode_app_server_protocol::JSONRPCMessage;
 use xdcode_app_server_protocol::LoginAccountResponse;
+use xdcode_app_server_protocol::MergeStrategy;
 use xdcode_app_server_protocol::RequestId;
 use xdcode_app_server_protocol::SandboxPolicy;
 use xdcode_app_server_protocol::ServerRequest;
@@ -50,9 +54,7 @@ use xdcode_app_server_protocol::TurnStartResponse;
 use xdcode_app_server_protocol::UserInput;
 use xdcode_features::Feature;
 use xdcode_state::LogQuery;
-use xdcode_state::SqliteConfig;
 use xdcode_state::StateRuntime;
-use xdcode_utils_absolute_path::test_support::PathExt;
 
 const READ_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -291,6 +293,16 @@ supports_websockets = false
 
     let mut thread_ids = Vec::new();
     for provider in ["bearer_provider", "mock_provider"] {
+        let config_id = app_server
+            .send_config_value_write_request(ConfigValueWriteParams {
+                file_path: None,
+                key_path: "model_provider".into(),
+                value: json!(provider),
+                merge_strategy: MergeStrategy::Replace,
+                expected_version: None,
+            })
+            .await?;
+        let _: ConfigWriteResponse = app_server.read_response(config_id).await?;
         let thread = app_server
             .start_thread(ThreadStartParams {
                 model_provider: Some(provider.into()),
@@ -426,6 +438,131 @@ fn standalone_app_server_emits_json_info_events() -> Result<()> {
         })
     );
 
+    Ok(())
+}
+
+async fn metrics_collector_expecting_helper_headers() -> (MockServer, wiremock::MockGuard) {
+    let collector = MockServer::start().await;
+    let export = Mock::given(method("POST"))
+        .and(path("/v1/metrics"))
+        .and(header("x-collector-auth", "from-helper"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1..)
+        .mount_as_scoped(&collector)
+        .await;
+    (collector, export)
+}
+
+fn metrics_helper_config(command: &str, collector: &MockServer) -> String {
+    let endpoint = collector.uri();
+    format!(
+        r#"[otel]
+headers_helper = '{command}'
+headers_helper_refresh_interval_ms = 100
+[otel.metrics_exporter.otlp-http]
+endpoint = "{endpoint}/v1/metrics"
+protocol = "json"
+headers = {{ "x-collector-auth" = "static" }}
+"#
+    )
+}
+
+fn install_otel_test_helper(dir: &std::path::Path) -> Result<&'static str> {
+    #[cfg(unix)]
+    let name = {
+        xdcode_utils_cargo_bin::write_executable(
+            &dir.join("otel-auth"),
+            "#!/bin/sh\ncat headers.json\n",
+        )?;
+        "otel-auth"
+    };
+    #[cfg(windows)]
+    let name = {
+        std::fs::write(dir.join("otel-auth.cmd"), "@type headers.json\r\n")?;
+        "otel-auth.cmd"
+    };
+    std::fs::write(
+        dir.join("headers.json"),
+        r#"{"x-collector-auth":"from-helper"}"#,
+    )?;
+    Ok(name)
+}
+
+#[tokio::test]
+async fn user_otel_helper_runs_from_xdcode_home_with_managed_environment() -> Result<()> {
+    let home = TempDir::new()?;
+    let name = install_otel_test_helper(home.path())?;
+    let (collector, export) = metrics_collector_expecting_helper_headers().await;
+    std::fs::write(
+        home.path().join("config.toml"),
+        metrics_helper_config(name, &collector),
+    )?;
+    std::fs::write(
+        home.path().join("requirements.toml"),
+        "[otel]\nenvironment = 'managed'",
+    )?;
+    let _server = TestAppServer::builder()
+        .with_xdcode_home(home.path())
+        .without_auto_env()
+        .with_env_overrides(&[("OTEL_METRIC_EXPORT_INTERVAL", Some("100"))])
+        .build_initialized_with_timeout(READ_TIMEOUT)
+        .await?;
+    timeout(READ_TIMEOUT, export.wait_until_satisfied()).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn managed_otel_helper_runs_from_its_install_directory() -> Result<()> {
+    let home = TempDir::new()?;
+    let install = tempfile::Builder::new()
+        .prefix("managed helpers ")
+        .tempdir()?;
+    let name = install_otel_test_helper(install.path())?;
+    let executable = install.path().join(name);
+    let decoy = home.path().join(name);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        xdcode_utils_cargo_bin::write_executable(&decoy, "#!/bin/sh\ntouch decoy-ran\n")?;
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o644))?;
+    }
+    #[cfg(windows)]
+    std::fs::write(&decoy, "@echo decoy>decoy-ran")?;
+    let (collector, export) = metrics_collector_expecting_helper_headers().await;
+    let command = executable.to_str().context("UTF-8 helper path")?;
+    std::fs::write(
+        home.path().join("requirements.toml"),
+        metrics_helper_config(command, &collector),
+    )?;
+    let mut server = TestAppServer::builder()
+        .with_xdcode_home(home.path())
+        .without_auto_env()
+        .with_env_overrides(&[("OTEL_METRIC_EXPORT_INTERVAL", Some("100"))])
+        .build_initialized_with_timeout(READ_TIMEOUT)
+        .await?;
+    #[cfg(unix)]
+    {
+        let error = std::io::Error::from_raw_os_error(libc::EACCES);
+        server
+            .wait_for_stderr_line(
+                &format!("managed OTel helper {command}: headers helper failed to start: {error}"),
+                READ_TIMEOUT,
+            )
+            .await?;
+    }
+    let request = server.send_config_requirements_read_request().await?;
+    let _: Value = timeout(READ_TIMEOUT, server.read_response(request)).await??;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755))?;
+    }
+    timeout(READ_TIMEOUT, export.wait_until_satisfied()).await?;
+    assert!(!home.path().join("decoy-ran").exists());
+    assert!(!install.path().join("decoy-ran").exists());
+    for request in collector.received_requests().await.unwrap() {
+        assert_eq!(request.headers["x-collector-auth"], "from-helper");
+    }
     Ok(())
 }
 

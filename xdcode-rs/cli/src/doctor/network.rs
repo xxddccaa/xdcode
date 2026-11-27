@@ -4,12 +4,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
-use xdcode_arg0::Arg0DispatchPaths;
-use xdcode_tui::Cli as TuiCli;
-use xdcode_utils_cli::CliConfigOverrides;
 
 use http::HeaderMap;
 use http::Method;
+use xdcode_arg0::Arg0DispatchPaths;
 use xdcode_core::config::Config;
 use xdcode_http_client::HttpClientBuilder;
 #[cfg(target_os = "macos")]
@@ -19,6 +17,8 @@ use xdcode_http_client::RouteAwareRequestError;
 use xdcode_http_client::RouteFailureClass;
 #[cfg(target_os = "macos")]
 use xdcode_http_client::macos_system_proxy_configuration;
+use xdcode_tui::Cli as TuiCli;
+use xdcode_utils_cli::CliConfigOverrides;
 
 use super::CheckStatus;
 use super::DoctorCheck;
@@ -77,7 +77,6 @@ pub(super) async fn checks(
 
 #[cfg(any(target_os = "macos", test))]
 pub(super) const SYSTEM_PROXY_REMEDIATION: &str = "A macOS system proxy is configured but unused. If your organization requires it, ask your administrator whether to enable the experimental System proxy setting in `/experimental` or with `xdcode features enable respect_system_proxy`. Restart Xdcode after changing this setting.";
-
 pub(super) fn check(config: Option<&Config>) -> DoctorCheck {
     let mut details = Vec::new();
     push_proxy_env_details(&mut details);

@@ -13,11 +13,6 @@ xdcode_rust_crate(
         "src/**/*.rs",
         "tests/unit/**/*.rs",
     ]),
-    deps_extra = [
-        "@crates//:opentelemetry",
-        "@crates//:opentelemetry_sdk",
-        "@crates//:toml",
-    ],
     extra_binaries = [
         "//xdcode-rs/bwrap:bwrap",
         "//xdcode-rs/windows-sandbox-rs:xdcode-command-runner",

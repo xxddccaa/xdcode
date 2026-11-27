@@ -28,6 +28,7 @@ use xdcode_message_board::PostMetadata;
 use xdcode_message_board::PostPreview;
 use xdcode_message_board::PostRequest;
 use xdcode_message_board::ReadPostRequest;
+use xdcode_message_board::UpsertChannelRequest;
 use xdcode_protocol::AgentPath;
 use xdcode_protocol::SessionId;
 use xdcode_protocol::ThreadId;
@@ -138,6 +139,20 @@ async fn remote_board_preserves_the_host_contract() -> anyhow::Result<()> {
                 request_id: post.request_id.clone(),
                 destination: post.destination.clone(),
                 text: post.text.clone(),
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        unsupported.details(),
+        XdcodeErrorDetails::InvalidRequest(_)
+    ));
+    let unsupported = board_handle
+        .upsert_channel(
+            caller,
+            UpsertChannelRequest {
+                channel_name: "results".into(),
+                description: "Updated purpose".to_owned().try_into()?,
             },
         )
         .await

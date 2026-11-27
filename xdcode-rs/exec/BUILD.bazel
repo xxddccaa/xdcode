@@ -3,6 +3,7 @@ load("//:defs.bzl", "xdcode_rust_crate")
 xdcode_rust_crate(
     name = "exec",
     crate_name = "xdcode_exec",
+    integration_compile_data_extra = ["tests/fixtures/apply_patch_freeform_final.txt"],
     test_shard_counts = {
         "exec-all-test": 8,
     },

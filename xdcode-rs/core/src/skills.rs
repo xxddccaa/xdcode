@@ -12,10 +12,10 @@ use xdcode_analytics::SkillInvocationLocation;
 use xdcode_analytics::TrackEventsContext;
 use xdcode_analytics::build_track_events_context;
 use xdcode_core_plugins::PluginsManager;
-use xdcode_exec_server::EnvironmentAccess;
-use xdcode_exec_server::EnvironmentAccessKey;
 use xdcode_extension_api::SkillInvocationInput;
 use xdcode_extension_api::SkillInvocationKind;
+use xdcode_file_system::EnvironmentAccess;
+use xdcode_file_system::EnvironmentAccessKey;
 use xdcode_otel::SkillInvocationEvent;
 use xdcode_otel::SkillInvocationType;
 use xdcode_otel::sanitize_metric_tag_value;
@@ -53,6 +53,7 @@ pub(crate) fn skills_load_input_for_environments<'a>(
     effective_skill_roots: Vec<PluginSkillRoot>,
     environments: &'a TurnEnvironmentSnapshot,
 ) -> (HostSkillsLoadInput, Option<&'a TurnEnvironment>) {
+    // Preserve primary-repository discovery independently of the host config cwd.
     let workspace = environments.primary().and_then(|environment| {
         environment
             .cwd()

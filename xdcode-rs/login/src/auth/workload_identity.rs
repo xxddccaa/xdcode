@@ -10,15 +10,22 @@ use std::sync::atomic::Ordering;
 use thiserror::Error;
 use url::Url;
 use xdcode_http_client::HttpClientFactory;
-use xdcode_protocol::config_types::ForcedLoginMethod;
 use xdcode_protocol::shell_environment::PROVIDER_FEDERATION_RULE_ID_ENV_VAR;
 use xdcode_protocol::shell_environment::PROVIDER_IDENTITY_TOKEN_FILE_ENV_VAR;
+use xdcode_protocol::shell_environment::PROVIDER_IDENTITY_TOKEN_SOURCE_ENV_VAR;
+use xdcode_protocol::shell_environment::PROVIDER_SPIFFE_AUDIENCE_ENV_VAR;
+use xdcode_protocol::shell_environment::PROVIDER_SPIFFE_ID_ENV_VAR;
 use xdcode_protocol::shell_environment::PROVIDER_WORKLOAD_IDENTITY_CONTEXT_ENV_VAR;
+use xdcode_protocol::shell_environment::SPIFFE_ENDPOINT_SOCKET_ENV_VAR;
+use xdcode_workload_identity::AssertionSource;
+use xdcode_workload_identity::SpiffeWorkloadApi;
 use xdcode_workload_identity::WorkloadIdentityConfig;
 use xdcode_workload_identity::WorkloadIdentityError;
 use xdcode_workload_identity::WorkloadIdentityExchange;
+use xdcode_workload_identity::WorkloadIdentityMetadata;
 use xdcode_workload_identity::WorkloadIdentityToken;
 
+use super::ApiKeyAuth;
 use super::AuthConfig;
 use super::ExternalAuth;
 use super::ExternalAuthFuture;
@@ -50,7 +57,7 @@ impl WorkloadIdentityEnvironment {
 
 #[derive(Clone)]
 struct WorkloadIdentitySessionConfig {
-    assertion_file: PathBuf,
+    assertion_source: AssertionSource,
     environment: WorkloadIdentityEnvironment,
     federation_rule_id: String,
     http_client_factory: HttpClientFactory,
@@ -62,7 +69,7 @@ impl std::fmt::Debug for WorkloadIdentitySessionConfig {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("WorkloadIdentitySessionConfig")
-            .field("assertion_file", &self.assertion_file)
+            .field("assertion_source", &self.assertion_source)
             .field("environment", &self.environment)
             .field("federation_rule_id", &self.federation_rule_id)
             .field("http_client_factory", &self.http_client_factory)
@@ -81,7 +88,7 @@ impl std::fmt::Debug for WorkloadIdentitySessionConfig {
 impl WorkloadIdentitySessionConfig {
     fn fingerprint(&self) -> WorkloadIdentityFingerprint {
         WorkloadIdentityFingerprint {
-            assertion_file: self.assertion_file.clone(),
+            assertion_source: self.assertion_source.clone(),
             environment: self.environment,
             federation_rule_id: self.federation_rule_id.trim().to_string(),
             token_url: self.token_url.to_string(),
@@ -92,7 +99,7 @@ impl WorkloadIdentitySessionConfig {
     fn into_exchange(self) -> Result<WorkloadIdentityExchange, WorkloadIdentityError> {
         let config = WorkloadIdentityConfig::new(
             self.federation_rule_id,
-            self.assertion_file,
+            self.assertion_source,
             self.workload_identity_context,
         )?;
         WorkloadIdentityExchange::new(config, self.token_url, self.http_client_factory)
@@ -101,7 +108,7 @@ impl WorkloadIdentitySessionConfig {
 
 #[derive(Clone, PartialEq, Eq)]
 struct WorkloadIdentityFingerprint {
-    assertion_file: PathBuf,
+    assertion_source: AssertionSource,
     environment: WorkloadIdentityEnvironment,
     federation_rule_id: String,
     token_url: String,
@@ -122,8 +129,8 @@ pub(super) enum WorkloadIdentitySessionError {
 
 /// Returns whether workload identity was selected through process configuration.
 ///
-/// Either marker selects workload identity. Partial configuration then fails validation rather
-/// than falling back to another credential source.
+/// Provider workload identity markers select this mode; an ambient SPIFFE socket alone does not.
+/// Partial configuration fails validation rather than falling back to another credential source.
 pub fn is_workload_identity_selected() -> bool {
     false
 }
@@ -131,26 +138,53 @@ pub fn is_workload_identity_selected() -> bool {
 fn resolve_config(
     chatgpt_base_url: &str,
     environment: ProcessEnvironment,
-    chatgpt_login_allowed: bool,
     auth_route_config: AuthRouteConfig,
 ) -> Result<Option<WorkloadIdentitySessionConfig>, WorkloadIdentitySessionError> {
     if !environment.has_marker() {
         return Ok(None);
-    }
-    if !chatgpt_login_allowed {
-        return Err(invalid_config(
-            "workload identity requires a login policy that permits ChatGPT authentication",
-        ));
     }
 
     let federation_rule_id = required_unicode(
         environment.federation_rule_id,
         PROVIDER_FEDERATION_RULE_ID_ENV_VAR,
     )?;
-    let assertion_file = required_path(
-        environment.identity_token_file,
-        PROVIDER_IDENTITY_TOKEN_FILE_ENV_VAR,
+    let source = optional_unicode(
+        environment.identity_token_source,
+        PROVIDER_IDENTITY_TOKEN_SOURCE_ENV_VAR,
     )?;
+    let assertion_source = match source.as_deref() {
+        None | Some("file") => {
+            if environment.spiffe_audience.is_some() || environment.spiffe_id.is_some() {
+                return Err(invalid_config(
+                    "SPIFFE settings require PROVIDER_IDENTITY_TOKEN_SOURCE=spiffe",
+                ));
+            }
+            AssertionSource::File(required_path(
+                environment.identity_token_file,
+                PROVIDER_IDENTITY_TOKEN_FILE_ENV_VAR,
+            )?)
+        }
+        Some("spiffe") => {
+            if environment.identity_token_file.is_some() {
+                return Err(invalid_config(
+                    "SPIFFE authentication cannot also set PROVIDER_IDENTITY_TOKEN_FILE",
+                ));
+            }
+            let endpoint =
+                required_unicode(environment.spiffe_endpoint, SPIFFE_ENDPOINT_SOCKET_ENV_VAR)?;
+            let audience = required_unicode(
+                environment.spiffe_audience,
+                PROVIDER_SPIFFE_AUDIENCE_ENV_VAR,
+            )?;
+            let spiffe_id = optional_unicode(environment.spiffe_id, PROVIDER_SPIFFE_ID_ENV_VAR)?;
+            AssertionSource::Spiffe(SpiffeWorkloadApi::new(&endpoint, audience, spiffe_id)?)
+        }
+        Some(_) => {
+            return Err(invalid_config(
+                "PROVIDER_IDENTITY_TOKEN_SOURCE must be file or spiffe",
+            ));
+        }
+    };
     let workload_identity_context = optional_unicode(
         environment.workload_identity_context,
         PROVIDER_WORKLOAD_IDENTITY_CONTEXT_ENV_VAR,
@@ -158,7 +192,7 @@ fn resolve_config(
     let auth_environment = classify_auth_environment(chatgpt_base_url)?;
 
     Ok(Some(WorkloadIdentitySessionConfig {
-        assertion_file,
+        assertion_source,
         environment: auth_environment,
         federation_rule_id,
         http_client_factory: auth_route_config
@@ -247,6 +281,10 @@ fn invalid_config(message: impl Into<String>) -> WorkloadIdentitySessionError {
 struct ProcessEnvironment {
     federation_rule_id: Option<OsString>,
     identity_token_file: Option<OsString>,
+    identity_token_source: Option<OsString>,
+    spiffe_endpoint: Option<OsString>,
+    spiffe_audience: Option<OsString>,
+    spiffe_id: Option<OsString>,
     workload_identity_context: Option<OsString>,
 }
 
@@ -255,28 +293,50 @@ impl ProcessEnvironment {
         Self {
             federation_rule_id: std::env::var_os(PROVIDER_FEDERATION_RULE_ID_ENV_VAR),
             identity_token_file: std::env::var_os(PROVIDER_IDENTITY_TOKEN_FILE_ENV_VAR),
+            identity_token_source: std::env::var_os(PROVIDER_IDENTITY_TOKEN_SOURCE_ENV_VAR),
+            spiffe_endpoint: std::env::var_os(SPIFFE_ENDPOINT_SOCKET_ENV_VAR),
+            spiffe_audience: std::env::var_os(PROVIDER_SPIFFE_AUDIENCE_ENV_VAR),
+            spiffe_id: std::env::var_os(PROVIDER_SPIFFE_ID_ENV_VAR),
             workload_identity_context: std::env::var_os(PROVIDER_WORKLOAD_IDENTITY_CONTEXT_ENV_VAR),
         }
     }
 
     fn has_marker(&self) -> bool {
-        self.federation_rule_id.is_some() || self.identity_token_file.is_some()
+        self.federation_rule_id.is_some()
+            || self.identity_token_file.is_some()
+            || self.identity_token_source.is_some()
+            || self.spiffe_audience.is_some()
+            || self.spiffe_id.is_some()
     }
 }
 
 #[derive(Clone, PartialEq, Eq)]
-struct WorkloadIdentitySubject {
-    account_id: String,
-    account_user_id: String,
-    user_id: String,
+enum WorkloadIdentitySubject {
+    Chatgpt {
+        account_id: String,
+        account_user_id: String,
+        user_id: String,
+    },
+    Api {
+        organization_id: String,
+        project_id: String,
+        service_account_id: String,
+    },
 }
 
-impl From<&WorkloadIdentityToken> for WorkloadIdentitySubject {
-    fn from(token: &WorkloadIdentityToken) -> Self {
-        Self {
-            account_id: token.chatgpt_account_id.clone(),
-            account_user_id: token.chatgpt_account_user_id.clone(),
-            user_id: token.user_id.clone(),
+impl From<&WorkloadIdentityMetadata> for WorkloadIdentitySubject {
+    fn from(metadata: &WorkloadIdentityMetadata) -> Self {
+        match metadata {
+            WorkloadIdentityMetadata::Chatgpt(metadata) => Self::Chatgpt {
+                account_id: metadata.chatgpt_account_id.clone(),
+                account_user_id: metadata.chatgpt_account_user_id.clone(),
+                user_id: metadata.user_id.clone(),
+            },
+            WorkloadIdentityMetadata::Api(metadata) => Self::Api {
+                organization_id: metadata.api_organization_id.clone(),
+                project_id: metadata.api_project_id.clone(),
+                service_account_id: metadata.user_id.clone(),
+            },
         }
     }
 }
@@ -296,13 +356,19 @@ impl WorkloadIdentitySession {
 
     fn accept_subject(
         &self,
-        token: &WorkloadIdentityToken,
+        metadata: &WorkloadIdentityMetadata,
         previous_account_id: Option<&str>,
     ) -> Result<(), WorkloadIdentityError> {
-        if previous_account_id.is_some_and(|account_id| account_id != token.chatgpt_account_id) {
+        let account_id = match metadata {
+            WorkloadIdentityMetadata::Chatgpt(metadata) => {
+                Some(metadata.chatgpt_account_id.as_str())
+            }
+            WorkloadIdentityMetadata::Api(_) => None,
+        };
+        if previous_account_id.is_some() && previous_account_id != account_id {
             return Err(WorkloadIdentityError::InvalidExchangeResponse);
         }
-        let subject = WorkloadIdentitySubject::from(token);
+        let subject = WorkloadIdentitySubject::from(metadata);
         let mut current = self
             .subject
             .lock()
@@ -409,19 +475,37 @@ impl WorkloadIdentityExternalAuth {
         token: &WorkloadIdentityToken,
         previous_account_id: Option<&str>,
     ) -> std::io::Result<XdcodeAuth> {
-        let auth = XdcodeAuth::from_external_chatgpt_tokens(
-            &token.access_token,
-            &token.chatgpt_account_id,
-            token.chatgpt_plan_type.as_deref(),
-        )
-        .map_err(|_| std::io::Error::other(WorkloadIdentityError::InvalidExchangeResponse))?;
-        if auth.get_chatgpt_user_id().as_deref() != Some(token.user_id.as_str()) {
-            return Err(std::io::Error::other(
-                WorkloadIdentityError::InvalidExchangeResponse,
-            ));
-        }
+        let auth = match &token.metadata {
+            WorkloadIdentityMetadata::Api(metadata) => {
+                if !super::source::has_session_claim(&token.access_token) {
+                    return Err(std::io::Error::other(
+                        WorkloadIdentityError::InvalidExchangeResponse,
+                    ));
+                }
+                XdcodeAuth::ApiKey(ApiKeyAuth {
+                    api_key: token.access_token.clone(),
+                    workload_identity: Some(metadata.clone()),
+                })
+            }
+            WorkloadIdentityMetadata::Chatgpt(metadata) => {
+                let auth = XdcodeAuth::from_external_chatgpt_tokens(
+                    &token.access_token,
+                    &metadata.chatgpt_account_id,
+                    metadata.chatgpt_plan_type.as_deref(),
+                )
+                .map_err(|_| {
+                    std::io::Error::other(WorkloadIdentityError::InvalidExchangeResponse)
+                })?;
+                if auth.get_chatgpt_user_id().as_deref() != Some(metadata.user_id.as_str()) {
+                    return Err(std::io::Error::other(
+                        WorkloadIdentityError::InvalidExchangeResponse,
+                    ));
+                }
+                auth
+            }
+        };
         self.session
-            .accept_subject(token, previous_account_id)
+            .accept_subject(&token.metadata, previous_account_id)
             .map_err(std::io::Error::other)?;
         Ok(auth)
     }

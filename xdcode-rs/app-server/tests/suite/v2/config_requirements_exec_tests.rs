@@ -17,7 +17,7 @@ use xdcode_app_server_protocol::CommandExecutionRequestApprovalResponse;
 use xdcode_app_server_protocol::CommandExecutionStatus;
 use xdcode_app_server_protocol::ItemCompletedNotification;
 use xdcode_app_server_protocol::ServerRequest;
-use xdcode_app_server_protocol::ThreadItem;
+use xdcode_app_server_protocol::ThreadItemPayload;
 use xdcode_app_server_protocol::ThreadStartParams;
 use xdcode_app_server_protocol::TurnCompletedNotification;
 use xdcode_app_server_protocol::TurnStartParams;
@@ -125,12 +125,12 @@ decision = "prompt"
         loop {
             let completed: ItemCompletedNotification =
                 app.read_notification("item/completed").await?;
-            if let ThreadItem::CommandExecution {
+            if let ThreadItemPayload::CommandExecution {
                 id,
                 status,
                 exit_code,
                 ..
-            } = completed.item
+            } = completed.item.payload
                 && id == call_id
             {
                 assert_eq!(

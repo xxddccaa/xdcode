@@ -1,4 +1,4 @@
-//! Exercises board tools through the runtime, including resume and active-only notices.
+//! Exercises board tools through the runtime, including resume and native mailbox notifications.
 
 use anyhow::Context;
 use core_test_support::context_snapshot;
@@ -30,6 +30,9 @@ use xdcode_protocol::protocol::MultiAgentVersion;
 use xdcode_protocol::protocol::ThreadSettingsOverrides;
 use xdcode_protocol::user_input::UserInput;
 
+#[path = "scenarios_agent_message_board_http.rs"]
+mod http;
+
 #[path = "scenarios_agent_message_board_remote.rs"]
 mod remote;
 
@@ -39,16 +42,17 @@ enum BoardClock {
 }
 
 impl xdcode_core::TimeProvider for BoardClock {
-    fn current_time(&self, _thread_id: xdcode_protocol::ThreadId) -> xdcode_core::TimeFuture<'_> {
-        Box::pin(async move {
-            match self {
-                Self::Available => Ok(chrono::DateTime::parse_from_rfc3339(
-                    "2026-09-18T12:00:00Z",
-                )?
-                .with_timezone(&chrono::Utc)),
-                Self::Unavailable => Err(anyhow::anyhow!("board clock unavailable")),
-            }
-        })
+    fn current_time(
+        &self,
+        _thread_id: xdcode_protocol::ThreadId,
+    ) -> anyhow::Result<chrono::DateTime<chrono::Utc>> {
+        match self {
+            Self::Available => Ok(
+                chrono::DateTime::parse_from_rfc3339("2026-09-18T12:00:00Z")?
+                    .with_timezone(&chrono::Utc),
+            ),
+            Self::Unavailable => Err(anyhow::anyhow!("board clock unavailable")),
+        }
     }
 
     fn sleep(
@@ -448,6 +452,7 @@ async fn board_notifications_do_not_reopen_a_final_answer(
             gate: Some(child_gate),
             body: done(),
         }],
+        // Native mail is drained after the new task's first model step.
         response(tool("next-step", "get_channels", json!({}))),
         response(done()),
     ])
@@ -1019,6 +1024,7 @@ async fn xdcode_instances_share_board_with_fixed_access() -> anyhow::Result<()> 
             }),
         )),
         response(done()),
+        // Queued board notices preempt the commentary before its planned checkpoint.
         response(tool("checkpoint", "get_channels", json!({}))),
         response(done()),
     ])
@@ -1140,7 +1146,11 @@ async fn xdcode_instances_share_board_with_fixed_access() -> anyhow::Result<()> 
             text_elements: vec![],
         }]))
         .await?;
-    wait_for_event(guardian, |event| matches!(event, EventMsg::TurnStarted(_))).await;
+    let guardian_turn = wait_for_event_match(guardian, |event| match event {
+        EventMsg::TurnStarted(event) => Some(event.turn_id.clone()),
+        _ => None,
+    })
+    .await;
     wait_for_event(guardian, |event| {
         matches!(event, EventMsg::ItemStarted(event)
         if matches!(&event.item, TurnItem::AgentMessage(message) if message.id == "watching"))
@@ -1153,9 +1163,16 @@ async fn xdcode_instances_share_board_with_fixed_access() -> anyhow::Result<()> 
         }]))
         .await?;
     wait_for_event(writer, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+    // Acknowledgement is ordered after both notices in the recipient's submission queue.
     guardian
         .update_thread_settings(ThreadSettingsOverrides::default())
         .await?;
+    assert_eq!(
+        guardian
+            .wait_for_input_activity(&guardian_turn, std::time::Duration::from_secs(/*secs*/ 10))
+            .await,
+        xdcode_core::InputWaitOutcome::MailboxActivity,
+    );
     release
         .send(())
         .expect("release Guardian after notification delivery");

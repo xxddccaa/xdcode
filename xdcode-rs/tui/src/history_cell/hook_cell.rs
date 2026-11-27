@@ -769,7 +769,7 @@ mod tests {
             handler_type: xdcode_app_server_protocol::HookHandlerType::Command,
             execution_mode: xdcode_app_server_protocol::HookExecutionMode::Sync,
             scope: xdcode_app_server_protocol::HookScope::Turn,
-            source_path: test_path_buf("/tmp/hooks.json").abs(),
+            source_path: test_path_buf("/tmp/hooks.json").abs().into(),
             source: xdcode_app_server_protocol::HookSource::User,
             display_order: 0,
             status: HookRunStatus::Running,

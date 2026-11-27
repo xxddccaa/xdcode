@@ -19,7 +19,14 @@ use xdcode_protocol::error::XdcodeErrorDetails;
 use xdcode_protocol::model_types::ApprovalMessages;
 use xdcode_protocol::model_types::ModelsResponse;
 use xdcode_protocol::model_types::PermissionMessages;
+use xdcode_protocol::models::ManagedFileSystemPermissions;
 use xdcode_protocol::models::PermissionProfile;
+use xdcode_protocol::permissions::FileSystemAccessMode;
+use xdcode_protocol::permissions::FileSystemPath;
+use xdcode_protocol::permissions::FileSystemSandboxEntry;
+use xdcode_protocol::permissions::FileSystemSandboxPolicy;
+use xdcode_protocol::permissions::FileSystemSpecialPath;
+use xdcode_protocol::permissions::NetworkSandboxPolicy;
 use xdcode_protocol::protocol::AskForApproval;
 use xdcode_protocol::protocol::EventMsg;
 use xdcode_protocol::protocol::Op;
@@ -27,11 +34,180 @@ use xdcode_protocol::protocol::ThreadSettingsOverrides;
 use xdcode_protocol::protocol::ThreadSettingsSnapshot;
 use xdcode_protocol::protocol::XdcodeErrorInfo;
 use xdcode_protocol::user_input::UserInput;
+use xdcode_utils_absolute_path::AbsolutePathBuf;
+use xdcode_utils_path_uri::PathUri;
 
 const INITIAL_MODEL: &str = "gpt-5.4";
 const PROTECTED_MODEL: &str = "gpt-5.2";
 const REVIEW_INSTRUCTIONS: &str = "Protected-model automatic review instructions.";
 const PERMISSION_INSTRUCTIONS: &str = "Protected-model read-only instructions.";
+
+#[tokio::test]
+async fn protected_model_startup_preserves_legacy_permission_behavior() -> Result<()> {
+    enum StartupExpectation {
+        Preserve,
+        Downgrade,
+        Reject,
+    }
+
+    skip_if_no_network!(Ok(()));
+    let server = responses::start_mock_server().await;
+    let root_write = FileSystemSandboxPolicy::restricted(vec![FileSystemSandboxEntry::new(
+        FileSystemPath::Special {
+            value: FileSystemSpecialPath::Root,
+        },
+        FileSystemAccessMode::Write,
+    )]);
+    let mut carveout = root_write.clone();
+    carveout.entries.push(FileSystemSandboxEntry::new(
+        FileSystemPath::Special {
+            value: FileSystemSpecialPath::Tmpdir,
+        },
+        FileSystemAccessMode::Read,
+    ));
+    let mut unprojectable = root_write.clone();
+    unprojectable.entries.push(FileSystemSandboxEntry::new(
+        PathUri::parse("file:///%00/bad/path/YQ")?.into(),
+        FileSystemAccessMode::Write,
+    ));
+    let mut projectable = root_write.clone();
+    let local_path = AbsolutePathBuf::try_from(std::env::current_dir()?)?;
+    projectable.entries.push(FileSystemSandboxEntry::new(
+        local_path.into(),
+        FileSystemAccessMode::Write,
+    ));
+    for (profile, expectation) in [
+        (PermissionProfile::Disabled, StartupExpectation::Downgrade),
+        (
+            PermissionProfile::Managed {
+                file_system: ManagedFileSystemPermissions::Unrestricted,
+                network: NetworkSandboxPolicy::Enabled,
+            },
+            StartupExpectation::Downgrade,
+        ),
+        (
+            PermissionProfile::from_runtime_permissions(&root_write, NetworkSandboxPolicy::Enabled),
+            StartupExpectation::Downgrade,
+        ),
+        (
+            PermissionProfile::from_runtime_permissions(
+                &projectable,
+                NetworkSandboxPolicy::Enabled,
+            ),
+            StartupExpectation::Downgrade,
+        ),
+        (
+            PermissionProfile::from_runtime_permissions(
+                &root_write,
+                NetworkSandboxPolicy::Restricted,
+            ),
+            StartupExpectation::Reject,
+        ),
+        (
+            PermissionProfile::External {
+                network: NetworkSandboxPolicy::Enabled,
+            },
+            StartupExpectation::Reject,
+        ),
+        (
+            PermissionProfile::External {
+                network: NetworkSandboxPolicy::Restricted,
+            },
+            StartupExpectation::Reject,
+        ),
+        (PermissionProfile::read_only(), StartupExpectation::Preserve),
+        (
+            PermissionProfile::workspace_write(),
+            StartupExpectation::Preserve,
+        ),
+        (
+            PermissionProfile::from_runtime_permissions(&carveout, NetworkSandboxPolicy::Enabled),
+            StartupExpectation::Preserve,
+        ),
+        (
+            PermissionProfile::from_runtime_permissions(
+                &unprojectable,
+                NetworkSandboxPolicy::Enabled,
+            ),
+            StartupExpectation::Reject,
+        ),
+    ] {
+        let expected = match expectation {
+            StartupExpectation::Preserve => Some(profile.clone()),
+            StartupExpectation::Downgrade => Some(PermissionProfile::workspace_write()),
+            StartupExpectation::Reject => None,
+        };
+        let case = format!("{profile:?}");
+        let result = test_xdcode()
+            .with_model(PROTECTED_MODEL)
+            .with_cloud_config_bundle(
+                CloudConfigBundleFixture::loader_with_enterprise_requirement(
+                    "[auto_review]\nrequired_on_models = [\"gpt-5.2\"]\n",
+                ),
+            )
+            .with_config(move |config| {
+                config.workspace_roots = vec![config.cwd.clone()];
+                config
+                    .permissions
+                    .set_workspace_roots(config.workspace_roots.clone());
+                config.permissions.approval_policy =
+                    Constrained::allow_any(AskForApproval::OnRequest);
+                config
+                    .permissions
+                    .set_permission_profile(profile)
+                    .expect("set permission profile");
+                config
+                    .features
+                    .enable(Feature::GuardianApproval)
+                    .expect("enable Guardian");
+            })
+            .build_with_auto_env(&server)
+            .await;
+        if let Some(expected) = expected {
+            let test = result?;
+            let settings = test.xdcode.thread_settings_snapshot().await;
+            let restored = test.xdcode.restorable_thread_settings().await;
+            let environments = restored.environments.expect("captured environments");
+            let environment = environments
+                .environment_requests
+                .first()
+                .expect("selected executor environment");
+            let actual = restored
+                .permission_profile
+                .expect("captured permission profile")
+                .materialize_project_roots_with_path_uris(&environment.workspace_roots);
+            // Keep foreign executor roots intact and derive the expectation from the fixture.
+            let expected = expected.materialize_project_roots_with_path_uris(
+                &test.executor_environment().selection().workspace_roots,
+            );
+            assert_eq!(
+                (
+                    actual,
+                    settings.approvals_reviewer,
+                    settings.cwd,
+                    settings.runtime_workspace_roots
+                ),
+                (
+                    expected,
+                    ApprovalsReviewer::AutoReview,
+                    test.config.cwd.clone(),
+                    Some(test.config.workspace_roots.clone())
+                ),
+                "{case}",
+            );
+            test.xdcode.shutdown_and_wait().await?;
+        } else {
+            let error = result
+                .err()
+                .expect("protected model must reject full disk writes");
+            assert!(
+                error.to_string().contains("you need to use auto review"),
+                "{case}: {error}"
+            );
+        }
+    }
+    Ok(())
+}
 
 #[derive(Clone, Copy)]
 enum SettingsOperation {
@@ -137,6 +313,8 @@ async fn protected_model_settings_use_the_proposed_permissions(
         on_request_auto_review: Some(REVIEW_INSTRUCTIONS.to_string()),
         never: None,
         unless_trusted: None,
+        granular: None,
+        ..Default::default()
     });
     messages.permissions = Some(PermissionMessages {
         danger_full_access: None,

@@ -21,12 +21,12 @@ use xdcode_code_mode::CodeModeSessionProvider;
 use xdcode_code_mode::CodeModeToolKind;
 use xdcode_code_mode::ExecuteRequest;
 use xdcode_code_mode::NotificationFuture;
-use xdcode_code_mode::ProcessOwnedCodeModeSessionProvider;
 use xdcode_code_mode::RuntimeResponse;
 use xdcode_code_mode::ToolDefinition;
 use xdcode_code_mode::ToolInvocationFuture;
 use xdcode_code_mode::WaitOutcome;
 use xdcode_code_mode::WaitRequest;
+use xdcode_core::ProcessOwnedGrpcCodeModeSessionProvider;
 use xdcode_protocol::ToolName;
 use xdcode_protocol::protocol::W3cTraceContext;
 
@@ -84,7 +84,7 @@ async fn stdio_callbacks_preserve_context_across_overlapping_yielded_cells() {
     let subscriber = tracing_subscriber::registry()
         .with(tracing_opentelemetry::layer().with_tracer(telemetry.tracer("code-mode-test")));
     let _subscriber = tracing::subscriber::set_default(subscriber);
-    let provider = ProcessOwnedCodeModeSessionProvider::with_host_program(
+    let provider = ProcessOwnedGrpcCodeModeSessionProvider::with_host_program(
         xdcode_utils_cargo_bin::cargo_bin("xdcode-code-mode-host").unwrap(),
     );
     let session = provider.create_session().await.unwrap();
@@ -176,6 +176,7 @@ async fn stdio_callbacks_preserve_context_across_overlapping_yielded_cells() {
                 WaitRequest {
                     cell_id,
                     yield_time_ms: 5_000,
+                    max_output_tokens: None,
                 },
                 /*preempt*/ None,
             )
@@ -232,7 +233,7 @@ async fn stdio_callbacks_preserve_context_across_overlapping_yielded_cells() {
         .filter(|span| {
             matches!(
                 span.name.as_ref(),
-                "code_mode.stdio.callback" | "code_mode.stdio.notify"
+                "code_mode.grpc.callback" | "code_mode.grpc.notify"
             )
         })
         .map(|span| {
@@ -248,12 +249,12 @@ async fn stdio_callbacks_preserve_context_across_overlapping_yielded_cells() {
         callbacks,
         vec![
             (
-                "code_mode.stdio.callback",
+                "code_mode.grpc.callback",
                 exec.span_context.trace_id(),
                 exec.span_context.span_id()
             ),
             (
-                "code_mode.stdio.notify",
+                "code_mode.grpc.notify",
                 exec.span_context.trace_id(),
                 exec.span_context.span_id()
             ),

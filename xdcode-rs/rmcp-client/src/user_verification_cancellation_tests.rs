@@ -194,13 +194,13 @@ async fn dropping_shared_resource_and_custom_requests_cancels_the_pending_reques
         client
             .read_resource_with_elicitation(
                 ReadResourceRequestParams::new("test://pending"),
-                None,
+                /*timeout*/ None,
                 Arc::new(Box::new(|_, _| panic!("unexpected input"))),
             )
             .map_ok(|_| ())
             .boxed(),
         client
-            .send_custom_request("test/pending", None)
+            .send_custom_request("test/pending", /*params*/ None)
             .map_ok(|_| ())
             .boxed(),
     ] {

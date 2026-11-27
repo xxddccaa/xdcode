@@ -58,21 +58,35 @@ impl App {
             .remote_connection
             .as_ref()
             .filter(|_| matches!(self.app_server_target, AppServerTarget::LocalDaemon { .. }))
-            .map(|connection| format!("Running daemon: {}", connection.version))
+            .map(|connection| {
+                format!(
+                    "Running daemon: {}",
+                    connection.version.as_deref().unwrap_or("unknown")
+                )
+            })
             .unwrap_or_else(|| "Not connected to the local background server.".to_string());
         let header = vec![Line::from("Daemon".bold()), Line::from(status.dim())];
+        let restart_available = self.daemon_restart_available();
+        let unverified_local = self
+            .chat_widget
+            .remote_connection
+            .as_ref()
+            .is_some_and(|connection| connection.is_local_daemon && !connection.is_managed_daemon);
+        // Every unavailable state carries a reason so the row is visibly disabled.
+        let disabled_reason = (!restart_available).then(|| {
+            if unverified_local {
+                "Xdcode hasn't verified it manages this server. Restart it where it was started."
+            } else if self.reconnect.offline {
+                "The background server is offline."
+            } else {
+                "Only the local background server managed by Xdcode can be restarted here."
+            }
+            .to_string()
+        });
         let items = vec![SelectionItem {
             name: "Restart background server".to_string(),
-            is_disabled: !self.daemon_restart_available(),
-            disabled_reason: self
-                .chat_widget
-                .remote_connection
-                .as_ref()
-                .filter(|connection| connection.is_local_daemon && !connection.is_managed_daemon)
-                .map(|_| {
-                    "Xdcode hasn't verified it manages this server. Restart it where it was started."
-                        .to_string()
-                }),
+            is_disabled: !restart_available,
+            disabled_reason,
             actions: vec![Box::new(|tx| tx.send(AppEvent::ConfirmDaemonRestart))],
             dismiss_on_select: true,
             ..Default::default()

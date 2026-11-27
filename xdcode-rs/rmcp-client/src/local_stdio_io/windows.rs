@@ -71,6 +71,7 @@ fn connected_pipe(
         }
         Direction::ChildWrites => {
             options.access_inbound(true).access_outbound(false);
+            // Helpers can query the blocking mode of their stdout and stderr pipes.
             client.access_mode(GENERIC_WRITE | FILE_READ_ATTRIBUTES);
         }
     }
@@ -79,10 +80,14 @@ fn connected_pipe(
         lpSecurityDescriptor: security.0,
         bInheritHandle: 0,
     };
+    // SAFETY: attributes and its owned descriptor stay live through CreateNamedPipeW.
+    // The kernel copies the descriptor; the returned pipe owns its separate handle.
     let server = unsafe {
         options.create_with_security_attributes_raw(&name, ptr::from_mut(&mut attributes).cast())
     }?;
     let child = client.open(&name)?;
+    // The child endpoint is already connected. Complete registration on the
+    // launcher's blocking thread before the child is allowed to execute.
     tokio::runtime::Handle::current().block_on(server.connect())?;
     Ok((server, child))
 }
@@ -91,11 +96,14 @@ struct PipeSecurity(PSECURITY_DESCRIPTOR);
 
 impl PipeSecurity {
     fn new() -> io::Result<Self> {
+        // Only the pipe owner and SYSTEM can open the single local instance.
         let sddl: Vec<u16> = "D:P(A;;GA;;;SY)(A;;GA;;;OW)"
             .encode_utf16()
             .chain(std::iter::once(0))
             .collect();
         let mut descriptor = ptr::null_mut();
+        // SAFETY: sddl is NUL-terminated and descriptor is a valid writable out
+        // pointer. On success Windows transfers a LocalFree-owned allocation.
         if unsafe {
             ConvertStringSecurityDescriptorToSecurityDescriptorW(
                 sddl.as_ptr(),
@@ -113,6 +121,8 @@ impl PipeSecurity {
 
 impl Drop for PipeSecurity {
     fn drop(&mut self) {
+        // SAFETY: this is the sole owner of the successful SDDL conversion's
+        // allocation; no pipe creation call retains a pointer to it.
         if !unsafe { LocalFree(self.0) }.is_null() {
             tracing::warn!(
                 "Failed to release MCP pipe security descriptor: {}",

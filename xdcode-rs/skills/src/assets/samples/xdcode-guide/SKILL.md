@@ -28,12 +28,6 @@ profile/source selection and unknown capability handling. Its resources ship
 with xdcode and do not require this application's source checkout. Adding a
 catalog entry does not switch the active model unless the user also requests it.
 
-For an explicit request to delegate development to a chosen/smaller model with
-parent review, or to use parallel agents, use the bundled `xdcode-delegate`
-skill. It resolves the active model catalog and supervises bounded workers using
-the available native tools or an authorized `xdcode exec` process. Ordinary
-requests such as "take a careful look" do not activate delegation.
-
 The application has no online program updater. To bring in upstream features,
 follow the repository's `UPSTREAM_UPGRADE.md`; preserve application identity,
 local state isolation, custom-provider routing, and the absence of hosted

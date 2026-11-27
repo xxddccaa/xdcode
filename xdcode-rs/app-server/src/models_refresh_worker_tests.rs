@@ -17,6 +17,7 @@ use xdcode_core::config::ConfigBuilder;
 use xdcode_core::config::ConfigOverrides;
 use xdcode_feedback::XdcodeFeedback;
 use xdcode_http_client::HttpClientFactory;
+use xdcode_models_manager::manager::ModelCatalogSettings;
 use xdcode_models_manager::manager::ModelsEndpointClient;
 use xdcode_models_manager::manager::ModelsEndpointFuture;
 use xdcode_models_manager::manager::ModelsEndpointResponse;
@@ -28,11 +29,44 @@ use xdcode_utils_absolute_path::AbsolutePathBuf;
 
 use super::*;
 
+fn test_thread_manager(
+    config: &xdcode_core::config::Config,
+    models_manager: Option<SharedModelsManager>,
+    auth_manager: Arc<xdcode_login::AuthManager>,
+) -> Arc<xdcode_core::ThreadManager> {
+    let factory = match models_manager {
+        Some(models) => xdcode_core::test_support::fixed_model_catalog(models),
+        None => Arc::new(ModelCatalogSettings::disk(config.xdcode_home.to_path_buf())),
+    };
+    let startup = xdcode_core::build_startup_models(
+        config,
+        auth_manager,
+        uuid::Uuid::new_v4().to_string(),
+        factory,
+    );
+    Arc::new(xdcode_core::ThreadManager::new(
+        config,
+        startup,
+        xdcode_core::XdcodeAppsToolsCache::default(),
+        xdcode_protocol::protocol::SessionSource::Exec,
+        Arc::new(xdcode_exec_server::EnvironmentManager::default_for_tests()),
+        xdcode_extension_api::empty_extension_registry(),
+        Arc::new(xdcode_core::test_support::EmptyUserInstructionsProvider),
+        /*analytics_events_client*/ None,
+        xdcode_core::passthrough_image_store(),
+        xdcode_core::ThreadStoreBuilder::from_config(config, /*state_db*/ None).build(),
+        /*agent_graph_store*/ None,
+        /*attestation_provider*/ None,
+        /*external_time_provider*/ None,
+    ))
+}
+
 #[derive(Debug)]
 struct TestModelsEndpoint {
     fetch_count: AtomicUsize,
     fetched: Notify,
     release_second_fetch: Notify,
+    originator_endpoint: Option<Arc<TestModelsEndpoint>>,
 }
 
 impl TestModelsEndpoint {
@@ -41,6 +75,7 @@ impl TestModelsEndpoint {
             fetch_count: AtomicUsize::new(0),
             fetched: Notify::new(),
             release_second_fetch: Notify::new(),
+            originator_endpoint: None,
         })
     }
 
@@ -56,6 +91,15 @@ impl TestModelsEndpoint {
 }
 
 impl ModelsEndpointClient for TestModelsEndpoint {
+    fn for_originator(
+        &self,
+        _originator: xdcode_models_manager::ModelCatalogOriginator,
+    ) -> Option<Arc<dyn ModelsEndpointClient>> {
+        self.originator_endpoint
+            .clone()
+            .map(|endpoint| endpoint as Arc<dyn ModelsEndpointClient>)
+    }
+
     fn identity(&self) -> Option<String> {
         Some("test-provider".to_string())
     }
@@ -94,7 +138,10 @@ impl ModelsEndpointClient for TestModelsEndpoint {
 #[tokio::test]
 async fn refreshes_immediately_periodically_and_stops_when_dropped() {
     let xdcode_home = tempdir().expect("temp dir");
-    let endpoint = TestModelsEndpoint::new();
+    let mut endpoint = TestModelsEndpoint::new();
+    let work_endpoint = TestModelsEndpoint::new();
+    work_endpoint.release_second_fetch.notify_one();
+    Arc::get_mut(&mut endpoint).unwrap().originator_endpoint = Some(work_endpoint.clone());
     let requirements_path = xdcode_home.path().join("requirements.toml");
     std::fs::write(&requirements_path, "model_provider = 'ollama'").unwrap();
     let config_manager = crate::config_manager::ConfigManager::new_for_tests(
@@ -123,6 +170,10 @@ async fn refreshes_immediately_periodically_and_stops_when_dropped() {
         endpoint.clone(),
         /*auth_manager*/ None,
     ));
+    let work_manager = models_manager
+        .for_originator("xdcode_work_desktop")
+        .unwrap();
+    let mut work_updates = work_manager.model_catalog_updates().unwrap();
     let auth_manager = xdcode_login::AuthManager::shared_from_config(
         config.as_ref(),
         /*enable_xdcode_api_key_env*/ false,
@@ -132,18 +183,20 @@ async fn refreshes_immediately_periodically_and_stops_when_dropped() {
     let catalog = Arc::new(ModelCatalog::new(
         config_manager,
         Some(config.cwd.to_path_buf()),
-        config,
-        Arc::clone(&models_manager),
-        auth_manager,
+        Arc::clone(&config),
+        test_thread_manager(&config, Some(Arc::clone(&models_manager)), auth_manager),
     ));
     let worker = spawn_with_interval(&catalog, Duration::from_millis(/*millis*/ 10));
 
     endpoint.wait_for_fetch_count(/*expected*/ 2).await;
     drop(worker);
     endpoint.release_second_fetch.notify_one();
+    work_endpoint.wait_for_fetch_count(/*expected*/ 2).await;
+    work_updates.changed().await.unwrap();
     tokio::time::sleep(Duration::from_millis(30)).await;
 
     assert_eq!(endpoint.fetch_count.load(Ordering::SeqCst), 2);
+    assert_eq!(work_endpoint.fetch_count.load(Ordering::SeqCst), 2);
 
     // Reloading after login preserves an embedded caller's typed --oss override.
     catalog.invalidate().await;
@@ -213,9 +266,8 @@ async fn background_refresh_blocks_invalid_requirements_then_recovers() -> anyho
     let catalog = Arc::new(ModelCatalog::new(
         config_manager,
         Some(config.cwd.to_path_buf()),
-        config,
-        models_manager,
-        auth_manager,
+        Arc::clone(&config),
+        test_thread_manager(&config, Some(models_manager), auth_manager),
     ));
     let feedback = XdcodeFeedback::new();
     // This test uses Tokio's current-thread runtime, so spawned refreshes share the subscriber.
@@ -300,9 +352,11 @@ async fn catalog_reload_recovers_after_cloud_failure() -> anyhow::Result<()> {
         /*enable_xdcode_api_key_env*/ false,
     )
     .await?;
-    let models = xdcode_core::build_models_manager(&config, Arc::clone(&auth));
     let catalog = Arc::new(ModelCatalog::new(
-        manager, /*startup_cwd*/ None, config, models, auth,
+        manager,
+        /*startup_cwd*/ None,
+        Arc::clone(&config),
+        test_thread_manager(&config, /*models_manager*/ None, auth),
     ));
     failed.store(true, Ordering::SeqCst);
     catalog.invalidate().await;
@@ -351,8 +405,12 @@ async fn catalog_reload_recovers_original_project_after_startup_fallback() -> an
         /*enable_xdcode_api_key_env*/ false,
     )
     .await?;
-    let models = xdcode_core::build_models_manager(&config, Arc::clone(&auth));
-    let catalog = ModelCatalog::new(manager, Some(project_path.clone()), config, models, auth);
+    let catalog = ModelCatalog::new(
+        manager,
+        Some(project_path.clone()),
+        Arc::clone(&config),
+        test_thread_manager(&config, /*models_manager*/ None, auth),
+    );
     let mut model = xdcode_models_manager::bundled_models_response()?
         .models
         .remove(0);

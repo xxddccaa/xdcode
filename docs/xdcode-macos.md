@@ -11,16 +11,13 @@ together: moving only `bin/xdcode` loses its manifest and helper programs.
 curl -fsSL https://raw.githubusercontent.com/xxddccaa/xdcode/main/install.sh | bash
 ```
 
-This explicitly invoked script detects Apple Silicon, selects the latest
-published release, verifies the archive and every payload checksum, validates
-clean-source metadata and probes all executables. It holds an installation lock,
-stages a new immutable version directory and atomically switches only a managed
-xdcode symlink. Old builds, configuration and sessions are retained. It uses
-macOS system tools, not Python or Homebrew. Add `--release v<version>-g<commit>`
-to pin a build, and use `XDCODE_INSTALL_PROXY` when the installer needs a proxy.
-The command requires idle xdcode processes. Add `--force` only when you
-explicitly need to install while they run; existing daemons keep their old
-builds even with force. Restart them safely only after their tasks finish.
+This script detects Apple Silicon, selects the latest published release,
+verifies the archive checksum and the extracted `xdcode --version`, places the
+build in its own directory and atomically switches the `~/.local/bin/xdcode`
+symlink. Run it again to upgrade. Running sessions keep their build; old builds,
+configuration and sessions are retained. It needs only system tools (no Python or
+Homebrew). Add `--release v<version>-g<commit>` to pin a build, and use
+`XDCODE_INSTALL_PROXY` when the installer needs a proxy.
 
 ## Offline installation
 

@@ -71,7 +71,9 @@ impl Client {
         supports_luna_reserve: bool,
     ) -> Result<RateLimitStatusWithResetCredits> {
         let url = self.rate_limit_status_url();
-        let mut req = self.request(Method::GET, &url).headers(self.headers()?);
+        let mut req = self
+            .request(Method::GET, &url)
+            .headers(self.headers().await?);
         if supports_luna_reserve {
             req = req.header(
                 "x-openai-xdcode-luna-reserve",
@@ -84,7 +86,9 @@ impl Client {
 
     pub async fn list_rate_limit_reset_credits(&self) -> Result<RateLimitResetCreditsDetails> {
         let url = self.rate_limit_reset_credits_url();
-        let req = self.request(Method::GET, &url).headers(self.headers()?);
+        let req = self
+            .request(Method::GET, &url)
+            .headers(self.headers().await?);
         let (body, ct) = self.exec_request(req, "GET", &url).await?;
         self.decode_json(&url, &ct, &body)
     }
@@ -114,7 +118,7 @@ impl Client {
         let url = self.consume_rate_limit_reset_credit_url();
         let req = self
             .request(Method::POST, &url)
-            .headers(self.headers()?)
+            .headers(self.headers().await?)
             .header(CONTENT_TYPE, HeaderValue::from_static("application/json"))
             .json(&ConsumeRateLimitResetCreditRequest {
                 redeem_request_id,

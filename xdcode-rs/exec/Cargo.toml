@@ -30,6 +30,7 @@ xdcode-app-server-protocol = { workspace = true }
 xdcode-cloud-config = { workspace = true }
 xdcode-config = { workspace = true }
 xdcode-core = { workspace = true }
+xdcode-exec-server = { workspace = true }
 xdcode-features = { workspace = true }
 xdcode-feedback = { workspace = true }
 xdcode-git-utils = { workspace = true }

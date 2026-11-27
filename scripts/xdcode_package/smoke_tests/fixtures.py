@@ -208,7 +208,12 @@ def code_mode_host_debug_symbols(
     tmp_path_factory: pytest.TempPathFactory,
 ) -> Path:
     target = pytestconfig.getoption("package_target")
-    binaries = {"xdcode", "xdcode-app-server", "xdcode-code-mode-host"}
+    binaries = {
+        "xdcode",
+        "xdcode-app-server",
+        "xdcode-code-mode-host",
+        "xdcode-exec-server",
+    }
     if "windows" in target:
         binaries.update({"xdcode-command-runner", "xdcode-windows-sandbox-setup"})
 

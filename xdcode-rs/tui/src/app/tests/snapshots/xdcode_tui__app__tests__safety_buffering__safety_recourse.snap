@@ -1,13 +1,14 @@
 ---
 source: tui/src/app/tests/safety_buffering.rs
+assertion_line: 279
 expression: "format!(\"{loading}\\n\\n{notice}\")"
 ---
-ⓘ The provider declined this request
-  Check the response from your configured provider for details.
-• Finding an explanation and safer ways to continue…
+• I can’t help with this request. Preparing alternative suggestions…
 
-ⓘ The provider declined this request
+ⓘ This content can’t be shown
   We take extra caution with requests that could enable access to accounts or
-  systems beyond permitted scope. We can still help with an overview of
-  account security and recovery. Check the response from your configured
-  provider for details.
+  systems beyond permitted scope. You can ask Xdcode for an overview of account
+  security and recovery. If you’re doing authorized security work, apply for
+  Daybreak to get broader access.
+  Learn more: https://help.openai.com/en/articles/20001326
+  Apply for Daybreak: https://chatgpt.com/admin/status-and-access

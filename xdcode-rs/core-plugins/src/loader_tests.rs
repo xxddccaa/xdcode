@@ -18,6 +18,7 @@ use xdcode_skills::LoadedSkills;
 use xdcode_skills::SkillLoadFuture;
 use xdcode_utils_plugins::AGENT_PLUGIN_SCHEMA_URI;
 
+// Yield at the skill loader so the buffered stream can poll its other plugin loads.
 struct OverlapTrackingSkillRootLoader {
     delegate: Arc<dyn SkillRootLoader<PluginSkillRoot>>,
     active: AtomicUsize,
@@ -59,9 +60,11 @@ fn user_layer(path: AbsolutePathBuf, config: &str) -> ConfigLayerEntry {
 async fn concurrent_plugin_loads_preserve_mcp_precedence_and_hook_warnings() {
     let temp_dir = TempDir::new().expect("tempdir");
     let mut config = String::new();
+    // Exercise more than one buffer of actual file reads, with conflicting MCP definitions.
     let names: Vec<_> = (0..MAX_CONCURRENT_PLUGIN_LOADS + 2)
         .map(|index| format!("plugin-{index:02}"))
         .collect();
+    // Declare plugin-00 last. Its name sorts first, so its shared MCP server should win.
     for name in names.iter().rev() {
         let root = temp_dir
             .path()
@@ -125,9 +128,9 @@ async fn concurrent_plugin_loads_preserve_mcp_precedence_and_hook_warnings() {
         &config.plugins,
         RemoteInstalledPluginsSnapshot::default(),
         &store,
-        None,
+        /*plugin_skill_snapshots*/ None,
         Some(Product::Xdcode),
-        false,
+        /*remote_global_catalog_active*/ false,
         &overlap_loader,
     )
     .await;
@@ -527,6 +530,7 @@ fn configured_plugins_from_stack_merges_enabled_effective_layers() {
                     release_id: None,
                     auto_provision: None,
                     mcp_servers: HashMap::new(),
+                    apps: HashMap::new(),
                 },
             ),
             (
@@ -537,6 +541,7 @@ fn configured_plugins_from_stack_merges_enabled_effective_layers() {
                     release_id: None,
                     auto_provision: None,
                     mcp_servers: project_mcp_servers.clone(),
+                    apps: HashMap::new(),
                 },
             ),
             (
@@ -547,6 +552,7 @@ fn configured_plugins_from_stack_merges_enabled_effective_layers() {
                     release_id: None,
                     auto_provision: None,
                     mcp_servers: HashMap::new(),
+                    apps: HashMap::new(),
                 },
             ),
         ])

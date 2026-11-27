@@ -5,7 +5,9 @@ use std::io;
 use std::io::ErrorKind;
 use url::Host;
 use url::Url;
+use xdcode_app_server_protocol::ClientResponsePayload;
 use xdcode_app_server_protocol::JSONRPCMessage;
+use xdcode_app_server_protocol::RequestId;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct RemoteControlTarget {
@@ -169,6 +171,20 @@ pub enum ServerEvent {
 }
 
 impl ServerEvent {
+    pub(super) fn item_list_response_id(&self) -> Option<&RequestId> {
+        if let Self::ServerMessage { message } = self
+            && let OutgoingMessage::Response(response) = message.as_ref()
+            && matches!(
+                response.result.as_ref(),
+                ClientResponsePayload::ThreadItemsList(_)
+            )
+        {
+            Some(&response.id)
+        } else {
+            None
+        }
+    }
+
     pub(crate) fn segment_id(&self) -> Option<usize> {
         match self {
             Self::ServerMessageChunk { segment_id, .. } => Some(*segment_id),

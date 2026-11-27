@@ -12,6 +12,7 @@
 //! appear to accept a remap while some handlers still respond to the old keys.
 
 use xdcode_config::types::TuiKeymap;
+use xdcode_features::Feature;
 
 use super::ChatWidget;
 use crate::app_event::KeymapCaptureMode;
@@ -157,6 +158,7 @@ impl ChatWidget {
     fn keymap_action_filter(&self) -> keymap_setup::KeymapActionFilter {
         keymap_setup::KeymapActionFilter {
             fast_mode_enabled: self.fast_mode_enabled(),
+            multi_backend_enabled: self.config.features.enabled(Feature::TuiMultiBackend),
             workspace_enabled: self.local_settings.workspace_enabled(self.config_ref()),
         }
     }

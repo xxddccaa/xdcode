@@ -57,4 +57,5 @@ libc = { workspace = true }
 
 [dev-dependencies]
 xdcode-utils-absolute-path = { workspace = true }
+xdcode-utils-cargo-bin = { workspace = true }
 pretty_assertions = { workspace = true }

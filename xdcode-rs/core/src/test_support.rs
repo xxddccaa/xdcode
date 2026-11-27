@@ -32,6 +32,7 @@ use xdcode_protocol::model_types::ModelPreset;
 use xdcode_protocol::protocol::SessionSource;
 
 use crate::ThreadManager;
+pub use crate::code_mode_host::ProcessOwnedGrpcCodeModeSessionProvider;
 use crate::config::Config;
 use crate::responses_metadata::XdcodeResponsesMetadata;
 use crate::responses_metadata::XdcodeResponsesRequestKind;
@@ -59,6 +60,29 @@ pub fn custom_provider_config() -> xdcode_config::config_toml::ConfigToml {
     }
 }
 
+/// Supply fixed model metadata to tests without implementing a provider.
+pub fn fixed_model_catalog(
+    manager: SharedModelsManager,
+) -> Arc<dyn xdcode_model_provider::ModelCatalogFactory> {
+    struct FixedCatalog(SharedModelsManager);
+
+    impl xdcode_model_provider::ModelCatalogFactory for FixedCatalog {
+        fn build(
+            &self,
+            _provider: xdcode_model_provider::SharedModelProvider,
+            _config_model_catalog: Option<xdcode_protocol::model_types::ModelsResponse>,
+            _api_key_model_discovery_default: bool,
+        ) -> SharedModelsManager {
+            Arc::clone(&self.0)
+        }
+
+        fn set_api_key_model_discovery_enabled(&self, enabled: bool) {
+            self.0.set_api_key_model_discovery_enabled(enabled);
+        }
+    }
+
+    Arc::new(FixedCatalog(manager))
+}
 static TEST_MODEL_PRESETS: Lazy<Vec<ModelPreset>> = Lazy::new(|| {
     let mut response = bundled_models_response()
         .unwrap_or_else(|err| panic!("bundled models.json should parse: {err}"));
@@ -113,6 +137,38 @@ pub fn mcp_attribution_snapshot(
         .services
         .executed_tool_calls
         .mcp_attribution_snapshot()
+}
+
+/// Retains the active turn's timing after completion without exporting telemetry.
+/// Returns `None` when there is no running task. The observer reports exclusive
+/// durations for the caller's interval in inference, automatic review, local
+/// tools, overhead, and unknown order.
+pub async fn observe_turn_timing(
+    thread: &crate::XdcodeThread,
+) -> Option<
+    impl Fn(std::time::Instant, std::time::Instant) -> Option<[std::time::Duration; 5]> + use<>,
+> {
+    let active = thread.session.active_turn.lock().await;
+    let timing = Arc::clone(
+        &active
+            .as_ref()?
+            .task
+            .as_ref()?
+            .turn_context
+            .turn_timing_state,
+    );
+    Some(move |start, end| {
+        timing.snapshot_path(end).map(|path| {
+            let totals = path.durations(start, end);
+            [
+                totals.sampling.saturating_add(totals.compaction),
+                totals.auto_review,
+                totals.tools,
+                totals.overhead,
+                totals.unknown,
+            ]
+        })
+    })
 }
 
 /// Test-only provider that supplies no user instructions.
@@ -235,7 +291,9 @@ pub fn get_model_offline(model: Option<&str>) -> String {
 }
 
 pub fn construct_model_info_offline(model: &str, config: &Config) -> ModelInfo {
-    construct_model_info_offline_for_tests(model, &config.to_models_manager_config())
+    Arc::unwrap_or_clone(
+        construct_model_info_offline_for_tests(model, &config.to_models_manager_config()).model,
+    )
 }
 
 #[derive(Clone, Copy)]

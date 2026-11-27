@@ -1,6 +1,13 @@
-//! Text assertions for protocol content, shared only by test targets.
+//! Protocol fixtures and text assertions shared by test targets.
 
+use std::sync::Arc;
+use xdcode_protocol::ItemIdGenerator;
+use xdcode_protocol::ResponseItemId;
 use xdcode_protocol::models::ContentItem;
+
+pub fn uuid_v7_item_id_generator_for_test() -> ItemIdGenerator {
+    Arc::new(|prefix| ResponseItemId::with_suffix(prefix, uuid::Uuid::now_v7()))
+}
 
 /// Assertion helpers for tests that require text rather than media content.
 /// Implementations should fail at the calling assertion for non-text content.

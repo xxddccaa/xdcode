@@ -175,8 +175,6 @@ async fn safety_recourse_handles_a_policy_block() -> Result<()> {
     let (mut app, mut events, _) = make_test_app_with_channels().await;
     let model = responses::start_mock_server().await;
     app_test_support::MockResponsesConfig::new(&model.uri())
-        .with_model("gpt-5.1")
-        .enable_feature(Feature::Goals)
         .with_root_config("instructions = 'Help the user.'")
         .write(app.config.xdcode_home.as_path())?;
     app.config = app
@@ -184,12 +182,7 @@ async fn safety_recourse_handles_a_policy_block() -> Result<()> {
         .await?;
     let mut server = crate::start_embedded_app_server_for_picker(&app.config).await?;
     let mut tui = crate::tui::test_support::make_test_tui()?;
-    for (domain, error_domain, settings_unavailable) in [
-        ("cyber", "cyber", false),
-        ("cyber", "cyber", true),
-        ("bio", "bio", false),
-        ("cyber", "bio", false),
-    ] {
+    for (domain, error_domain) in [("cyber", "cyber"), ("bio", "bio"), ("cyber", "bio")] {
         let topic = if domain == "cyber" {
             "unauthorized_account_or_system_access"
         } else {
@@ -209,12 +202,12 @@ async fn safety_recourse_handles_a_policy_block() -> Result<()> {
                 ev_response_created("blocked"),
                 before_block,
                 serde_json::json!({"type": "response.metadata", "metadata": {
-                    "openai_chatgpt_moderation_metadata": {"safety_block": {
+                    "provider_chatgpt_moderation_metadata": {"safety_block": {
                         "schema_version": 1, "domain": domain, "status": "loading"
                     }}
                 }}),
                 serde_json::json!({"type": "response.metadata", "metadata": {
-                    "openai_chatgpt_moderation_metadata": {"safety_recourse": {
+                    "provider_chatgpt_moderation_metadata": {"safety_recourse": {
                         "schema_version": 1, "domain": domain, "source": "user_request",
                         "source_message": {"id": format!("{}🔒", "a".repeat(255)), "kind": "ordinary_message", "role": "user"},
                         "topic": topic,
@@ -252,28 +245,24 @@ async fn safety_recourse_handles_a_policy_block() -> Result<()> {
             let event =
                 tokio::time::timeout(std::time::Duration::from_secs(5), server.next_event())
                     .await
-                    .expect("moderation metadata should arrive within five seconds")
-                    .expect("moderation metadata stream should remain open");
-            if let AppServerEvent::ServerNotification(notification) = &event.event
-                && let ServerNotification::TurnCompleted(completed) = notification.as_ref()
-                && completed.thread_id == source_id.to_string()
-            {
-                panic!(
-                    "turn completed before moderation metadata: {:?}",
-                    completed.turn.error
-                );
-            }
+                    .unwrap_or_else(|_| {
+                        panic!("timed out waiting for {domain} moderation metadata")
+                    })
+                    .expect("moderation metadata");
             let is_metadata = matches!(&event.event, AppServerEvent::ServerNotification(notification)
-            if matches!(notification.as_ref(), ServerNotification::TurnModerationMetadata(metadata)
-                if metadata.thread_id == source_id.to_string()));
+            if matches!(notification.as_ref(), ServerNotification::TurnModerationMetadata(_)));
             app.handle_backend_event(&server, event).await;
             drain_active_thread_events(&mut app);
             if is_metadata {
                 break;
             }
         }
-        let loading = render_bottom_popup(&app.chat_widget, 80);
-        let loading = loading.split(" (").next().unwrap_or_default();
+        let loading = render_bottom_popup(&app.chat_widget, /*width*/ 80);
+        let loading = loading
+            .split(" (")
+            .next()
+            .unwrap_or_default()
+            .replace('◦', "•");
         while let Ok(event) = events.try_recv() {
             if let AppEvent::InsertHistoryCell(cell) = event {
                 assert!(!cell.as_any().is::<history_cell::SafetyAccessBlockCell>());
@@ -281,51 +270,40 @@ async fn safety_recourse_handles_a_policy_block() -> Result<()> {
         }
         wait_for_turn_completed(&mut app, &mut server, source_id).await;
         let notice = next_history_message(&mut events);
-        assert!(!render_bottom_popup(&app.chat_widget, 80).contains("This content can"));
+        assert!(!render_bottom_popup(&app.chat_widget, /*width*/ 80).contains("This content can"));
         if domain != error_domain {
-            let generic = history_cell::new_safety_access_block_event().display_lines(80);
+            let generic =
+                history_cell::new_safety_access_block_event().display_lines(/*width*/ 80);
             assert_eq!(notice, lines_to_single_string(&generic));
             continue;
         }
         if domain == "bio" {
-            assert!(loading.contains("Finding an explanation and safer ways to continue…"));
+            assert!(
+                loading
+                    .contains("I can’t help with this request. Preparing alternative suggestions…")
+            );
             assert!(notice.contains("research and safety considerations."));
             continue;
         }
         insta::assert_snapshot!("safety_recourse", format!("{loading}\n\n{notice}"));
-        let picker = render_bottom_popup(&app.chat_widget, 80);
+        let picker = render_bottom_popup(&app.chat_widget, /*width*/ 80);
         let goal = server
             .thread_goal_set(
                 source_id,
                 Some("Excluded objective".into()),
                 Some(xdcode_app_server_protocol::ThreadGoalStatus::Paused),
-                None,
+                /*token_budget*/ None,
             )
             .await?
             .goal;
-        if !settings_unavailable {
-            responses::mount_sse_once(&model, responses::sse_completed("rewrite")).await;
-        }
+        responses::mount_sse_once(&model, responses::sse_completed("rewrite")).await;
         let draft = app.chat_widget.capture_thread_input_state().unwrap();
         app.chat_widget.handle_key_event(KeyCode::Enter.into());
-        assert_eq!(render_bottom_popup(&app.chat_widget, 80), picker);
+        assert_eq!(render_bottom_popup(&app.chat_widget, /*width*/ 80), picker);
         let selection = std::iter::from_fn(|| events.try_recv().ok())
             .find(|event| matches!(event, AppEvent::ContinueSafetyRecourse { .. }))
             .expect("rewrite selection");
-        let requests_before_rewrite = responses::received_responses_requests(&model).await.len();
-        server.thread_settings_update_supported = !settings_unavailable;
         app.handle_event(&mut tui, &mut server, selection).await?;
-        server.thread_settings_update_supported = true;
-        if settings_unavailable {
-            assert_eq!(app.active_thread_id, Some(source_id));
-            assert_eq!(app.chat_widget.capture_thread_input_state(), Some(draft));
-            assert_eq!(
-                responses::received_responses_requests(&model).await.len(),
-                requests_before_rewrite
-            );
-            assert_eq!(server.thread_goal_get(source_id).await?.goal, Some(goal));
-            continue;
-        }
         let fork_id = app.active_thread_id.expect("forked thread");
         assert_eq!(server.thread_goal_get(fork_id).await?.goal, None);
         assert_eq!(server.thread_goal_get(source_id).await?.goal, Some(goal));
@@ -391,8 +369,14 @@ async fn embedded_session_switch_routes_background_approval_and_restores_draft()
     let mut server = Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
     let mut tui = crate::tui::test_support::make_test_tui()?;
     tui.pause_events();
-    app.start_agents_overview_session(&mut tui, &mut server, Some(cwd.clone().abs()), None, None)
-        .await?;
+    app.start_agents_overview_session(
+        &mut tui,
+        &mut server,
+        Some(cwd.clone()),
+        /*managed_worktree*/ None,
+        /*startup_draft*/ None,
+    )
+    .await?;
     let first = app.chat_widget.thread_id().expect("first session");
     submit_prompt(&mut app, "Run the command");
     app.submit_thread_op(&mut server, first, next_user_turn_event(&mut events))
@@ -400,8 +384,14 @@ async fn embedded_session_switch_routes_background_approval_and_restores_draft()
     next_turn_started(&mut app, &mut server, first).await;
 
     app.open_agents_overview(&server);
-    app.start_agents_overview_session(&mut tui, &mut server, Some(cwd.abs()), None, None)
-        .await?;
+    app.start_agents_overview_session(
+        &mut tui,
+        &mut server,
+        Some(cwd),
+        /*managed_worktree*/ None,
+        /*startup_draft*/ None,
+    )
+    .await?;
     let second = app.chat_widget.thread_id().expect("second session");
     assert_ne!(first, second);
     app.chat_widget.insert_str("Draft for the second session");
@@ -429,7 +419,7 @@ async fn embedded_session_switch_routes_background_approval_and_restores_draft()
         boxed_future!(app.handle_event(&mut tui, &mut server, quit)).await?,
         AppRunControl::Continue
     ));
-    assert!(render_bottom_popup(&app.chat_widget, 90).contains("Stop sessions and quit"));
+    assert!(render_bottom_popup(&app.chat_widget, /*width*/ 90).contains("Stop sessions and quit"));
     app.chat_widget.handle_key_event(KeyCode::Esc.into());
     app.select_agents_overview_thread(&mut tui, &mut server, first)
         .await?;
@@ -529,6 +519,7 @@ stream_max_retries = 0
         unreachable!("user turn");
     };
     let expected_client_id = client_user_message_id.clone();
+    // The server reports the current turn. The retried steer must keep this message ID.
     app.ensure_thread_channel(thread_id)
         .store
         .lock()
@@ -556,10 +547,13 @@ stream_max_retries = 0
             crate::app_server_session::ResumeModelSettings::PreserveExistingThread,
         )
         .await?;
-    for cwd in [&app.config.cwd, &other.session.cwd] {
+    for cwd in [
+        app.config.cwd.to_path_buf(),
+        other.session.cwd.to_path_buf(),
+    ] {
         crate::legacy_core::config::set_project_trust_level(
             app.config.xdcode_home.as_path(),
-            cwd.as_path(),
+            &cwd,
             xdcode_protocol::config_types::TrustLevel::Trusted,
         )
         .map_err(std::io::Error::other)?;
@@ -594,9 +588,9 @@ stream_max_retries = 0
         .expect("app-server remains open");
         let committed_id = if let AppServerEvent::ServerNotification(notification) = &event.event
             && let ServerNotification::ItemCompleted(item) = notification.as_ref()
-            && let ThreadItem::UserMessage {
+            && let ThreadItemPayload::UserMessage {
                 content, client_id, ..
-            } = &item.item
+            } = &item.item.payload
             && ChatWidget::user_message_display_from_inputs(content).message == COMMITTED_STEER
         {
             Some(client_id.clone().expect("receipt echoes the submission ID"))
@@ -734,9 +728,9 @@ fn user_message_count(thread: &Thread, prompt: &str) -> usize {
     thread
         .turns
         .iter()
-        .flat_map(|turn| &turn.items)
+        .flat_map(Turn::item_payloads)
         .filter_map(|item| match item {
-            ThreadItem::UserMessage { content, .. } => Some(content),
+            ThreadItemPayload::UserMessage { content, .. } => Some(content),
             _ => None,
         })
         .filter(|content| {
@@ -810,6 +804,7 @@ async fn run_safety_retry(
         model.tool_mode = Some(ToolMode::Direct);
         if scenario == SafetyRetryScenario::UnsupportedPermissions && model.slug == FASTER_MODEL {
             model.available_access_programs = Some(ModelAccessPrograms {
+                daybreak_availability: Default::default(),
                 cyber: vec![CyberAccessProgram::Standard],
             });
         }
@@ -1459,9 +1454,16 @@ goals = true
         retry_request_index + 1
     };
     assert!(
-        user_input_texts(&request_bodies[goal_continuation_request_index])
+        request_bodies[goal_continuation_request_index]["input"]
+            .as_array()
+            .expect("goal continuation model input")
             .iter()
-            .any(|text| text.contains(RETRY_GOAL)),
+            .any(|item| {
+                item["type"] == "function_call_output"
+                    && item["namespace"] == "agent"
+                    && item["name"] == "goal_objective"
+                    && item["output"] == RETRY_GOAL
+            }),
         "inherited goal continuation should resume after the explicit retry"
     );
 

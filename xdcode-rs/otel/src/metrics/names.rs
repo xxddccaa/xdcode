@@ -2,6 +2,11 @@ use std::sync::LazyLock;
 
 pub const TOOL_CALL_COUNT_METRIC: &str = "xdcode.tool.call";
 pub const TOOL_CALL_DURATION_METRIC: &str = "xdcode.tool.call.duration_ms";
+/// Paired Statsig-exported counters for exec-command handler latency, including
+/// shell startup through exit or the first yield. Divide total milliseconds by
+/// calls to compute a mean without averaging histogram export batches.
+pub const EXEC_COMMAND_DURATION_TOTAL_METRIC: &str = "xdcode.exec_command.duration_total_ms";
+pub const EXEC_COMMAND_COUNT_METRIC: &str = "xdcode.exec_command.calls";
 pub const TOOL_CALL_UNIFIED_EXEC_METRIC: &str = "xdcode.tool.unified_exec";
 pub const MULTI_AGENT_SPAWN_FAILURE_METRIC: &str = "xdcode.multi_agent.spawn.failure";
 pub const MULTI_AGENT_SPAWN_PHASE_DURATION_METRIC: &str =
@@ -16,6 +21,8 @@ pub const API_CALL_COUNT_METRIC: &str = "xdcode.api_request";
 pub const API_CALL_DURATION_METRIC: &str = "xdcode.api_request.duration_ms";
 pub const SSE_EVENT_COUNT_METRIC: &str = "xdcode.sse_event";
 pub const SSE_EVENT_DURATION_METRIC: &str = "xdcode.sse_event.duration_ms";
+pub const WEBSOCKET_CONNECT_COUNT_METRIC: &str = "xdcode.websocket.connect";
+pub const WEBSOCKET_CONNECT_DURATION_METRIC: &str = "xdcode.websocket.connect.duration_ms";
 pub const WEBSOCKET_REQUEST_COUNT_METRIC: &str = "xdcode.websocket.request";
 pub const WEBSOCKET_CONTINUATION_COUNT_METRIC: &str = "xdcode.websocket.continuation";
 pub const WEBSOCKET_REQUEST_DURATION_METRIC: &str = "xdcode.websocket.request.duration_ms";
@@ -33,9 +40,15 @@ pub const RESPONSES_API_ENGINE_IAPI_TBT_DURATION_METRIC: &str =
     "xdcode.responses_api_engine_iapi_tbt.duration_ms";
 pub const RESPONSES_API_ENGINE_SERVICE_TBT_DURATION_METRIC: &str =
     "xdcode.responses_api_engine_service_tbt.duration_ms";
+pub const REASONING_REPLAY_COUNT_METRIC: &str = "xdcode.responses.reasoning_replay";
+/// Histogram of reported removals per sampling response and reason, including zeros.
+pub const REASONING_ITEMS_REMOVED_METRIC: &str = "xdcode.responses.reasoning_items_removed";
 pub const TURN_E2E_DURATION_METRIC: &str = "xdcode.turn.e2e_duration_ms";
 pub const TURN_TTFT_DURATION_METRIC: &str = "xdcode.turn.ttft.duration_ms";
 pub const TURN_TTFM_DURATION_METRIC: &str = "xdcode.turn.ttfm.duration_ms";
+pub const TURN_CRITICAL_PATH_CAPTURE_METRIC: &str = "xdcode.turn.critical_path.capture";
+pub const TURN_CRITICAL_PATH_DURATION_METRIC: &str = "xdcode.turn.critical_path.duration_ms";
+pub const TURN_CRITICAL_PATH_COMPONENT_METRIC: &str = "xdcode.turn.critical_path.component_ms";
 pub const TURN_NETWORK_PROXY_METRIC: &str = "xdcode.turn.network_proxy";
 pub const TURN_MEMORY_METRIC: &str = "xdcode.turn.memory";
 pub const TURN_TOOL_CALL_METRIC: &str = "xdcode.turn.tool.call";
@@ -71,6 +84,21 @@ pub const STARTUP_PREWARM_DURATION_METRIC: &str = "xdcode.startup_prewarm.durati
 pub const STARTUP_PREWARM_AGE_AT_FIRST_TURN_METRIC: &str =
     "xdcode.startup_prewarm.age_at_first_turn_ms";
 pub const THREAD_STARTED_METRIC: &str = "xdcode.thread.started";
+/// Submitted additional-context entries, including unchanged entries, by kind and truncation status.
+/// The name tag is included only when explicitly supplied; opaque source keys are never tags.
+pub const ADDITIONAL_CONTEXT_COUNT_METRIC: &str = "xdcode.additional_context";
+/// UTF-8 value bytes before/after truncation, excluding message wrappers; after includes the marker.
+pub const ADDITIONAL_CONTEXT_VALUE_BYTES_METRIC: &str = "xdcode.additional_context.value_bytes";
+/// Logarithmic byte buckets through 4 MiB, with a 4 KiB boundary near the truncation cap.
+pub static ADDITIONAL_CONTEXT_VALUE_BYTES_BUCKETS: LazyLock<Vec<f64>> = LazyLock::new(|| {
+    let mut buckets = context_log_buckets(/*max_exponent*/ 22.0)
+        .into_iter()
+        .chain([4096.0])
+        .collect::<Vec<_>>();
+    buckets.sort_by(f64::total_cmp);
+    buckets.dedup();
+    buckets
+});
 pub const THREAD_SKILLS_ENABLED_TOTAL_METRIC: &str = "xdcode.thread.skills.enabled_total";
 pub const THREAD_SKILLS_KEPT_TOTAL_METRIC: &str = "xdcode.thread.skills.kept_total";
 pub const THREAD_SKILLS_DESCRIPTION_TRUNCATED_CHARS_METRIC: &str =
@@ -101,6 +129,13 @@ pub const TOOL_SPEC_DESCRIPTION_BYTES_METRIC: &str = "xdcode.tools.spec_descript
 /// Logarithmic boundaries up to 1 MiB.
 pub static TOOL_SPEC_DESCRIPTION_BYTES_METRIC_BUCKETS: LazyLock<[f64; 511]> =
     LazyLock::new(|| context_log_buckets(/*max_exponent*/ 20.0));
+
+/// Rendered exec entry deltas (tools and namespace instructions), by action.
+/// Excludes full declarations; schema_changed includes any entry replacement.
+pub const EXEC_TOOL_ENTRY_UPDATES_METRIC: &str = "xdcode.tools.exec_entry_updates";
+/// UTF-8 bytes per rendered added/changed exec batch, including hint and framing.
+/// Excludes full declarations and removal notices.
+pub const EXEC_TOOL_UPDATE_BYTES_METRIC: &str = "xdcode.tools.exec_update_bytes";
 
 pub static THREAD_SKILLS_COUNT_METRIC_BUCKETS: LazyLock<[f64; 513]> =
     LazyLock::new(|| std::array::from_fn(|index| index as f64));

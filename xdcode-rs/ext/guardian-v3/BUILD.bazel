@@ -3,4 +3,13 @@ load("//:defs.bzl", "xdcode_rust_crate")
 xdcode_rust_crate(
     name = "guardian-v3",
     crate_name = "xdcode_guardian_v3",
+    extra_binaries = ["//xdcode-rs/linux-sandbox:xdcode-linux-sandbox"],
+    integration_compile_data_extra = ["//xdcode-rs/message-board:tests/common/mod.rs"],
+    run_tests_with_wine_exec = True,
+    test_tags = ["no-sandbox"],
+    unit_test_srcs = [
+        "src/cutoff_tests.rs",
+        "tests/common/board_host.rs",
+        "//xdcode-rs/message-board:tests/common/mod.rs",
+    ],
 )

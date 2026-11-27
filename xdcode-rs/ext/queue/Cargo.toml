@@ -18,6 +18,7 @@ xdcode-core = { workspace = true }
 xdcode-extension-api = { workspace = true }
 xdcode-protocol = { workspace = true }
 xdcode-thread-store = { workspace = true }
+xdcode-user-input = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "sync", "time"] }

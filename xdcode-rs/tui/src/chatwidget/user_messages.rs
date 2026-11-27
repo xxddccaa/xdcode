@@ -154,6 +154,7 @@ impl ThreadComposerState {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ThreadInputState {
+    pub(crate) provider_error: Option<xdcode_app_server_protocol::ModelProviderError>,
     pub(crate) questions: Option<crate::bottom_pane::QuestionState>,
     pub(crate) pending_thread_settings:
         Option<xdcode_app_server_protocol::ThreadSettingsUpdatedNotification>,
@@ -169,7 +170,7 @@ pub(crate) struct ThreadInputState {
     pub(super) queued_user_messages: VecDeque<QueuedUserMessage>,
     pub(super) queued_user_message_history_records: VecDeque<UserMessageHistoryRecord>,
     pub(crate) recovered_queue: bool,
-    /// Reconcile delivery after transport recovery, not after a fork or ordinary thread switch.
+    /// Reconcile delivery against resumed history after recovery or an idle thread switch.
     pub(crate) reconnect_pending: bool,
     pub(super) user_turn_pending_start: bool,
     pub(super) pending_user_message_client_id: Option<String>,
@@ -883,20 +884,21 @@ pub(super) fn remove_confirmed_queued_messages(
 }
 
 impl ThreadInputState {
-    pub(crate) fn has_unsent_input(&self) -> bool {
-        self.composer.is_some()
-            || !self.queued_user_messages.is_empty()
-            || !self.rejected_steers_queue.is_empty()
-    }
-
     pub(crate) fn reconcile_confirmed_messages(&mut self, confirmed_ids: &[String]) {
         self.pending_steers
             .retain(|steer| !confirmed_ids.contains(&steer.client_id));
+        self.submit_pending_steers_after_interrupt &= !self.pending_steers.is_empty();
         remove_confirmed_queued_messages(
             &mut self.queued_user_messages,
             &mut self.queued_user_message_history_records,
             confirmed_ids,
         );
+    }
+
+    pub(crate) fn has_unsent_input(&self) -> bool {
+        self.composer.is_some()
+            || !self.queued_user_messages.is_empty()
+            || !self.rejected_steers_queue.is_empty()
     }
 
     pub(crate) fn has_unconfirmed_messages(&self) -> bool {

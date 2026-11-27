@@ -24,7 +24,6 @@ use xdcode_extension_api::ThreadLifecycleContributor;
 use xdcode_extension_api::ThreadResumeInput;
 use xdcode_protocol::ThreadId;
 use xdcode_protocol::error::XdcodeErr;
-use xdcode_protocol::models::snapshot_local_user_input;
 use xdcode_protocol::protocol::AgentStatus;
 use xdcode_protocol::protocol::Event;
 use xdcode_protocol::protocol::EventMsg;
@@ -36,6 +35,7 @@ use xdcode_thread_store::MAX_QUEUE_ITEMS;
 use xdcode_thread_store::QueueStore;
 use xdcode_thread_store::QueuedUserSubmissionRecord;
 use xdcode_thread_store::ThreadStoreError;
+use xdcode_user_input::snapshot_local_user_input;
 
 /// One user message waiting to start on its thread.
 #[derive(Clone, Debug, PartialEq)]
@@ -268,7 +268,8 @@ impl QueuedItemService {
         thread_id: ThreadId,
         input: TurnInput,
     ) -> Result<QueuedItem, QueueServiceError> {
-        self.enqueue_with_metadata(thread_id, input, None).await
+        self.enqueue_with_metadata(thread_id, input, /*responsesapi_client_metadata*/ None)
+            .await
     }
 
     pub async fn enqueue_with_metadata(
@@ -314,8 +315,13 @@ impl QueuedItemService {
         queued_item_id: String,
         input: TurnInput,
     ) -> Result<Option<QueuedItem>, QueueServiceError> {
-        self.update_with_metadata(thread_id, queued_item_id, input, None)
-            .await
+        self.update_with_metadata(
+            thread_id,
+            queued_item_id,
+            input,
+            /*responsesapi_client_metadata*/ None,
+        )
+        .await
     }
 
     /// Omitted or empty metadata preserves the input's attribution, not the current controller's.
@@ -607,6 +613,7 @@ fn queued_input_payload(
         return Ok(serde_json::to_string(input)?);
     };
     let mut payload = serde_json::to_value(input)?;
+    // Keep TurnInput's wire shape so older readers can still execute the input.
     payload["UserInput"]["responsesapi_client_metadata"] = serde_json::to_value(metadata)?;
     Ok(serde_json::to_string(&payload)?)
 }

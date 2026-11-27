@@ -30,6 +30,7 @@ use xdcode_features::Feature;
 use xdcode_history::RolloutItem;
 use xdcode_protocol::config_types::ApprovalsReviewer;
 use xdcode_protocol::models::ImageReference;
+use xdcode_protocol::models::PermissionProfile;
 use xdcode_protocol::protocol::AskForApproval;
 use xdcode_protocol::protocol::EventMsg;
 use xdcode_protocol::protocol::GuardianAssessmentStatus;
@@ -157,9 +158,23 @@ async fn guardian_revalidates_owning_session_before_allow(
             config.model_provider.base_url = Some(base_url);
             config.permissions.approval_policy = Constrained::allow_any(AskForApproval::OnRequest);
             config.approvals_reviewer = ApprovalsReviewer::AutoReview;
+            config.workspace_roots_explicit = false;
+            let permission_profile = PermissionProfile::from_legacy_sandbox_policy_for_cwd(
+                &SandboxPolicy::new_workspace_write_policy(),
+                config.cwd.as_path(),
+            );
             config
-                .set_legacy_sandbox_policy(SandboxPolicy::new_workspace_write_policy())
-                .expect("set sandbox policy");
+                .permissions
+                .can_set_permission_profile(&permission_profile)
+                .expect("set permission profile");
+            config
+                .permissions
+                .set_workspace_roots(vec![config.cwd.clone()]);
+            config
+                .permissions
+                .set_permission_profile(permission_profile)
+                .expect("set permission profile");
+            config.workspace_roots = config.permissions.workspace_roots().to_vec();
             for feature in [
                 Feature::CodeMode,
                 Feature::CodeModeInterrupt,

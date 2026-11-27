@@ -55,6 +55,12 @@ def build_package_dir(
         bin_dir / f"xdcode-code-mode-host{spec.exe_suffix}",
         is_windows=spec.is_windows,
     )
+    if inputs.exec_server_bin is not None:
+        copy_executable(
+            inputs.exec_server_bin,
+            bin_dir / f"xdcode-exec-server{spec.exe_suffix}",
+            is_windows=spec.is_windows,
+        )
     copy_executable(inputs.rg_bin, path_dir / spec.rg_name, is_windows=spec.is_windows)
 
     if inputs.bwrap_bin is not None:
@@ -83,6 +89,9 @@ def build_package_dir(
         "resourcesDir": "xdcode-resources",
         "pathDir": "xdcode-path",
     }
+    # xdcode packages run exec-server through the main binary; the standalone one is optional.
+    if inputs.exec_server_bin is not None:
+        metadata["execServer"] = f"bin/xdcode-exec-server{spec.exe_suffix}"
     write_json(package_dir / "xdcode-package.json", metadata)
 
 
@@ -128,6 +137,8 @@ def validate_package_dir(
         Path("bin") / f"xdcode-code-mode-host{spec.exe_suffix}",
         Path("xdcode-path") / spec.rg_name,
     ]
+    if "execServer" in metadata:
+        required_files.append(Path(metadata["execServer"]))
     executable_files = list(required_files)
 
     if spec.is_linux:

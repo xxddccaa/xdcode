@@ -3,7 +3,6 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use xdcode_prompts::render_review_exit_interrupted;
 use xdcode_prompts::render_review_exit_success;
-use xdcode_protocol::ResponseItemId;
 use xdcode_protocol::config_types::WebSearchMode;
 use xdcode_protocol::items::ExitedReviewModeItem;
 use xdcode_protocol::items::TurnItem;
@@ -27,8 +26,8 @@ use crate::session::turn_context::TurnContext;
 use crate::state::TaskKind;
 use crate::xdcode_delegate::run_xdcode_thread_one_shot;
 use xdcode_features::Feature;
-use xdcode_protocol::user_input::UserInput;
 use xdcode_thread_store::PersistContext;
+use xdcode_user_input::ResolvedUserInput;
 
 use super::SessionTask;
 use super::SessionTaskResult;
@@ -99,7 +98,7 @@ impl SessionTask for ReviewTask {
 async fn start_review_conversation(
     session: Arc<Session>,
     ctx: Arc<TurnContext>,
-    input: Vec<UserInput>,
+    input: Vec<ResolvedUserInput>,
     cancellation_token: CancellationToken,
 ) -> Option<async_channel::Receiver<Event>> {
     let config = ctx.config.clone();
@@ -242,7 +241,7 @@ pub(crate) async fn exit_review_mode(
             &[ResponseItem::Message {
                 status: None,
                 encrypted_content: None,
-                id: Some(ResponseItemId::new("msg")),
+                id: Some((session.item_id_generator)("msg")),
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText { text: user_message }],
                 phase: None,
@@ -264,7 +263,7 @@ pub(crate) async fn exit_review_mode(
             ResponseItem::Message {
                 status: None,
                 encrypted_content: None,
-                id: Some(ResponseItemId::new("msg")),
+                id: Some((session.item_id_generator)("msg")),
                 role: "assistant".to_string(),
                 content: vec![ContentItem::OutputText {
                     annotations: None,

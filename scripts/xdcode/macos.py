@@ -89,8 +89,15 @@ def main() -> None:
                     "--bin", "xdcode", "--bin", "xdcode-code-mode-host"],
                    cwd=rust_root, env=env, check=True)
     outputs = target_dir / TARGET / "release"
-    inputs = PackageInputs(outputs / "xdcode", outputs / "xdcode-code-mode-host",
-                           resolve_rg_bin(spec, None), None, None, None)
+    inputs = PackageInputs(
+        entrypoint_bin=outputs / "xdcode",
+        code_mode_host_bin=outputs / "xdcode-code-mode-host",
+        exec_server_bin=None,
+        rg_bin=resolve_rg_bin(spec, None),
+        bwrap_bin=None,
+        xdcode_command_runner_bin=None,
+        xdcode_windows_sandbox_setup_bin=None,
+    )
     package.mkdir(parents=True)
     build_package_dir(package, upstream["version"], variant, spec, inputs)
     manifest = json.loads((package / "xdcode-package.json").read_text())

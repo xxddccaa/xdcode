@@ -97,6 +97,7 @@ pub use environment::XDCODE_EXEC_SERVER_NOISE_CHATGPT_ACCOUNT_ID_ENV_VAR;
 pub use environment::XDCODE_EXEC_SERVER_NOISE_ENVIRONMENT_ID_ENV_VAR;
 pub use environment::XDCODE_EXEC_SERVER_NOISE_REGISTRY_URL_ENV_VAR;
 pub use environment::XDCODE_EXEC_SERVER_URL_ENV_VAR;
+pub use environment::supports_capability_discovery_v2;
 pub use environment_bootstrap::PreparedEnvironmentManager;
 pub use environment_provider::DefaultEnvironmentProvider;
 pub use environment_provider::EnvironmentProvider;
@@ -111,6 +112,7 @@ pub use fs_helper::XDCODE_FS_HELPER_ARG1;
 pub use fs_helper_main::main as run_fs_helper_main;
 pub use local_file_system::LOCAL_FS;
 pub use local_file_system::LocalFileSystem;
+pub use no_follow::BoundOutput;
 pub use noise_channel::NoiseChannelError;
 pub use noise_channel::NoiseChannelIdentity;
 pub use noise_channel::NoiseChannelPublicKey;
@@ -209,6 +211,8 @@ pub use protocol::WriteStatus;
 pub use regular_file::read_sensitive_file_to_string;
 pub use remote::RemoteEnvironmentConfig;
 pub use remote::RemoteEnvironmentTransport;
+pub use remote::credential_stdin;
+pub use remote::registration_auth_from_stdin;
 pub use remote::run_remote_environment;
 pub use remote::run_remote_environment_forward_until_shutdown;
 pub use remote::run_remote_environment_until_shutdown;
@@ -249,10 +253,11 @@ pub use xdcode_file_system::WalkOptions;
 pub use xdcode_file_system::WalkOutcome;
 pub use xdcode_file_system::WindowsSandboxSelection;
 pub use xdcode_file_system::WriteFileOptions;
+pub use xdcode_network_proxy::TcpUpstreamProxy;
 pub use xdcode_protocol::shell_environment::XDCODE_EXEC_SERVER_NOISE_AUTH_TOKEN_ENV_VAR;
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 pub use sandbox_integrity::run_integrity_checks;
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-pub async fn run_integrity_checks(_request: &xdcode_sandboxing::SandboxExecRequest) {}
+pub async fn run_integrity_checks(_request: xdcode_sandboxing::SandboxIntegrityRequest<'_>) {}

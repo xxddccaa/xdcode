@@ -67,7 +67,7 @@ pub(super) fn validate_initial_history(
     let active = ContextManager::reconstruct_rollout(
         history.get_rollout_items(),
         history.get_history_mode(ThreadHistoryMode::default()),
-        ContextManager::new(),
+        ContextManager::new(crate::session::session::Session::new_item_id_generator()),
         TruncationPolicy::Bytes(usize::MAX / 2),
     );
     for envelope in active.history {

@@ -11,9 +11,9 @@ use tempfile::TempDir;
 use xdcode_config::LoaderOverrides;
 use xdcode_core::config::ConfigBuilder;
 use xdcode_core::config::ConfigOverrides;
+use xdcode_protocol::models::PermissionProfile;
 use xdcode_protocol::protocol::AskForApproval;
 use xdcode_protocol::protocol::EventMsg;
-use xdcode_protocol::protocol::SandboxPolicy;
 use xdcode_utils_cargo_bin::cargo_bin;
 
 #[tokio::test]
@@ -107,13 +107,11 @@ async fn forged_worktree_project_config_cannot_start_host_mcp() -> Result<()> {
             }
         );
         assert_eq!(
-            loaded.permissions.legacy_sandbox_policy(&checkout),
+            loaded.permissions.effective_permission_profile(),
             if registered {
-                SandboxPolicy::DangerFullAccess
+                PermissionProfile::Disabled
             } else {
-                SandboxPolicy::ReadOnly {
-                    network_access: false,
-                }
+                PermissionProfile::read_only()
             }
         );
 

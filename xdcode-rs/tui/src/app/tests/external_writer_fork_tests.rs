@@ -153,6 +153,7 @@ async fn external_writer_fork_opens_editable_thread_without_taking_source_lease(
     app.enqueue_primary_thread_session(view.session, view.turns)
         .await?;
     app.ensure_thread_channel(thread_id).mark_external_writer();
+    // Navigation back to this read-only root must acknowledge its fresh snapshot.
     let db = crate::init_state_db_for_app_server_target(&app.config, &AppServerTarget::Embedded)
         .await?
         .expect("state database");
@@ -168,7 +169,10 @@ async fn external_writer_fork_opens_editable_thread_without_taking_source_lease(
         .map_err(std::io::Error::other)?[&thread_id]
         .revision
         .clone();
-    assert_eq!(server.viewed_revision(thread_id, true), Some(revision));
+    assert_eq!(
+        server.viewed_revision(thread_id, /*frozen*/ true),
+        Some(revision)
+    );
     app.chat_widget
         .set_queue_autosend_suppressed(/*suppressed*/ true);
     app.chat_widget.insert_str("Retained queued prompt");

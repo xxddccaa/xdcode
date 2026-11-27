@@ -21,7 +21,7 @@ impl ChatWidget {
         }
     }
 
-    pub(super) fn managed_worktree_available(&self) -> bool {
+    pub(crate) fn managed_worktree_available(&self) -> bool {
         self.local_worktree_operations && get_git_repo_root(self.config.cwd.as_path()).is_some()
     }
 
@@ -30,6 +30,13 @@ impl ChatWidget {
         mode: ManagedWorktreeMode,
         name: Option<String>,
     ) {
+        if mode == ManagedWorktreeMode::New
+            && self.config.features.enabled(Feature::TuiMultiBackend)
+        {
+            self.app_event_tx
+                .send(AppEvent::ChooseNewSessionCheckout { name });
+            return;
+        }
         if !self.managed_worktree_available() {
             match mode {
                 ManagedWorktreeMode::New => {
@@ -43,6 +50,14 @@ impl ChatWidget {
             return;
         }
 
+        self.open_session_checkout_picker(mode, name);
+    }
+
+    pub(crate) fn open_session_checkout_picker(
+        &mut self,
+        mode: ManagedWorktreeMode,
+        name: Option<String>,
+    ) {
         let title = match mode {
             ManagedWorktreeMode::New => "Where should the new conversation run?",
             ManagedWorktreeMode::Fork => "Where should the forked conversation run?",
@@ -56,7 +71,7 @@ impl ChatWidget {
                     description: Some("Keep using the current working directory".to_string()),
                     actions: vec![Box::new(move |tx| match mode {
                         ManagedWorktreeMode::New => {
-                            tx.send(AppEvent::NewSession {
+                            tx.send(AppEvent::NewSessionInCurrentWorktree {
                                 name: current_name.clone(),
                             });
                         }

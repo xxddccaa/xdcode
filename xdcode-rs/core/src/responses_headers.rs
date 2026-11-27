@@ -5,9 +5,10 @@ use http::HeaderMap;
 
 /// Seed in `StartThreadOptions::thread_extension_init` to supply Responses headers.
 ///
-/// Applied only to the selected model with Xdcode backend auth and routing. The headers
-/// are sent on HTTP requests and WebSocket handshakes; changes require a new socket.
-/// Other provider endpoints and unrelated threads do not inherit these headers.
+/// Applied only to the selected model on the Provider provider with Xdcode backend
+/// auth, regardless of the base URL. The headers are sent on HTTP requests and
+/// WebSocket handshakes; changes require a new socket. Other providers and
+/// unrelated threads do not inherit these headers.
 #[derive(Clone)]
 pub struct XdcodeResponsesHeaders {
     pub model: String,

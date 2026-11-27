@@ -7,6 +7,7 @@ use crate::chatgpt_client::chatgpt_post_request_with_timeout;
 
 use serde::Deserialize;
 use serde::Serialize;
+use std::sync::Arc;
 use xdcode_connectors::AppInfo;
 use xdcode_connectors::AppToolPolicyEvaluator;
 use xdcode_connectors::ConnectorDirectoryCacheContext;
@@ -24,9 +25,11 @@ pub use xdcode_core::connectors::list_accessible_connectors_from_mcp_tools_with_
 pub use xdcode_core::connectors::list_accessible_connectors_from_mcp_tools_with_options;
 pub use xdcode_core::connectors::list_accessible_connectors_from_mcp_tools_with_options_and_status;
 pub use xdcode_core::connectors::list_cached_accessible_connectors_from_mcp_tools;
+use xdcode_features::RuntimeAuthMode;
 use xdcode_login::AuthManager;
 use xdcode_login::XdcodeAuth;
 use xdcode_plugin::AppConnectorId;
+use xdcode_runtime_agent_instance::RuntimeAuthManager;
 
 const DIRECTORY_CONNECTORS_TIMEOUT: Duration = Duration::from_secs(60);
 const CONNECTOR_METADATA_TIMEOUT: Duration = Duration::from_secs(60);
@@ -39,20 +42,6 @@ async fn apps_enabled(config: &Config) -> anyhow::Result<bool> {
     Ok(config
         .features
         .apps_enabled_for_auth(auth.as_ref().is_some_and(XdcodeAuth::uses_xdcode_backend)))
-}
-
-async fn connector_auth(config: &Config) -> anyhow::Result<XdcodeAuth> {
-    let auth_manager =
-        AuthManager::shared_from_config(config, /*enable_xdcode_api_key_env*/ false).await?;
-    let auth = auth_manager
-        .auth()
-        .await
-        .ok_or_else(|| anyhow::anyhow!("ChatGPT auth not available"))?;
-    anyhow::ensure!(
-        auth.uses_xdcode_backend(),
-        "ChatGPT connectors require Xdcode backend auth"
-    );
-    Ok(auth)
 }
 
 pub async fn list_connectors(config: &Config) -> anyhow::Result<Vec<AppInfo>> {
@@ -75,36 +64,58 @@ pub async fn list_connectors(config: &Config) -> anyhow::Result<Vec<AppInfo>> {
 }
 
 pub async fn list_all_connectors(config: &Config) -> anyhow::Result<Vec<AppInfo>> {
-    list_all_connectors_with_options(config, /*force_refetch*/ false, &[]).await
+    if !apps_enabled(config).await? {
+        return Ok(Vec::new());
+    }
+    let mut config = config.clone();
+    let (auth, runtime) = crate::chatgpt_client::standalone_auth(&mut config).await?;
+    list_all_connectors_with_options(
+        &config,
+        Some(&auth),
+        runtime.as_ref(),
+        /*force_refetch*/ false,
+        &[],
+    )
+    .await
 }
 
-pub async fn list_cached_all_connectors(
+pub fn list_cached_all_connectors(
     config: &Config,
+    auth: Option<&XdcodeAuth>,
     plugin_apps: &[AppConnectorId],
 ) -> Option<Vec<AppInfo>> {
-    if !apps_enabled(config).await.ok()? {
+    if !config
+        .features
+        .apps_enabled_for_auth(auth.is_some_and(XdcodeAuth::uses_xdcode_backend))
+    {
         return Some(Vec::new());
     }
 
-    let auth = connector_auth(config).await.ok()?;
-    let cache_context = connector_directory_cache_context(config, &auth);
+    let auth = auth?;
+    let cache_context = connector_directory_cache_context(config, auth);
     let connectors = xdcode_connectors::cached_directory_connectors(&cache_context)?;
     Some(merge_directory_and_plugin_connectors(
-        connectors,
+        connectors.to_vec(),
         plugin_apps,
     ))
 }
 
 pub async fn list_all_connectors_with_options(
     config: &Config,
+    auth: Option<&XdcodeAuth>,
+    runtime: Option<&(Arc<RuntimeAuthManager>, RuntimeAuthMode)>,
     force_refetch: bool,
     plugin_apps: &[AppConnectorId],
 ) -> anyhow::Result<Vec<AppInfo>> {
-    if !apps_enabled(config).await? {
+    if !config
+        .features
+        .apps_enabled_for_auth(auth.is_some_and(XdcodeAuth::uses_xdcode_backend))
+    {
         return Ok(Vec::new());
     }
-    let auth = connector_auth(config).await?;
-    let cache_context = connector_directory_cache_context(config, &auth);
+    let auth = auth.ok_or_else(|| anyhow::anyhow!("ChatGPT auth not available"))?;
+    let runtime = xdcode_model_provider::runtime_auth_for_url(runtime, &config.chatgpt_base_url)?;
+    let cache_context = connector_directory_cache_context(config, auth);
     let connectors = xdcode_connectors::list_all_connectors_with_options(
         cache_context,
         auth.is_workspace_account(),
@@ -112,6 +123,8 @@ pub async fn list_all_connectors_with_options(
         |path| async move {
             chatgpt_get_request_with_timeout::<DirectoryListResponse>(
                 config,
+                auth,
+                runtime,
                 path,
                 Some(DIRECTORY_CONNECTORS_TIMEOUT),
             )
@@ -139,6 +152,7 @@ pub struct ConnectorMetadataReadResult {
 pub async fn read_connector_metadata(
     config: &Config,
     auth: &XdcodeAuth,
+    runtime: Option<&(Arc<RuntimeAuthManager>, RuntimeAuthMode)>,
     app_ids: &[String],
     include_tools: bool,
 ) -> anyhow::Result<ConnectorMetadataReadResult> {
@@ -151,6 +165,7 @@ pub async fn read_connector_metadata(
         "ChatGPT account ID not available, please re-run xdcode login"
     );
 
+    let runtime = xdcode_model_provider::runtime_auth_for_url(runtime, &config.chatgpt_base_url)?;
     let store = ConnectorMetadataStore::new(
         config.chatgpt_base_url.clone(),
         auth.get_account_id(),
@@ -179,6 +194,7 @@ pub async fn read_connector_metadata(
             },
             CONNECTOR_METADATA_TIMEOUT,
             product_sku,
+            runtime,
         )
         .await?;
         let mut requested_ids = missing_ids.iter().cloned().collect::<HashSet<_>>();

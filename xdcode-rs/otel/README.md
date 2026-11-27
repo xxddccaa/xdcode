@@ -15,13 +15,16 @@ metrics (when enabled), then attach its layers to your `tracing_subscriber`
 registry:
 
 ```rust
-use xdcode_otel::config::OtelExporter;
-use xdcode_otel::config::OtelHttpProtocol;
-use xdcode_otel::config::OtelSettings;
+use xdcode_http_client::{HttpClientFactory, OutboundProxyPolicy};
+use xdcode_otel::OtelExporter;
+use xdcode_otel::OtelHttpProtocol;
+use xdcode_otel::OtelSettings;
 use xdcode_otel::OtelProvider;
 use tracing_subscriber::prelude::*;
 
 let settings = OtelSettings {
+    headers_helper: None,
+    http_client_factory: HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
     environment: "dev".to_string(),
     service_name: "xdcode-cli".to_string(),
     service_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -39,7 +42,8 @@ let settings = OtelSettings {
         tls: None,
     },
     metrics_exporter: OtelExporter::None,
-    span_attributes: std::collections::BTreeMap::new(),
+    runtime_metrics: false,
+    span_attributes: std::collections::HashMap::new(),
     tracestate: std::collections::BTreeMap::new(),
 };
 

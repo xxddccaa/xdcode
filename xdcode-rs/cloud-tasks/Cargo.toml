@@ -13,6 +13,7 @@ doctest = false
 workspace = true
 
 [dependencies]
+xdcode-backend-client = { workspace = true }
 anyhow = { workspace = true }
 chrono = { workspace = true, features = ["serde"] }
 clap = { workspace = true, features = ["derive"] }
@@ -21,6 +22,7 @@ xdcode-cloud-tasks-client = { workspace = true }
 # TODO: xdcode-cloud-tasks-mock-client should be in dev-dependencies.
 xdcode-cloud-tasks-mock-client = { workspace = true }
 xdcode-core = { workspace = true }
+xdcode-features = { workspace = true }
 xdcode-git-utils = { workspace = true }
 xdcode-login = { path = "../login" }
 xdcode-model-provider = { workspace = true }
@@ -41,5 +43,12 @@ unicode-segmentation = { workspace = true }
 unicode-width = { workspace = true }
 
 [dev-dependencies]
+xdcode-agent-identity = { workspace = true }
+core_test_support = { workspace = true }
+base64 = { workspace = true }
+tempfile = { workspace = true }
+xdcode-runtime-agent-instance = { workspace = true }
+uuid = { workspace = true }
+wiremock = { workspace = true }
 insta = { workspace = true }
 pretty_assertions = { workspace = true }

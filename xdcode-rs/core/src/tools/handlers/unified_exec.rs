@@ -1,5 +1,6 @@
 use crate::function_tool::FunctionCallError;
 use crate::sandboxing::SandboxPermissions;
+use crate::session::turn_context::TurnEnvironment;
 use crate::shell::Shell;
 use crate::shell::ShellInvocation;
 use crate::shell::get_shell_by_model_provided_path;
@@ -16,8 +17,10 @@ use serde::Deserialize;
 use std::path::PathBuf;
 use std::sync::Arc;
 use xdcode_protocol::models::AdditionalPermissionProfile;
+use xdcode_utils_path_uri::PathUri;
 
 mod exec_command;
+pub(crate) mod preparation;
 mod write_stdin;
 
 pub use exec_command::ExecCommandHandler;
@@ -93,6 +96,20 @@ struct ExecCommandWorkdirArgs {
     workdir: Option<String>,
 }
 
+impl ExecCommandWorkdirArgs {
+    /// Share cwd resolution between hooks and execution after environment selection.
+    fn resolve_cwd(&self, environment: &TurnEnvironment) -> Result<PathUri, FunctionCallError> {
+        self.workdir
+            .as_deref()
+            .filter(|workdir| !workdir.is_empty())
+            .map_or_else(
+                || Ok(environment.cwd().clone()),
+                |workdir| environment.cwd().join(workdir),
+            )
+            .map_err(|err| FunctionCallError::RespondToModel(err.to_string()))
+    }
+}
+
 fn default_exec_yield_time_ms() -> u64 {
     10_000
 }
@@ -123,6 +140,7 @@ fn post_unified_exec_tool_use_payload(
     let tool_use_id = result.post_tool_use_id(&invocation.call_id);
     let tool_response = result.post_tool_use_response(&tool_use_id, &invocation.payload)?;
     Some(PostToolUsePayload {
+        tool_cwd: result.post_tool_use_cwd(),
         tool_name: HookToolName::bash(),
         tool_use_id,
         tool_input,

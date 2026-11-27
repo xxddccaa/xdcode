@@ -16,6 +16,7 @@ use wiremock::ResponseTemplate;
 use xdcode_config::test_support::CloudConfigBundleFixture;
 use xdcode_core::ForkSnapshot;
 use xdcode_core::RecoverTurnRequest;
+use xdcode_core::RequestCountry;
 use xdcode_core::StartIfIdleSubmission;
 use xdcode_core::StartThreadOptions;
 use xdcode_core::SuspendTurnOutcome;
@@ -193,11 +194,13 @@ async fn prediction_fork_pins_effort_from_parent_with_overrides_disabled(
     )
     .await;
     let mut test = test_xdcode()
+        .with_auth(XdcodeAuth::create_dummy_chatgpt_auth_for_testing())
         .with_model_info_override("gpt-5.4", |model| {
             model.use_responses_lite = true;
             model.supports_reasoning_effort_updates = true;
             model.default_reasoning_level = Some(ReasoningEffort::Low);
         })
+        .with_request_country(RequestCountry::from_iso_code("US")?)
         .with_config(|config| {
             config
                 .features
@@ -213,6 +216,7 @@ async fn prediction_fork_pins_effort_from_parent_with_overrides_disabled(
         &test.xdcode,
         ThreadSettingsOverrides {
             effort: Some(parent_effort),
+            request_country: Some(RequestCountry::from_iso_code("DE")?),
             ..Default::default()
         },
     )
@@ -251,6 +255,17 @@ async fn prediction_fork_pins_effort_from_parent_with_overrides_disabled(
 
     let requests = mock.requests();
     assert_eq!(requests.len(), 3);
+    assert_eq!(
+        requests
+            .iter()
+            .map(|request| request.body_json().get("request_country").cloned())
+            .collect::<Vec<_>>(),
+        vec![
+            Some(Value::from("US")),
+            Some(Value::from("DE")),
+            Some(Value::from("DE"))
+        ]
+    );
     assert_eq!(requests[0].body_json()["reasoning"]["effort"], "high");
     assert_eq!(requests[1].body_json()["reasoning"]["effort"], "low");
     assert!(effort_updates(&requests[1]).is_empty());
@@ -518,6 +533,7 @@ async fn reasoning_effort_override_recovery_sends_latest_tail_update(
                     ..Default::default()
                 },
                 trace: None,
+                prompt_cache_ttl: None,
                 cyber_access_program: None,
             })
             .await?,

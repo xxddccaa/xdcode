@@ -9,6 +9,8 @@ use app_test_support::create_escalated_command_execution_sse_response;
 use app_test_support::create_final_assistant_message_sse_response;
 use app_test_support::create_mock_responses_server_sequence;
 use app_test_support::create_mock_responses_server_sequence_unchecked;
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
 use core_test_support::skip_if_remote;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
@@ -26,7 +28,7 @@ use xdcode_app_server_protocol::JSONRPCError;
 use xdcode_app_server_protocol::QueuedSubmission;
 use xdcode_app_server_protocol::RequestId;
 use xdcode_app_server_protocol::ServerRequest;
-use xdcode_app_server_protocol::ThreadItem;
+use xdcode_app_server_protocol::ThreadItemPayload;
 use xdcode_app_server_protocol::ThreadListResponse;
 use xdcode_app_server_protocol::ThreadLoadedListParams;
 use xdcode_app_server_protocol::ThreadLoadedListResponse;
@@ -271,6 +273,63 @@ async fn queue_crud_preserves_identity_order_and_notifications() -> Result<()> {
 }
 
 #[tokio::test]
+async fn queue_attachments_resolve_relative_paths_against_thread_cwd() -> Result<()> {
+    skip_if_remote!(
+        Ok(()),
+        "uses app-server-local attachments and a local thread cwd"
+    );
+
+    const RED_PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC";
+    const BLUE_PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGNgYPgPAAEDAQAIicLsAAAAAElFTkSuQmCC";
+
+    let (mut app, xdcode_home, _server) = queue_app(vec![blocked_turn_response()?]).await?;
+    let workspace = TempDir::new()?;
+    // The test app-server starts in XDCODE_HOME.
+    let server_image = xdcode_home.path().join("sample.png");
+    let workspace_image = workspace.path().join("sample.png");
+    std::fs::write(&server_image, STANDARD.decode(RED_PNG)?)?;
+    std::fs::write(&workspace_image, STANDARD.decode(BLUE_PNG)?)?;
+    let start_id = app
+        .send_thread_start_request(ThreadStartParams {
+            cwd: Some(workspace.path().display().to_string()),
+            ..Default::default()
+        })
+        .await?;
+    let started: ThreadStartResponse = timeout(READ_TIMEOUT, app.read_response(start_id)).await??;
+    let thread_id = started.thread.id;
+    let _ = start_blocked_turn(&mut app, &thread_id).await?;
+
+    let input: Vec<_> = ["sample.png".into(), workspace_image, server_image]
+        .into_iter()
+        .map(|path| UserInput::LocalImage { path, detail: None })
+        .collect();
+    let queued = queue_item(
+        &mut app,
+        ThreadQueueAddParams {
+            input: input.clone(),
+            ..submission(&thread_id, "attachment")
+        },
+    )
+    .await?;
+    assert_eq!(queued.input[0], queued.input[1]);
+    assert_ne!(queued.input[0], queued.input[2]);
+
+    let updated: ThreadQueueUpdateResponse = app
+        .request(|request_id| ClientRequest::ThreadQueueUpdate {
+            request_id,
+            params: ThreadQueueUpdateParams {
+                thread_id,
+                queued_submission_id: queued.id,
+                input,
+                responsesapi_client_metadata: None,
+            },
+        })
+        .await?;
+    assert_eq!(updated.queued_submission.input, queued.input);
+    Ok(())
+}
+
+#[tokio::test]
 async fn queue_list_returns_ordered_pages_and_lightweight_notifications() -> Result<()> {
     skip_if_remote!(
         Ok(()),
@@ -412,9 +471,9 @@ async fn idle_queue_dispatch_preserves_client_id() -> Result<()> {
     );
     let started: ItemStartedNotification =
         timeout(READ_TIMEOUT, app.read_notification("item/started")).await??;
-    let ThreadItem::UserMessage {
+    let ThreadItemPayload::UserMessage {
         client_id, content, ..
-    } = started.item
+    } = started.item.payload
     else {
         anyhow::bail!("queued turn did not begin with its user message");
     };
@@ -565,9 +624,9 @@ async fn cold_thread_resume_dispatches_a_persisted_queued_submission() -> Result
 
     let started: ItemStartedNotification =
         timeout(READ_TIMEOUT, resumed.read_notification("item/started")).await??;
-    let ThreadItem::UserMessage {
+    let ThreadItemPayload::UserMessage {
         client_id, content, ..
-    } = started.item
+    } = started.item.payload
     else {
         anyhow::bail!("cold resume did not start the persisted queued user message");
     };
@@ -774,14 +833,14 @@ async fn queue_start_while_active_returns_busy_and_preserves_the_queue() -> Resu
         let started_item: ItemStartedNotification =
             timeout(READ_TIMEOUT, app.read_notification("item/started")).await??;
         if matches!(
-            &started_item.item,
-            ThreadItem::UserMessage { client_id, .. }
+            &started_item.item.payload,
+            ThreadItemPayload::UserMessage { client_id, .. }
                 if client_id.as_deref() == Some("active-queued-client-id")
         ) {
             break started_item;
         }
     };
-    let ThreadItem::UserMessage { client_id, .. } = started_item.item else {
+    let ThreadItemPayload::UserMessage { client_id, .. } = started_item.item.payload else {
         anyhow::bail!("queued message did not start after the active turn completed");
     };
     assert_eq!(client_id.as_deref(), Some("active-queued-client-id"));
@@ -850,8 +909,8 @@ async fn queue_start_without_id_starts_the_head_when_idle() -> Result<()> {
         let started_item: ItemStartedNotification =
             timeout(READ_TIMEOUT, app.read_notification("item/started")).await??;
         if matches!(
-            &started_item.item,
-            ThreadItem::UserMessage { client_id, .. }
+            &started_item.item.payload,
+            ThreadItemPayload::UserMessage { client_id, .. }
                 if client_id.as_deref() == Some(first.client_user_message_id.as_str())
         ) {
             break started_item;

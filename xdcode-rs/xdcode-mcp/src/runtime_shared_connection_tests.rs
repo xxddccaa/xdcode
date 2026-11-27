@@ -34,7 +34,7 @@ async fn forced_refresh_replaces_pending_connection_without_interrupting_other_c
                 slot,
                 key,
                 Arc::default(),
-                None,
+                /*tool_catalog_cache_context*/ None,
                 CancellationToken::new(),
                 &*launch,
             )
@@ -49,7 +49,7 @@ async fn forced_refresh_replaces_pending_connection_without_interrupting_other_c
         Arc::default(),
         key.clone(),
         Arc::default(),
-        None,
+        /*tool_catalog_cache_context*/ None,
         CancellationToken::new(),
         &*launch,
     );
@@ -59,11 +59,11 @@ async fn forced_refresh_replaces_pending_connection_without_interrupting_other_c
     let mut owner = create_ready_async_managed_client(Vec::new()).await;
     owner.client = first;
     owner.connection_slot = Some(slot);
-    let mut connections = McpConnectionSet::empty(true);
+    let mut connections = McpConnectionSet::empty(/*prefix_mcp_tool_names*/ true);
     connections.insert_test_client("test_server", owner);
     let connections = Arc::new(connections);
     let config = Arc::new(crate::mcp::tests::test_mcp_config(std::env::temp_dir()));
-    let runtime = McpRuntime::empty(true);
+    let runtime = McpRuntime::empty(/*prefix_mcp_tool_names*/ true);
     runtime.current.store(Arc::new(PublishedMcpRuntime {
         connections: Arc::clone(&connections),
         config: Some(Arc::clone(&config)),
@@ -80,6 +80,7 @@ async fn forced_refresh_replaces_pending_connection_without_interrupting_other_c
     }));
     let input = McpRuntimeInput {
         network_policy_metadata: None,
+        runtime_auth: None,
         startup_policy: McpStartupPolicy::Eager,
         config,
         plugins_available: false,
@@ -91,14 +92,17 @@ async fn forced_refresh_replaces_pending_connection_without_interrupting_other_c
         runtime_context: fixture::context(),
         xdcode_apps_tools_cache: ConnectorRuntimeManager::default(),
         tool_catalog_cache: McpToolCatalogCache::default(),
-        xdcode_apps_tools_cache_key: ConnectorRuntimeContextKey::personal(None, None),
+        xdcode_apps_tools_cache_key: ConnectorRuntimeContextKey::personal(
+            /*account_id*/ None, /*chatgpt_user_id*/ None,
+        ),
         client_mcp_extensions: ClientMcpExtensions::default(),
         auth: None,
         auth_manager: None,
         elicitation_reviewer: None,
         elicitation_lifecycle: None,
     };
-    let binding = runtime.current_binding_for_call("test_server");
+    let server_key = crate::McpServerKey::unscoped("test_server");
+    let binding = runtime.current_binding_for_call(&server_key);
     tokio::pin!(binding);
     assert!(futures::poll!(&mut binding).is_pending());
     runtime.reconnect_on_next_refresh();
@@ -109,7 +113,7 @@ async fn forced_refresh_replaces_pending_connection_without_interrupting_other_c
             Arc::default(),
             key.clone(),
             Arc::default(),
-            None,
+            /*tool_catalog_cache_context*/ None,
             CancellationToken::new(),
             &*launch,
         ),
@@ -120,17 +124,23 @@ async fn forced_refresh_replaces_pending_connection_without_interrupting_other_c
     release.notify_one();
     let other = other.await.unwrap();
     other
-        .call_tool("test".to_string(), None, |_| Ok(None), None)
+        .call_tool(
+            "test".to_string(),
+            /*arguments*/ None,
+            |_| Ok(None),
+            /*timeout*/ None,
+        )
         .await
         .unwrap();
 
+    // A second refresh of the old owner must not evict the newer replacement.
     connections.retire_shared_connections();
     let _joined = pool
         .connect(
             Arc::default(),
             key,
             Arc::default(),
-            None,
+            /*tool_catalog_cache_context*/ None,
             CancellationToken::new(),
             &*launch,
         )
@@ -140,9 +150,19 @@ async fn forced_refresh_replaces_pending_connection_without_interrupting_other_c
 
     let binding = binding.await.expect("binding from the old publication");
     runtime.shutdown().await;
-    assert!(binding.list_resources("test_server", None).await.is_err());
+    assert!(
+        binding
+            .list_resources(&McpServerKey::unscoped("test_server"), /*params*/ None)
+            .await
+            .is_err()
+    );
     other
-        .call_tool("test".to_string(), None, |_| Ok(None), None)
+        .call_tool(
+            "test".to_string(),
+            /*arguments*/ None,
+            |_| Ok(None),
+            /*timeout*/ None,
+        )
         .await
         .unwrap();
     let transport = Arc::clone(&other.client);

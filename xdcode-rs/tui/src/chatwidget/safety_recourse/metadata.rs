@@ -52,9 +52,7 @@ pub(super) struct Recourse {
 
 pub(super) fn parse(mut value: Value) -> Option<(Domain, Option<Recourse>)> {
     let object = value.as_object_mut()?;
-    let recourse = object
-        .remove("safety_recourse")
-        .filter(|value| !value.is_null());
+    let recourse = object.remove("safety_recourse").filter(|v| !v.is_null());
     let Some(value) = recourse else {
         let block: Block = serde_json::from_value(object.remove("safety_block")?).ok()?;
         return (block.schema_version == 1 && block.status == "loading")
@@ -62,7 +60,7 @@ pub(super) fn parse(mut value: Value) -> Option<(Domain, Option<Recourse>)> {
     };
     let wire: WireResult = serde_json::from_value(value).ok()?;
     let message = &wire.source_message;
-    if wire.schema_version != 1 || !valid_text(&message.id, 256) {
+    if wire.schema_version != 1 || !valid_text(&message.id, /*max_chars*/ 256) {
         return None;
     }
     let (bio_lead, cyber_lead, bio_offer) = match (
@@ -84,13 +82,13 @@ pub(super) fn parse(mut value: Value) -> Option<(Domain, Option<Recourse>)> {
         | ("file_content", "file_tool_result", "tool") => (
             "when content from a file involves ",
             "when content could enable ",
-            Some("You can continue without this file or get an overview of "),
+            Some("You can continue without this file or ask Xdcode for an overview of "),
         ),
         ("web_search_result", "web_tool_call", "assistant")
         | ("web_search_result", "web_tool_result", "tool") => (
             "when a web search result contains information about ",
             "when content could enable ",
-            Some("You can retry without web search or get an overview of "),
+            Some("You can retry without web search or ask Xdcode for an overview of "),
         ),
         ("other_tool", "other_tool_call", "assistant")
         | ("other_tool", "other_tool_result", "tool") => {
@@ -146,7 +144,7 @@ pub(super) fn parse(mut value: Value) -> Option<(Domain, Option<Recourse>)> {
     let labels = wire
         .suggestions
         .each_ref()
-        .map(|suggestion| suggestion.label.trim().to_lowercase());
+        .map(|s| s.label.trim().to_lowercase());
     for suggestion in &wire.suggestions {
         if !valid_text(&suggestion.label, /*max_chars*/ 80)
             || !valid_text(&suggestion.prompt_text, /*max_chars*/ 2_000)
@@ -154,6 +152,7 @@ pub(super) fn parse(mut value: Value) -> Option<(Domain, Option<Recourse>)> {
         {
             return None;
         }
+        // Only offer actions the composer can safely submit or restore.
         let label = suggestion.label.trim();
         let prompt = suggestion.prompt_text.trim();
         let label_key = label.to_lowercase();
@@ -170,7 +169,7 @@ pub(super) fn parse(mut value: Value) -> Option<(Domain, Option<Recourse>)> {
         }
         suggestions.push((label.into(), prompt.into()));
     }
-    let overview = "We can still help with an overview of ";
+    let overview = "You can ask Xdcode for an overview of ";
     let (lead, offer) = match wire.domain {
         Domain::Bio => (bio_lead, bio_offer.unwrap_or(overview)),
         Domain::Cyber => (cyber_lead, overview),

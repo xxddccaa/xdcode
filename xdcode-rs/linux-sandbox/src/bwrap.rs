@@ -45,7 +45,7 @@ use xdcode_utils_absolute_path::AbsolutePathBuf;
 ///
 /// These are intentionally system-level paths only (plus Nix store roots) so
 /// `include_platform_defaults` does not silently widen access to user data.
-const LINUX_PLATFORM_DEFAULT_READ_ROOTS: &[&str] = &[
+pub(super) const LINUX_PLATFORM_DEFAULT_READ_ROOTS: &[&str] = &[
     "/bin",
     "/sbin",
     "/usr",
@@ -74,7 +74,7 @@ pub(crate) struct BwrapOptions {
     /// Whether the host exposes WSLg's duplicate distro root, which must be hidden
     /// when constructing a restricted filesystem view.
     pub mask_wslg_distro: bool,
-    /// Optional maximum depth for expanding unreadable glob patterns with ripgrep.
+    /// Optional maximum depth for expanding unreadable glob patterns.
     ///
     /// Keep this uncapped by default so existing nested deny-read matches are
     /// masked before the sandboxed command starts.
@@ -107,11 +107,13 @@ pub(crate) enum BwrapNetworkMode {
     /// Bubblewrap enforces this by unsharing the network namespace. The
     /// proxy-routing bridge is established by the helper process after startup.
     ProxyOnly,
+    /// The transparent TCP setup already isolated this command's network namespace.
+    PreparedProxy,
 }
 
 impl BwrapNetworkMode {
     fn should_unshare_network(self) -> bool {
-        !matches!(self, Self::FullAccess)
+        matches!(self, Self::Isolated | Self::ProxyOnly)
     }
 }
 
@@ -842,6 +844,7 @@ pub fn expand_unreadable_globs(
 
     // Group each pattern by the static path prefix before its first glob
     // metacharacter. That keeps scans narrow, avoids searching from `/`, and
+    // lets one walk handle all patterns under the same root.
     let mut patterns_by_search_root: BTreeMap<AbsolutePathBuf, Vec<String>> = BTreeMap::new();
     for pattern in patterns {
         let Some((search_root, glob)) = split_glob_pattern(pattern, cwd) else {
@@ -849,6 +852,8 @@ pub fn expand_unreadable_globs(
                 "unreadable glob `{pattern}` cannot be safely expanded; use a pattern with a non-root directory prefix"
             )));
         };
+        // Follow symlink roots, but never discard a deny because inspecting its
+        // search root failed. Only absent or non-directory roots have no matches.
         match fs::metadata(search_root.as_path()) {
             Ok(metadata) if metadata.is_dir() => {
                 patterns_by_search_root
@@ -897,6 +902,7 @@ pub fn expand_unreadable_globs(
 fn split_glob_pattern(pattern: &str, cwd: &Path) -> Option<(AbsolutePathBuf, String)> {
     // Resolve relative patterns once, then split at the first glob
     // metacharacter. The prefix becomes the search root and the suffix stays as
+    // the file glob. Root-level glob scans are intentionally skipped because
     // they are too broad for startup-time sandbox construction.
     let absolute_pattern = AbsolutePathBuf::resolve_path_against_base(pattern, cwd);
     let pattern = absolute_pattern.to_string_lossy();
@@ -928,8 +934,9 @@ fn glob_files(
     max_depth: Option<usize>,
 ) -> Result<Vec<AbsolutePathBuf>> {
     let mut builder = OverrideBuilder::new(search_root);
-    builder.allow_unclosed_class(true);
+    builder.allow_unclosed_class(/*yes*/ true);
     for glob in globs {
+        // Anchor to the scan root; this also keeps leading `#` and `!` literal.
         let mut glob = format!("/{glob}");
         if glob.ends_with(' ') && !glob.ends_with("\\ ") {
             glob.insert(glob.len() - 1, '\\');
@@ -952,10 +959,12 @@ fn glob_files(
     let threads = std::thread::available_parallelism()
         .map_or(1, usize::from)
         .min(12);
+    // Include hidden and ignored files, and follow explicit symlink roots.
+    // Skip child symlinks and only return regular files.
     let mut walker = ignore::WalkBuilder::new(search_root);
     walker
-        .standard_filters(false)
-        .follow_links(false)
+        .standard_filters(/*yes*/ false)
+        .follow_links(/*yes*/ false)
         .max_depth(max_depth)
         .overrides(overrides)
         .threads(threads);
@@ -989,6 +998,7 @@ fn glob_files(
         }
         WalkState::Continue
     };
+    // Like rg, use the serial walk on one CPU: depth-boundary errors differ.
     if threads == 1 {
         for entry in walker.build() {
             if visit(entry) == WalkState::Quit {

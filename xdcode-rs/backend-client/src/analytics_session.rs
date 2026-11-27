@@ -4,11 +4,17 @@
 use crate::Client;
 use crate::RequestError;
 use std::sync::Arc;
+use xdcode_features::RuntimeAuthMode;
 use xdcode_http_client::HttpClientFactory;
 use xdcode_login::AuthManager;
 use xdcode_login::AuthManagerConfig;
 use xdcode_login::XdcodeAuth;
 use xdcode_protocol::account::PlanType;
+use xdcode_runtime_agent_instance::RegistrationError;
+use xdcode_runtime_agent_instance::RuntimeAuthError;
+use xdcode_runtime_agent_instance::RuntimeAuthManager;
+use xdcode_runtime_agent_instance::resolve_installation_id;
+use xdcode_utils_absolute_path::AbsolutePathBuf;
 
 /// Non-secret account metadata associated with an analytics session.
 #[derive(Clone, Debug)]
@@ -31,6 +37,7 @@ impl AnalyticsSession {
     pub async fn from_config(
         config: &impl AuthManagerConfig,
         http_client_factory: HttpClientFactory,
+        runtime_auth_mode: Option<RuntimeAuthMode>,
     ) -> Result<Self, String> {
         let auth_manager =
             AuthManager::shared_from_config(config, /*enable_xdcode_api_key_env*/ false)
@@ -51,11 +58,53 @@ impl AnalyticsSession {
             email: auth.get_account_email(),
             plan_type: None,
         };
-        let client = Client::new_without_redirects(config.chatgpt_base_url(), http_client_factory)
-            .with_auth_provider(xdcode_model_provider::auth_provider_from_auth_manager(
-                Arc::clone(&auth_manager),
-                &auth,
-            ));
+        let base_url = config.chatgpt_base_url();
+        let runtime_auth_mode = runtime_auth_mode
+            .filter(|_| xdcode_runtime_agent_instance::is_hosted_provider_api_url(&base_url));
+        let client = match runtime_auth_mode {
+            Some(mode) => {
+                let home = AbsolutePathBuf::from_absolute_path(config.xdcode_home())
+                    .map_err(|_| "Couldn't initialize local Analytics authentication.")?;
+                let installation_id = resolve_installation_id(&home)
+                    .await
+                    .map_err(|_| "Couldn't initialize local Analytics authentication.")?;
+                let runtime = (
+                    Arc::new(RuntimeAuthManager::for_xdcode(
+                        Arc::clone(&auth_manager),
+                        &base_url,
+                        &installation_id,
+                    )),
+                    mode,
+                );
+                Client::from_auth_with_runtime_without_redirects(
+                    &base_url,
+                    &auth,
+                    http_client_factory,
+                    Some(&runtime),
+                    /*headers*/ &Default::default(),
+                )
+                .await
+                .map_err(|error| {
+                    match error.downcast_ref::<RuntimeAuthError>() {
+                        Some(
+                            RuntimeAuthError::RefreshFailed
+                            | RuntimeAuthError::RefreshTokenFailed(_)
+                            | RuntimeAuthError::Registration(RegistrationError::Rejected {
+                                status: http::StatusCode::UNAUTHORIZED,
+                                ..
+                            }),
+                        ) => "Sign in again to load Analytics.",
+                        _ => "Couldn't authenticate the Analytics request.",
+                    }
+                })?
+            }
+            None => Client::new_without_redirects(base_url, http_client_factory)
+                .with_auth_provider(xdcode_model_provider::auth_provider_from_auth_manager(
+                    Arc::clone(&auth_manager),
+                    &auth,
+                ))
+                .map_err(|_| "Couldn't initialize local Analytics authentication.")?,
+        };
         let mut session = Self {
             client,
             auth_manager,

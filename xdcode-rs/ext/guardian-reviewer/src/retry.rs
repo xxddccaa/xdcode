@@ -186,6 +186,7 @@ fn should_retry_guardian_review(outcome: &GuardianReviewOutcome) -> bool {
             XdcodeErrorInfo::RateLimitExceeded
             | XdcodeErrorInfo::FlexUnavailable
             | XdcodeErrorInfo::ServerOverloaded
+            | XdcodeErrorInfo::PolicyCapacityUnavailable
             | XdcodeErrorInfo::InternalServerError => true,
             XdcodeErrorInfo::HttpConnectionFailed { http_status_code }
             | XdcodeErrorInfo::ResponseStreamConnectionFailed { http_status_code }
@@ -196,6 +197,10 @@ fn should_retry_guardian_review(outcome: &GuardianReviewOutcome) -> bool {
             XdcodeErrorInfo::ContextWindowExceeded
             | XdcodeErrorInfo::SessionBudgetExceeded
             | XdcodeErrorInfo::UsageLimitExceeded
+            | XdcodeErrorInfo::ApiKeySpendLimitExceeded
+            | XdcodeErrorInfo::ProjectSpendLimitExceeded
+            | XdcodeErrorInfo::OrganizationSpendLimitExceeded
+            | XdcodeErrorInfo::InferenceHookDenied
             | XdcodeErrorInfo::CyberPolicy
             | XdcodeErrorInfo::BioPolicy
             | XdcodeErrorInfo::MisalignmentPolicyViolation

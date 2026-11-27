@@ -16,9 +16,9 @@ wine_rust_test(
         "//xdcode-rs/features",
         "//xdcode-rs/protocol",
         "//xdcode-rs/utils/path-uri",
-        "@crates//:anyhow",
-        "@crates//:pretty_assertions",
-        "@crates//:serde_json",
-        "@crates//:tokio",
+        "@crates//anyhow",
+        "@crates//pretty_assertions",
+        "@crates//serde_json",
+        "@crates//tokio",
     ],
 )

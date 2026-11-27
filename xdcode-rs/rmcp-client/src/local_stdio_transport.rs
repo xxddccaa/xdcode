@@ -52,15 +52,17 @@ struct Discovery {
 
 impl Drop for Discovery {
     fn drop(&mut self) {
-        if let Some(sender) = self.finished.take()
+        // A version re-offer can supersede an earlier reply. Publish only when startup ends.
+        if let Some(tx) = self.finished.take()
             && let Some(outcome) = self.outcome.take()
         {
-            let _ = sender.send(outcome);
+            let _ = tx.send(outcome);
         }
     }
 }
 
 impl Discovery {
+    /// Track discovery replies and skip messages that do not answer the active handshake.
     fn handle_reply(&mut self, message: &mut Option<RxJsonRpcMessage<RoleClient>>) -> bool {
         let Some(reply) = message.as_ref() else {
             self.outcome.get_or_insert(DiscoveryOutcome::RetryLegacy);
@@ -96,14 +98,19 @@ impl Discovery {
             && (matches_probe || idless)
             && matches!(reply, JsonRpcMessage::Error(error) if error.error.code == ErrorCode::METHOD_NOT_FOUND)
         {
+            // If initialize also fails, try it as the first request on a fresh helper.
             self.outcome.get_or_insert(DiscoveryOutcome::RetryLegacy);
         }
+        // With one request rmcp accepts an ID-less error. With two, only a modern
+        // protocol error can be classified as a discovery reply without an ID.
         if matches_probe || (idless && (!legacy || modern)) {
             self.probe_id = None;
             if legacy {
+                // Auto sent initialize before receiving the reply to its earlier probe.
                 if !modern && matches!(reply, JsonRpcMessage::Error(_)) {
                     return true;
                 }
+                // Stop the obsolete initialize and let the caller classify the reply.
                 self.outcome = message.take().map(|reply| DiscoveryOutcome::Late {
                     reply: Box::new(reply),
                     after_reoffer: matches!(self.outcome, Some(DiscoveryOutcome::Reply)),
@@ -118,8 +125,10 @@ impl Discovery {
             && id.is_some()
             && !self.initialize_id.as_ref().is_some_and(matches_id)
         {
+            // rmcp would abort the handshake before reading the reply to discover or initialize.
             return true;
         } else if legacy && matches!(reply, JsonRpcMessage::Response(_)) {
+            // Once initialize wins, rmcp owns the session and can ignore the obsolete probe.
             self.probe_id = None;
             self.retry_at = None;
             self.outcome = Some(DiscoveryOutcome::Reply);
@@ -174,6 +183,8 @@ impl LocalStdioTransport {
         self.discovery = Some(Discovery {
             finished: Some(tx),
             outcome: None,
+            // Aim for three seconds of discovery. Reserve at least a quarter of short
+            // timeouts and half of longer ones for a fresh initialize.
             retry_at: timeout.and_then(|limit| {
                 let probe_timeout = Duration::from_secs(3).clamp(limit / 2, limit - limit / 4);
                 tokio::time::Instant::now().checked_add(probe_timeout)

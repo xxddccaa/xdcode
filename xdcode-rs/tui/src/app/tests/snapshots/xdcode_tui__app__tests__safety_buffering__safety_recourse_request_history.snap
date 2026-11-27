@@ -10,10 +10,13 @@ Scenario: The fork excludes the blocked turn and submits the selected rewrite.
 00:message/developer:
     Help the user.
 01:message/developer[4]:
-    [01] <XDCODE_MODEL_CONFIGURATION>
-    [02] <SKILLS_INSTRUCTIONS>
-    [03] <PERMISSIONS_INSTRUCTIONS>
-    [04] <COLLABORATION_MODE>
+    [01] <SKILLS_INSTRUCTIONS>
+    [02] <PERMISSIONS_INSTRUCTIONS>
+    [03] <COLLABORATION_MODE>
+    [04] <tools>
+        Deferred tool namespaces:
+        - xdcode_tui: Manage Xdcode tasks available through the connected app server.
+        </tools>
 02:message/user:
     <ENVIRONMENT_CONTEXT>
 03:message/user:
@@ -24,10 +27,13 @@ Scenario: The fork excludes the blocked turn and submits the selected rewrite.
 00:message/developer:
     Help the user.
 01:message/developer[4]:
-    [01] <XDCODE_MODEL_CONFIGURATION>
-    [02] <SKILLS_INSTRUCTIONS>
-    [03] <PERMISSIONS_INSTRUCTIONS>
-    [04] <COLLABORATION_MODE>
+    [01] <SKILLS_INSTRUCTIONS>
+    [02] <PERMISSIONS_INSTRUCTIONS>
+    [03] <COLLABORATION_MODE>
+    [04] <tools>
+        Deferred tool namespaces:
+        - xdcode_tui: Manage Xdcode tasks available through the connected app server.
+        </tools>
 02:message/user:
     <ENVIRONMENT_CONTEXT>
 03:message/user:

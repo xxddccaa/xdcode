@@ -18,6 +18,7 @@ use xdcode_protocol::protocol::SKILLS_INSTRUCTIONS_CLOSE_TAG;
 use xdcode_protocol::protocol::SKILLS_INSTRUCTIONS_OPEN_TAG;
 
 use crate::aliases::AliasRoot;
+use crate::catalog_prompt::SkillPrompt;
 use crate::catalog_prompt::SkillPromptKind;
 use crate::fragments::AvailableSkillsInstructions;
 use crate::render::AvailableSkillsRender;
@@ -87,6 +88,8 @@ struct CatalogSnapshot {
     roots: BTreeMap<String, String>,
     usage: CatalogUsage,
     instructions_sent: bool,
+    #[serde(default)]
+    omit_descriptions: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     tracks_grants: bool,
     allocation: Option<CatalogBudgetAllocation>,
@@ -113,6 +116,8 @@ pub(crate) fn skills_delta_section(
     remaining: &mut SkillMetadataBudget,
     on_render: impl Fn(&SkillRenderReport) + Send + Sync + 'static,
 ) -> WorldStateSectionContribution {
+    // Updates share their remaining budget in source order. A full render, including
+    // the one requested by compaction, always starts from the bounded initial listing.
     let update = previous
         .and_then(|value| CatalogSnapshot::deserialize(value).ok())
         .filter(|snapshot| snapshot.version == SNAPSHOT_VERSION)
@@ -156,6 +161,7 @@ fn build_initial_catalog(source: &str, catalog: CatalogDelta) -> CatalogResult {
         let usage =
             CatalogUsage::measure(|budget| rendered.metadata_cost(budget, catalog.include_usage));
         let entries = std::mem::take(&mut rendered.entries);
+        snapshot.omit_descriptions = rendered.prompt.omit_descriptions;
         let fragment = rendered.into_fragment(catalog.include_usage);
         for (id, skill) in entries {
             if fragment.is_some()
@@ -183,16 +189,24 @@ fn build_catalog_update(
     mut previous: CatalogSnapshot,
     remaining: &mut SkillMetadataBudget,
 ) -> CatalogResult {
+    let usage_update = catalog.rendered.as_ref().filter(|rendered| {
+        previous.instructions_sent
+            && catalog.include_usage
+            && previous.omit_descriptions != rendered.prompt.omit_descriptions
+    });
     let message = if previous.instructions_sent {
         CatalogMessage::Update {
             heading: format!("\n## {source} skills update\n"),
         }
     } else {
         CatalogMessage::FirstListing {
-            prompt_kind: catalog
-                .rendered
-                .as_ref()
-                .map_or(SkillPromptKind::Unaliased, |rendered| rendered.prompt_kind),
+            prompt: catalog.rendered.as_ref().map_or(
+                SkillPrompt {
+                    kind: SkillPromptKind::Unaliased,
+                    omit_descriptions: false,
+                },
+                |r| r.prompt,
+            ),
             include_usage: catalog.include_usage,
         }
     };
@@ -203,16 +217,14 @@ fn build_catalog_update(
     };
     let mut report = SkillRenderReport::default();
     let mut entries = BTreeMap::new();
+    // Older snapshots did not record which shown skills depended on a grant.
     let legacy_filesystem = catalog.tracks_grants && !previous.tracks_grants;
     let mut restored = false;
-    for (id, skill) in catalog
-        .rendered
-        .iter()
-        .flat_map(|rendered| &rendered.entries)
-    {
+    for (id, skill) in catalog.rendered.iter().flat_map(|r| &r.entries) {
         let old = previous.entries.get(id);
         restored |= old.is_some_and(|old| old.grant == Some(GrantStatus::Withdrawn));
         let mut shown = old.is_some_and(|old| old.shown);
+        // A grant doesn't make a skill temporary if the model already saw it without one.
         let grant = skill.snapshot.grant.filter(|_| {
             legacy_filesystem || old.is_none_or(|old| !old.shown || old.grant.is_some())
         });
@@ -236,6 +248,7 @@ fn build_catalog_update(
     }
     let mut body = draft.into_body(source);
     let mut withdrew = false;
+    // Keep only withdrawals the model has seen. Their count is bounded by the listing budget.
     for (id, mut old) in previous.entries {
         if old.shown && (old.grant.is_some() || legacy_filesystem) && !entries.contains_key(&id) {
             withdrew |= old.grant != Some(GrantStatus::Withdrawn);
@@ -254,6 +267,14 @@ fn build_catalog_update(
             .push_str(notice);
     }
     previous.tracks_grants = catalog.tracks_grants;
+    if let Some(rendered) = usage_update {
+        let instructions = rendered.prompt.usage_instructions();
+        body.get_or_insert_with(|| format!("\n## {source} skills update\n"))
+            .push_str(&format!("\n### How to use skills\n{instructions}\n"));
+    }
+    if let Some(rendered) = &catalog.rendered {
+        previous.omit_descriptions = rendered.prompt.omit_descriptions;
+    }
     previous.entries = entries;
     previous.instructions_sent |= body.is_some();
     previous.allocation = catalog.allocation;
@@ -273,7 +294,7 @@ fn listing_body(source: &str, instructions: AvailableSkillsInstructions) -> Stri
 
 enum CatalogMessage {
     FirstListing {
-        prompt_kind: SkillPromptKind,
+        prompt: SkillPrompt,
         include_usage: bool,
     },
     Update {
@@ -311,11 +332,11 @@ impl UpdateDraft {
             if let Some((_, line)) = &new_mapping {
                 cost += match &self.message {
                     CatalogMessage::FirstListing {
-                        prompt_kind,
+                        prompt,
                         include_usage,
                     } if self.root_lines.is_empty() => aliased_metadata_overhead_cost(
                         budget,
-                        *prompt_kind,
+                        *prompt,
                         std::slice::from_ref(line),
                         *include_usage,
                     ),
@@ -352,18 +373,16 @@ impl UpdateDraft {
         }
         Some(match self.message {
             CatalogMessage::FirstListing {
-                prompt_kind,
+                mut prompt,
                 include_usage,
             } => {
-                let kind = if self.root_lines.is_empty() {
-                    SkillPromptKind::Unaliased
-                } else {
-                    prompt_kind
-                };
+                if self.root_lines.is_empty() {
+                    prompt.kind = SkillPromptKind::Unaliased;
+                }
                 listing_body(
                     source,
                     AvailableSkillsInstructions::from_skill_lines(
-                        kind,
+                        prompt,
                         self.root_lines,
                         self.skill_lines,
                         include_usage,

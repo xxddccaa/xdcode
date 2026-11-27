@@ -51,6 +51,13 @@ impl ChatWidget {
         }
     }
 
+    pub(crate) fn reject_user_shell_command(&mut self, message: String) {
+        // No turn event will arrive to clear the pending shell submission.
+        self.input_queue.user_turn_pending_start = false;
+        self.add_error_message(message);
+        self.maybe_send_next_queued_input();
+    }
+
     fn submit_shell_command_with_history(
         &mut self,
         command: &str,
@@ -301,16 +308,20 @@ impl ChatWidget {
             }));
         }
 
-        use crate::app_command::UserSubmissionIntent;
-        let (submission_intent, source) = match source {
+        use crate::app_command::CloudSubmissionIntent;
+        let (cloud_submission, source) = match source {
             UserMessageSource::DirectEnter => (
-                UserSubmissionIntent::StartOrSteer,
+                CloudSubmissionIntent::StartOrSteer,
                 UserMessageSource::Prompt,
             ),
-            UserMessageSource::Prompt => (UserSubmissionIntent::StartIfIdle, source),
-            UserMessageSource::QuestionAnswer | UserMessageSource::SafetyRecourse => {
-                (UserSubmissionIntent::UseKnownTurn, source)
-            }
+            UserMessageSource::Prompt => (CloudSubmissionIntent::StartIfIdle, source),
+            UserMessageSource::QuestionAnswer => (
+                CloudSubmissionIntent::QuestionAnswer {
+                    during_turn: !render_in_history,
+                },
+                source,
+            ),
+            UserMessageSource::SafetyRecourse => (CloudSubmissionIntent::UseKnownTurn, source),
         };
         if !text.is_empty() {
             items.push(UserInput::Text {
@@ -498,10 +509,10 @@ impl ChatWidget {
             } else {
                 "user"
             },
-            submission_intent,
+            cloud_submission,
             client_user_message_id.clone(),
             items,
-            self.config.cwd.to_path_buf(),
+            self.session_cwd().to_path_buf(),
             AskForApproval::from(self.config.permissions.approval_policy.value()),
             active_permission_profile,
             effective_mode.model().to_string(),
@@ -536,6 +547,7 @@ impl ChatWidget {
             ));
         }
 
+        // The app submits recourse turns directly to the verified fork.
         if source != UserMessageSource::SafetyRecourse && !self.submit_op(op.clone()) {
             return (false, None);
         }

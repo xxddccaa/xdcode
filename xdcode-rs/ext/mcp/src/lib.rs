@@ -7,6 +7,7 @@ use xdcode_extension_api::McpServerContributor;
 use xdcode_mcp::XDCODE_APPS_MCP_SERVER_NAME;
 use xdcode_mcp::hosted_plugin_runtime_mcp_server_config;
 
+mod catalog_observability;
 mod cloud_plugin;
 mod plugin;
 mod plugin_contributor;

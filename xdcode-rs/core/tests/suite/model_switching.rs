@@ -53,6 +53,7 @@ use xdcode_protocol::model_types::ReasoningEffort;
 use xdcode_protocol::model_types::ReasoningEffortPreset;
 use xdcode_protocol::model_types::TruncationPolicyConfig;
 use xdcode_protocol::model_types::default_input_modalities;
+use xdcode_protocol::models::AudioReference;
 use xdcode_protocol::models::BaseInstructionsProvenance;
 use xdcode_protocol::models::ImageReference;
 use xdcode_protocol::models::PermissionProfile;
@@ -126,7 +127,6 @@ fn test_model_info(
         visibility: ModelVisibility::List,
         supported_in_api: true,
         input_modalities,
-        used_fallback_model_metadata: false,
         supports_search_tool: false,
         supports_experimental_context: false,
         use_responses_lite: false,
@@ -139,6 +139,7 @@ fn test_model_info(
         tool_mode: None,
         multi_agent_version: None,
         multi_agent_reasoning_effort: None,
+        multi_agent_tools_in_code_mode: None,
         priority: 1,
         additional_speed_tiers: Vec::new(),
         service_tiers: Vec::new(),
@@ -156,6 +157,7 @@ fn test_model_info(
         availability_nux: None,
         apply_patch_tool_type: None,
         web_search_tool_type: Default::default(),
+        web_search_provider: None,
         truncation_policy: TruncationPolicyConfig::bytes(/*limit*/ 10_000),
         supports_image_detail_original: false,
         context_window: Some(272_000),
@@ -927,7 +929,9 @@ async fn model_change_projects_media_without_changing_live_or_replayed_history(
                     detail: None,
                 },
                 UserInput::Audio {
-                    audio_url: "data:audio/wav;base64,YXVkaW8=".to_string(),
+                    audio: AudioReference::File {
+                        file_id: "file_model_switch_audio".to_string(),
+                    },
                 },
                 UserInput::Text {
                     text: "first turn".to_string(),
@@ -982,9 +986,16 @@ async fn model_change_projects_media_without_changing_live_or_replayed_history(
         !first_request.message_input_image_urls("user").is_empty(),
         "first request should include the uploaded image"
     );
+    let first_audio = first_request.body_json()["input"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|item| item["content"].as_array().into_iter().flatten())
+        .find(|part| part["type"] == "input_audio")
+        .cloned();
     assert_eq!(
-        first_request.message_input_audio_urls("user"),
-        vec!["data:audio/wav;base64,YXVkaW8=".to_string()]
+        first_audio,
+        Some(json!({"type": "input_audio", "file_id": "file_model_switch_audio"}))
     );
 
     let second_request = requests.last().expect("expected second request");
@@ -1014,7 +1025,12 @@ async fn model_change_projects_media_without_changing_live_or_replayed_history(
         "second request should strip unsupported image content"
     );
     assert!(
-        second_request.message_input_audio_urls("user").is_empty(),
+        second_request.body_json()["input"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .flat_map(|item| item["content"].as_array().into_iter().flatten())
+            .all(|part| part["type"] != "input_audio"),
         "second request should strip unsupported audio content"
     );
     let second_user_texts = second_request.message_input_texts("user");
@@ -1276,7 +1292,6 @@ async fn model_switch_to_smaller_model_updates_token_context_window() -> Result<
         visibility: ModelVisibility::List,
         supported_in_api: true,
         input_modalities: default_input_modalities(),
-        used_fallback_model_metadata: false,
         supports_search_tool: false,
         supports_experimental_context: false,
         use_responses_lite: false,
@@ -1289,6 +1304,7 @@ async fn model_switch_to_smaller_model_updates_token_context_window() -> Result<
         tool_mode: None,
         multi_agent_version: None,
         multi_agent_reasoning_effort: None,
+        multi_agent_tools_in_code_mode: None,
         priority: 1,
         additional_speed_tiers: Vec::new(),
         service_tiers: Vec::new(),
@@ -1306,6 +1322,7 @@ async fn model_switch_to_smaller_model_updates_token_context_window() -> Result<
         availability_nux: None,
         apply_patch_tool_type: None,
         web_search_tool_type: Default::default(),
+        web_search_provider: None,
         truncation_policy: TruncationPolicyConfig::bytes(/*limit*/ 10_000),
         supports_image_detail_original: false,
         context_window: Some(large_context_window),

@@ -3,6 +3,7 @@ use url::Url;
 
 mod chatgpt_cloudflare_cookies;
 mod chatgpt_hosts;
+mod chatgpt_routing_affinity;
 mod client;
 mod client_builder;
 mod client_tls;
@@ -11,6 +12,8 @@ mod error;
 mod native_roots;
 mod network_policy;
 mod outbound_proxy;
+mod provider_endpoints;
+mod provider_headers;
 mod request;
 mod request_builder;
 mod request_draft;
@@ -24,6 +27,7 @@ mod transport;
 
 pub use crate::chatgpt_cloudflare_cookies::with_chatgpt_cloudflare_cookie_store;
 pub use crate::chatgpt_hosts::is_allowed_chatgpt_host;
+pub use crate::chatgpt_routing_affinity::ChatGptRoutingAffinity;
 pub use crate::client::HttpClient;
 pub use crate::client::HttpError;
 pub use crate::client_builder::HttpClientBuilder;
@@ -59,6 +63,12 @@ pub use crate::outbound_proxy::RouteFailureClass;
 pub use crate::outbound_proxy::cache_system_proxy_route_for_test;
 #[cfg(target_os = "macos")]
 pub use crate::outbound_proxy::macos_system_proxy_configuration;
+pub use crate::provider_endpoints::ProviderDestination;
+pub use crate::provider_endpoints::classify_provider_api_url;
+pub use crate::provider_endpoints::is_hosted_provider_api_url;
+pub use crate::provider_headers::CHATGPT_ACCOUNT_ID_HEADER;
+pub use crate::provider_headers::PROVIDER_ORGANIZATION_HEADER;
+pub use crate::provider_headers::PROVIDER_PROJECT_HEADER;
 pub use crate::request::EncodedJsonBody;
 pub use crate::request::PreparedRequestBody;
 pub use crate::request::Request;
@@ -77,6 +87,7 @@ pub use crate::transport::ByteStream;
 pub use crate::transport::HttpTransport;
 pub use crate::transport::ReqwestTransport;
 pub use crate::transport::StreamResponse;
+pub use crate::transport::bounded_response_bytes;
 
 #[cfg(windows)]
 mod windows_proxy_auth;
@@ -111,4 +122,12 @@ pub fn validate_endpoint_url(value: &str, field: &str) -> Result<Url, String> {
         ));
     }
     Ok(url)
+}
+
+/// Validates a credential-bearing HTTPS endpoint without including the URL in errors.
+pub fn validate_https_endpoint_url(value: &str, field: &str) -> Result<Url, String> {
+    validate_endpoint_url(value, field)
+        .ok()
+        .filter(|url| url.scheme() == "https")
+        .ok_or_else(|| format!("{field} URLs must use HTTPS without userinfo or fragments"))
 }

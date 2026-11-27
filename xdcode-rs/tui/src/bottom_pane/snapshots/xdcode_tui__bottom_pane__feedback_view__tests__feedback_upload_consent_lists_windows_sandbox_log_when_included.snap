@@ -1,11 +1,11 @@
 ---
 source: tui/src/bottom_pane/feedback_view.rs
-assertion_line: 746
 expression: rendered
 ---
-Upload logs?
+Include logs and session history?
 
-The following files will be sent:
+Saving a ZIP does not submit feedback to Provider.
+Files may contain prompts, commands, and tool output:
   • xdcode-logs.log
   • client-logs.txt (if available)
   • xdcode-doctor-report.json

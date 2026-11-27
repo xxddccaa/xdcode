@@ -62,6 +62,12 @@ fn non_inheritable_environment_is_removed_after_policy_overrides() {
             "synthetic-inherited-key".into(),
         ),
         ("node_repl_auth_token".into(), "inherited-token".into()),
+        ("PROVIDER_IDENTITY_TOKEN_SOURCE".into(), "spiffe".into()),
+        ("provider_spiffe_audience".into(), "xdcode-test".into()),
+        (
+            "Provider_Spiffe_Id".into(),
+            "spiffe://example.org/workload".into(),
+        ),
         (
             "provider_federation_rule_id".to_string(),
             "inherited-rule".to_string(),

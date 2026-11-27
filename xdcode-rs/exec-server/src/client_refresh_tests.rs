@@ -90,6 +90,7 @@ impl NoiseRendezvousConnectProvider for Registry {
                     .map_err(|_| ExecServerError::Protocol("test lookup failed".to_owned()))?;
             }
             Ok(NoiseRendezvousConnectBundle {
+                http_headers: Default::default(),
                 websocket_url: target.url,
                 environment_id: "environment".to_owned(),
                 executor_registration_id: target.registration,
@@ -135,7 +136,13 @@ impl NoiseStreamHandler for NotifyingProcessor {
         ConnectionProcessor::decode(payload)
     }
 
-    fn encode(message: Self::Outgoing) -> Result<NoiseOutboundMessage, ExecServerError> {
+    fn encode(mut message: Self::Outgoing) -> Result<NoiseOutboundMessage, ExecServerError> {
+        // Advertise the stable contract implemented by this test executor.
+        if let xdcode_exec_server_protocol::JSONRPCMessage::Response(response) = &mut message
+            && let Some(info) = response.result.get_mut("environmentInfo")
+        {
+            info["executorVersion"] = serde_json::json!("0.164.0");
+        }
         ConnectionProcessor::encode(message)
     }
 
@@ -200,7 +207,7 @@ impl Executor {
                         let validator = validator.clone();
                         connections.spawn(async move {
                             let socket = tokio_tungstenite::accept_async(socket).await.unwrap();
-                            run_multiplexed_environment(socket, processor, "environment".to_owned(), executor.registration, executor.identity, validator).await;
+                            run_multiplexed_environment(socket, processor, "environment".to_owned(), executor.registration, executor.identity, validator, /*admission*/ None).await;
                         });
                     }
                     _ = connections.join_next(), if !connections.is_empty() => {}

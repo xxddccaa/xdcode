@@ -1191,13 +1191,20 @@ flag = false
 async fn managed_preferences_expand_home_directory_in_workspace_write_roots() -> anyhow::Result<()>
 {
     use base64::Engine;
-    use xdcode_protocol::protocol::SandboxPolicy;
 
     let Some(home) = dirs::home_dir() else {
         return Ok(());
     };
     let tmp = tempdir()?;
 
+    std::fs::write(
+        tmp.path().join(CONFIG_TOML_FILE),
+        r#"
+default_permissions = ":read-only"
+[sandbox_workspace_write]
+network_access = true
+"#,
+    )?;
     let mut loader_overrides =
         LoaderOverrides::with_managed_config_path_for_tests(tmp.path().join("managed_config.toml"));
     loader_overrides.managed_preferences_base64 = Some(
@@ -1215,23 +1222,24 @@ writable_roots = ["~/code"]
         .xdcode_home(tmp.path().to_path_buf())
         .fallback_cwd(Some(tmp.path().to_path_buf()))
         .loader_overrides(loader_overrides)
+        .cloud_config_bundle(CloudConfigBundleFixture::loader_with_enterprise_config(
+            "[sandbox_workspace_write]\nexclude_tmpdir_env_var = true",
+        ))
         .build()
         .await?;
 
     let expected_root = AbsolutePathBuf::from_absolute_path(home.join("code"))?;
-    match &config.legacy_sandbox_policy() {
-        SandboxPolicy::WorkspaceWrite { writable_roots, .. } => {
-            assert_eq!(
-                writable_roots
-                    .iter()
-                    .filter(|root| **root == expected_root)
-                    .count(),
-                1,
-            );
-        }
-        other => panic!("expected workspace-write policy, got {other:?}"),
-    }
+    assert_eq!(
+        config.permissions.permission_profile(),
+        &xdcode_protocol::models::PermissionProfile::workspace_write_with(
+            &[expected_root],
+            xdcode_protocol::permissions::NetworkSandboxPolicy::Enabled,
+            /*exclude_tmpdir_env_var*/ true,
+            /*exclude_slash_tmp*/ false,
+        )
+    );
 
+    assert_eq!(config.permissions.active_permission_profile(), None);
     Ok(())
 }
 
@@ -1433,6 +1441,7 @@ personality = true
             .map(|requirements| requirements.value.clone()),
         Some(xdcode_config::FeatureRequirementsToml {
             entries: BTreeMap::from([("personality".to_string(), true)]),
+            ..Default::default()
         })
     );
     let config_requirements: ConfigRequirements = config_requirements_toml.try_into()?;
@@ -1473,6 +1482,7 @@ personality = true
             .map(|requirements| requirements.value.clone()),
         Some(xdcode_config::FeatureRequirementsToml {
             entries: BTreeMap::from([("personality".to_string(), true)]),
+            ..Default::default()
         })
     );
     Ok(())
@@ -1872,6 +1882,8 @@ managed-standard = true
 [permissions.managed-standard]
 extends = ":workspace"
 
+[permissions.managed-standard.credentials]
+
 [permissions.managed-standard.network]
 enabled = true
 proxy_url = "http://127.0.0.1:43128"
@@ -1902,6 +1914,8 @@ enable_socks5 = false
         toml::from_str::<PermissionProfileToml>(
             r#"
 extends = ":workspace"
+
+[credentials]
 
 [filesystem]
 ":root" = "read"
@@ -1954,13 +1968,7 @@ async fn network_requirements_start_proxy_for_legacy_and_permission_configs() ->
                 "[{table}]\nenabled = true\n[{table}.domains]\n'api.example.com' = 'allow'\n"
             );
             let xdcode_home = tempdir()?;
-            tokio::fs::write(
-                xdcode_home.path().join(CONFIG_TOML_FILE),
-                format!(
-                    "model = 'test-model'\nmodel_provider = 'test-responses'\n{config_toml}\n[model_providers.test-responses]\nname = 'Local Responses fixture'\nbase_url = 'http://127.0.0.1:9/v1'\nwire_api = 'responses'\n"
-                ),
-            )
-            .await?;
+            tokio::fs::write(xdcode_home.path().join(CONFIG_TOML_FILE), config_toml).await?;
             let config = ConfigBuilder::without_managed_config_for_tests()
                 .xdcode_home(xdcode_home.path().to_path_buf())
                 .fallback_cwd(Some(xdcode_home.path().to_path_buf()))
@@ -2352,6 +2360,47 @@ extends = ":workspace"
         error.to_string(),
         "requirements.toml permissions profile `duplicate-profile` conflicts with a config-defined profile of the same name"
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn empty_managed_credentials_table_cannot_select_a_user_profile() -> anyhow::Result<()> {
+    let home = tempdir()?;
+    tokio::fs::write(
+        home.path().join(CONFIG_TOML_FILE),
+        "[permissions.credentials]\nextends = ':workspace'",
+    )
+    .await?;
+
+    for (selected, child) in [
+        ("credentials", ""),
+        ("build", "[permissions.build]\nextends = 'credentials'"),
+    ] {
+        let requirements = format!(
+            r#"
+default_permissions = "{selected}"
+
+[allowed_permission_profiles]
+{selected} = true
+
+[permissions.credentials]
+{child}
+"#
+        );
+        let err = ConfigBuilder::without_managed_config_for_tests()
+            .xdcode_home(home.path().to_path_buf())
+            .fallback_cwd(Some(home.path().to_path_buf()))
+            .cloud_config_bundle(
+                CloudConfigBundleFixture::loader_with_enterprise_requirement(requirements),
+            )
+            .build()
+            .await
+            .expect_err("an empty managed profile must not bind to the writable user profile");
+        assert!(
+            err.to_string().contains("`permissions.credentials` in requirements.toml is reserved for shared credential policy; rename the managed profile"),
+            "{selected}: {err}"
+        );
+    }
     Ok(())
 }
 
@@ -4646,6 +4695,7 @@ prefix_rules = [
             parsed,
             RequirementsExecPolicyToml {
                 prefix_rules: vec![RequirementsExecPolicyPrefixRuleToml {
+                    canonical_matching: false,
                     pattern: vec![RequirementsExecPolicyPatternTokenToml {
                         token: Some("rm".to_string()),
                         any_of: None,
@@ -4675,6 +4725,7 @@ prefix_rules = [
             RequirementsExecPolicyToml {
                 prefix_rules: vec![
                     RequirementsExecPolicyPrefixRuleToml {
+                        canonical_matching: false,
                         pattern: vec![RequirementsExecPolicyPatternTokenToml {
                             token: Some("rm".to_string()),
                             any_of: None,
@@ -4683,6 +4734,7 @@ prefix_rules = [
                         justification: None,
                     },
                     RequirementsExecPolicyPrefixRuleToml {
+                        canonical_matching: false,
                         pattern: vec![
                             RequirementsExecPolicyPatternTokenToml {
                                 token: Some("git".to_string()),

@@ -3,6 +3,7 @@
 use super::session_lifecycle_requests::HistoryCapabilities;
 use super::session_lifecycle_requests::start_recording_app_server_with_history;
 use super::*;
+use crate::app::session_lifecycle::FreshSessionStart;
 use pretty_assertions::assert_eq;
 use xdcode_context_fragments::side_conversation_boundary;
 
@@ -52,7 +53,7 @@ sandbox = "unelevated"
     app.start_fresh_session(
         &mut tui,
         &mut server,
-        /*session_start_source*/ None,
+        FreshSessionStart::PreserveCurrentView(None),
         /*initial_user_message*/ None,
         /*new_thread_name*/ None,
     )
@@ -209,7 +210,7 @@ sandbox = "unelevated"
     std::fs::create_dir(untrusted.path().join(".xdcode"))?;
     std::fs::write(untrusted.path().join(".xdcode/config.toml"), "")?;
     crate::config_update::write_trusted_project(server.request_handle(), untrusted.path()).await?;
-    app.new_agents_overview_session(&mut tui, &mut server, Some(untrusted.path().abs()))
+    app.new_agents_overview_session(&mut tui, &mut server, Some(untrusted.path().to_path_buf()))
         .await?;
     server
         .thread_inject_items(
@@ -280,9 +281,11 @@ async fn local_projectless_defaults_respect_trust_scope_and_explicit_settings() 
         } else {
             ""
         };
+        let shared_settings =
+            format!("{windows}[projects.{parent_path}]\ntrust_level = \"untrusted\"\n");
         std::fs::write(
             home.path().join("config.toml"),
-            format!("{settings}{windows}[projects.{parent_path}]\ntrust_level = \"untrusted\"\n"),
+            format!("{settings}{shared_settings}"),
         )?;
         let overrides = ConfigOverrides {
             cwd: Some(cwd),
@@ -294,6 +297,10 @@ async fn local_projectless_defaults_respect_trust_scope_and_explicit_settings() 
             .harness_overrides(overrides.clone())
             .build()
             .await?;
+        if expected_approval.is_some() {
+            // The client loaded an approval policy that the server will not see.
+            std::fs::write(home.path().join("config.toml"), shared_settings)?;
+        }
         let original_approval = if settings.is_empty() && !project_marker {
             Approval::Granular(xdcode_protocol::protocol::GranularApprovalConfig {
                 sandbox_approval: false,
@@ -323,15 +330,22 @@ async fn local_projectless_defaults_respect_trust_scope_and_explicit_settings() 
             LoaderOverrides::without_managed_config_for_tests(),
         )
         .await?;
+        let defaults = crate::config_update::read_effective_config_with_layers(
+            &server.request_handle(),
+            config.cwd.display().to_string(),
+        )
+        .await?;
         let startup = crate::app::startup::prepare_fresh_startup_config(
             &mut config,
             &server,
-            &AppServerTarget::Embedded,
+            &defaults,
             &[],
             &overrides,
             &EnvironmentManager::default_for_tests(),
-        )
-        .await?;
+        );
+        if expected_approval.is_some() {
+            assert_eq!(startup.approval_policy, None);
+        }
         assert_eq!(
             startup.prompt_windows_sandbox,
             cfg!(target_os = "windows") && !sandbox_ready && settings.is_empty() && !project_marker

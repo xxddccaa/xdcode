@@ -14,7 +14,8 @@ fn auth() -> RemoteControlConnectionAuth {
         http_client_factory: xdcode_http_client::HttpClientFactory::new(
             xdcode_http_client::OutboundProxyPolicy::ReqwestDefault,
         ),
-        auth_provider: xdcode_model_provider::unauthenticated_auth_provider(),
+        auth: xdcode_login::XdcodeAuth::create_dummy_chatgpt_auth_for_testing(),
+        runtime_auth: None,
         account_id: "account-a".to_string(),
     }
 }

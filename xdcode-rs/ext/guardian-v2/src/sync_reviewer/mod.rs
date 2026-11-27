@@ -6,7 +6,6 @@ use std::sync::Arc;
 use std::sync::Weak;
 
 use xdcode_core::ThreadManager;
-use xdcode_core::XdcodeResponsesHeaders;
 use xdcode_core::config::Config;
 use xdcode_core::config::Constrained;
 use xdcode_core::config::TokenBudgetConfig;
@@ -94,19 +93,9 @@ impl ThreadLifecycleContributor<Config> for GuardianExtension {
                             options.thread_source = Some(ThreadSource::GuardianReview);
                             // This is the backend reviewer model, independent of current login.
                             // Core checks the selected model and auth on each request attempt.
-                            let provider = xdcode_model_provider::create_model_provider(
-                                options.config.model_provider.clone(),
-                                /*auth_manager*/ None,
+                            options.thread_extension_init.insert(
+                                xdcode_core::guardian_review::reviewer_headers(&options.config),
                             );
-                            options
-                                .thread_extension_init
-                                .insert(XdcodeResponsesHeaders {
-                                    model: provider.approval_review_preferred_model().to_owned(),
-                                    headers: http::HeaderMap::from_iter([(
-                                        http::HeaderName::from_static("x-xdcode-guardian"),
-                                        http::HeaderValue::from_static("reviewer"),
-                                    )]),
-                                });
                             options
                                 .thread_extension_init
                                 .insert(SessionIsolation::Isolated);
@@ -168,6 +157,10 @@ impl ThreadLifecycleContributor<Config> for GuardianExtension {
     ) -> ExtensionFuture<'a, ()> {
         Box::pin(async move {
             if input.session_source.is_internal()
+                || input
+                    .thread_store
+                    .get::<Arc<dyn xdcode_core::guardian_review::AttachedReviewer>>()
+                    .is_some()
                 || !matches!(
                     input.config.permissions.approval_policy.value(),
                     AskForApproval::OnRequest | AskForApproval::Granular(_)
@@ -202,8 +195,11 @@ impl ThreadLifecycleContributor<Config> for GuardianExtension {
             tokio::spawn(async move {
                 let _task = task;
                 let prepare = async {
-                    let context =
-                        xdcode_core::guardian_review::prepare_review_prewarm(&parent).await?;
+                    let context = xdcode_core::guardian_review::prepare_review_prewarm(
+                        &parent,
+                        xdcode_core::guardian_review::ReviewRetrieval::ConversationHistory,
+                    )
+                    .await?;
                     let key = context.reuse_key(/*previous*/ None);
                     pool.prewarm(Arc::new(context), key).await
                 };
@@ -282,3 +278,7 @@ pub fn install(
 #[cfg(test)]
 #[path = "lifecycle_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "reviewer_config_tests.rs"]
+mod reviewer_config_tests;

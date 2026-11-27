@@ -7,7 +7,8 @@ use color_eyre::eyre::OptionExt;
 use color_eyre::eyre::ensure;
 
 pub(super) fn supports_server(app_server: &AppServerSession) -> bool {
-    let minimum = semver::Version::new(0, 151, 0);
+    // Remote servers before 0.151.0 silently ignore the required turn trigger.
+    let minimum = semver::Version::new(/*major*/ 0, /*minor*/ 151, /*patch*/ 0);
     let Some(version) = app_server.server_version() else {
         return app_server.uses_embedded_app_server();
     };
@@ -37,12 +38,12 @@ pub(super) async fn continue_with_rewrite(
             !app.pending_server_profiles.contains_key(&thread_id),
             "permissions are still updating"
         );
-        let selection = app
-            .confirmed_new_session_selection()
-            .await?
-            .ok_or_eyre("the current model selection is not confirmed")?;
-        let source = app_server.thread_read(thread_id, false).await?;
-        let source_turns = app_server.thread_turns_page(thread_id, None, 2).await?;
+        let source = app_server
+            .thread_read(thread_id, /*include_turns*/ false)
+            .await?;
+        let source_turns = app_server
+            .thread_turns_page(thread_id, /*cursor*/ None, /*limit*/ 2)
+            .await?;
         let is_blocked_turn = |turn: &Turn| turn.id == turn_id && turn.status == TurnStatus::Failed;
         ensure!(
             !source.ephemeral
@@ -51,23 +52,30 @@ pub(super) async fn continue_with_rewrite(
             "the blocked turn is no longer the latest turn"
         );
         let mut config = app.chat_widget.config_ref().clone();
-        selection.apply_to_config(&mut config);
+        config.model = Some(app.chat_widget.current_model().to_string());
+        config.model_reasoning_effort = app.chat_widget.current_reasoning_effort();
         config.daybreak_enabled = app.chat_widget.daybreak_enabled;
         let selected_profile = app.selected_server_profile(thread_id);
-        let mut started = app_server
+        let started = app_server
             .fork_thread_at(
                 &app.local_settings,
                 config.clone(),
+                Some(app.chat_widget.session_workspace_roots()),
                 thread_id,
-                None,
-                Some(turn_id.clone()),
+                /*last_turn_id*/ None,
+                /*before_turn_id*/ Some(turn_id.clone()),
+                // Deferring also copies the source's current goal, beyond the turn cutoff.
                 ForkGoalContinuation::StartIfIdle,
                 selected_profile.as_ref(),
             )
             .await?;
         let fork_id = started.session.thread_id;
-        let fork_turns = app_server.thread_turns_page(fork_id, None, 1).await?;
-        let latest = app_server.thread_turns_page(thread_id, None, 1).await?;
+        let fork_turns = app_server
+            .thread_turns_page(fork_id, /*cursor*/ None, /*limit*/ 1)
+            .await?;
+        let latest = app_server
+            .thread_turns_page(thread_id, /*cursor*/ None, /*limit*/ 1)
+            .await?;
         ensure!(
             !started.blocks_direct_input
                 && started.session.forked_from_id == Some(thread_id)
@@ -77,29 +85,17 @@ pub(super) async fn continue_with_rewrite(
                     == source_turns.data.get(1).map(|turn| &turn.id),
             "the fork boundary could not be verified"
         );
-        ensure!(
-            started.session.model_provider_id == selection.provider
-                && started.session.model == selection.collaboration_mode.settings.model,
-            "the fork did not preserve the confirmed provider and model"
-        );
-        ensure!(
-            app_server
-                .thread_settings_update(selection.update_params(fork_id))
-                .await?,
-            "the server cannot confirm the inherited model settings"
-        );
-        selection.apply_to_session(&mut started.session);
         app.config = config;
         if let Some(input) = app.chat_widget.capture_thread_input_state() {
             app.agents_overview.input_states.insert(thread_id, input);
         }
-        app.retain_subscriptions_for_fork();
+        app.retain_thread_subscriptions();
         attached_fork = Some(fork_id);
         app.replace_chat_widget_with_app_server_thread(
             tui,
             started,
             ThreadAttachPresentation::SessionLineage,
-            None,
+            /*initial_user_message*/ None,
         )
         .await?;
         if selected_profile.is_some() {
@@ -115,7 +111,7 @@ pub(super) async fn continue_with_rewrite(
     .await;
     match result {
         Ok(()) if app.chat_widget.is_user_turn_pending_or_running() => return,
-        Ok(()) => {}
+        Ok(()) => {} // Submission was rejected and already showed its error.
         Err(error) if app.recover_transport_error(&error) && attached_fork.is_some() => return,
         Err(_) => {
             let text = history_cell::sanitize_user_text((&prompt).into());

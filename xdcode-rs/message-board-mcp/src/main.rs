@@ -36,9 +36,12 @@ async fn main() -> anyhow::Result<()> {
     let token = std::env::var(&args.bearer_token_env).map_err(|_| {
         anyhow::anyhow!("MCP bearer token environment variable is missing or invalid")
     })?;
-    let sqlite = SqliteConfig::from_sqlite_home(AbsolutePathBuf::try_from(args.sqlite_home)?);
+    let sqlite = SqliteConfig::from_sqlite_home_with_nfs_enforcement(
+        AbsolutePathBuf::try_from(args.sqlite_home)?,
+        /*enforce_delete_on_nfs*/ false,
+    );
     let registry = sqlite
-        .open_read_only_pool(&sqlite.state_db_path(), None)
+        .open_read_only_pool(&sqlite.state_db_path(), /*busy_timeout*/ None)
         .await?;
     let listener = tokio::net::TcpListener::bind(args.listen).await?;
     println!(
@@ -49,6 +52,8 @@ async fn main() -> anyhow::Result<()> {
     let mut http =
         StreamableHttpServerConfig::default().with_cancellation_token(cancellation.clone());
     http.allowed_hosts.extend(args.allowed_hosts);
+    // All sessions share one SQLite file. Retain a board between calls so the
+    // weak pool registry reuses its connections instead of initializing again.
     let pool_owner = Arc::new(Mutex::new(None));
     let serving =
         xdcode_message_board_mcp::serve_http(listener, token, http, move |caller, session_id| {
@@ -59,10 +64,9 @@ async fn main() -> anyhow::Result<()> {
                 root: session_id.into(),
             });
             async move {
-                let path = host
-                    .agent_path(caller)
-                    .await
-                    .map_err(|error| ErrorData::invalid_params(error.to_string(), None))?;
+                let path = host.agent_path(caller).await.map_err(|error| {
+                    ErrorData::invalid_params(error.to_string(), /*data*/ None)
+                })?;
                 let board = LocalAgentMessageBoard::open(
                     &sqlite,
                     &LocalBoardOptions::default(),
@@ -70,7 +74,9 @@ async fn main() -> anyhow::Result<()> {
                     host,
                 )
                 .await
-                .map_err(|error| ErrorData::internal_error(error.to_string(), None))?;
+                .map_err(|error| {
+                    ErrorData::internal_error(error.to_string(), /*data*/ None)
+                })?;
                 *pool_owner
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(board.clone());

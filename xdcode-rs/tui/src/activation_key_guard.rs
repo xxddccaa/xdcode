@@ -1,7 +1,7 @@
-//! Suppress a key held across a view transition from activating the child view.
+//! Keep a held activation key from triggering another action.
 //!
 //! Terminals with enhanced keyboard reporting distinguish a held `Repeat` from a fresh `Press`.
-//! Press-only terminals use a bounded window that extends while repeat events continue to arrive.
+//! A view transition on a press-only terminal can use a bounded window to block ambiguous presses.
 
 use crate::key_hint::KeyBinding;
 use crossterm::event::KeyEventKind;
@@ -14,6 +14,7 @@ const LEGACY_REPEAT_GUARD: Duration = Duration::from_secs(/*secs*/ 1);
 pub(crate) enum ActivationKeySuppression {
     ViewTransition,
     ReportedRepeats,
+    PressOnlyFallback,
 }
 
 #[derive(Clone, Copy)]
@@ -48,6 +49,7 @@ impl ActivationKeyGuard {
                 self.active = false;
                 return true;
             }
+            // Without the legacy fallback, only a reported Repeat is treated as held.
             if !self.legacy_repeat_fallback && kind == KeyEventKind::Press {
                 self.active = false;
                 return false;

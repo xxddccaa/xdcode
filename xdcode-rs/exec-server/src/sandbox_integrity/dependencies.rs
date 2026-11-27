@@ -1,11 +1,42 @@
 //! Shared inventory entries and filesystem facts, independent of any checker.
 
+#[cfg(not(target_os = "macos"))]
+use std::collections::HashMap;
+#[cfg(not(target_os = "macos"))]
+use std::ffi::OsString;
 use std::fs;
 use std::io;
 use std::path::PathBuf;
+use xdcode_sandboxing::SandboxIntegrityRequest;
 use xdcode_utils_absolute_path::AbsolutePathBuf;
+use xdcode_utils_path_uri::PathUri;
 
 pub(super) type Dependency = (&'static str, io::Result<PathBuf>);
+
+/// Inputs retained by the blocking worker. Seatbelt checks fixed paths and uses only the policy cwd.
+pub(super) struct IntegrityCommand {
+    pub(super) sandbox_policy_cwd: PathUri,
+    #[cfg(not(target_os = "macos"))]
+    pub(super) cwd: PathUri,
+    #[cfg(not(target_os = "macos"))]
+    pub(super) launcher: Option<OsString>,
+    #[cfg(not(target_os = "macos"))]
+    pub(super) env: HashMap<String, String>,
+}
+
+impl From<SandboxIntegrityRequest<'_>> for IntegrityCommand {
+    fn from(request: SandboxIntegrityRequest<'_>) -> Self {
+        Self {
+            sandbox_policy_cwd: request.sandbox_policy_cwd.clone(),
+            #[cfg(not(target_os = "macos"))]
+            cwd: request.cwd.clone(),
+            #[cfg(not(target_os = "macos"))]
+            launcher: request.launcher.map(OsString::from),
+            #[cfg(not(target_os = "macos"))]
+            env: request.env.clone(),
+        }
+    }
+}
 
 pub(super) struct DependencyTarget {
     pub path: AbsolutePathBuf,
@@ -29,11 +60,9 @@ pub(super) fn xdcode_executable() -> Dependency {
 }
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]
-pub(super) fn xdcode_and_launcher_dependencies(
-    request: &xdcode_sandboxing::SandboxExecRequest,
-) -> Vec<Dependency> {
+pub(super) fn xdcode_and_launcher_dependencies(request: &IntegrityCommand) -> Vec<Dependency> {
     let mut dependencies = vec![xdcode_executable()];
-    if let Some(exe) = request.command.first() {
+    if let Some(exe) = request.launcher.as_deref() {
         dependencies.push(("sandbox_launcher", Ok(PathBuf::from(exe))));
     }
     dependencies

@@ -25,6 +25,7 @@ fn blockquote_paste_continues_current_line_prefix() {
         ),
         ("> ", "single", "> single"),
         ("!> ", "out\npwd", "!> out\npwd"),
+        // A space before the bang keeps the draft in normal text mode.
         (" !echo hi\n> ", "out\npwd", " !echo hi\n> out\n> pwd\n\n"),
     ] {
         let (mut composer, _rx) = new_test_composer();

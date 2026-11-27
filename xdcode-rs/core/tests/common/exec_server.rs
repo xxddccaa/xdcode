@@ -30,10 +30,40 @@ impl ExecServerProcess {
 
     pub async fn start_with_env(env: &[(&str, &str)]) -> Result<Self> {
         let xdcode_home = TempDir::new()?;
-        let mut child = Command::new(xdcode_utils_cargo_bin::cargo_bin("xdcode")?)
+        let mut command = Command::new(xdcode_utils_cargo_bin::cargo_bin("xdcode")?);
+        command.envs(env.iter().copied());
+        Self::start_command(command, xdcode_home).await
+    }
+
+    pub async fn start_with_version(version: &str) -> Result<Self> {
+        Self::start_with_version_and_home(version, TempDir::new()?).await
+    }
+
+    pub async fn start_with_version_and_home(version: &str, xdcode_home: TempDir) -> Result<Self> {
+        let package = xdcode_home.path().join("package");
+        let bin = package.join("bin");
+        std::fs::create_dir_all(&bin)?;
+        let executable = bin.join(format!("xdcode{}", std::env::consts::EXE_SUFFIX));
+        xdcode_utils_cargo_bin::copy_executable(
+            &xdcode_utils_cargo_bin::cargo_bin("xdcode")?,
+            &executable,
+        )?;
+        std::fs::write(
+            package.join("xdcode-package.json"),
+            serde_json::to_vec(&serde_json::json!({"version": version}))?,
+        )?;
+        let mut command = Command::new(executable);
+        // V2 must not discover skills installed in the developer's home directory.
+        command
+            .env("HOME", xdcode_home.path())
+            .env("USERPROFILE", xdcode_home.path());
+        Self::start_command(command, xdcode_home).await
+    }
+
+    async fn start_command(mut command: Command, xdcode_home: TempDir) -> Result<Self> {
+        let mut child = command
             .args(["exec-server", "--listen", "ws://127.0.0.1:0"])
             .env("XDCODE_HOME", xdcode_home.path())
-            .envs(env.iter().copied())
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())

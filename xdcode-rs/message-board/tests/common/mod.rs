@@ -9,12 +9,12 @@ use std::sync::atomic::Ordering;
 
 use chrono::DateTime;
 use chrono::Utc;
+use futures::future::BoxFuture;
 use xdcode_message_board::*;
 use xdcode_protocol::AgentPath;
 use xdcode_protocol::ThreadId;
-use xdcode_protocol::error::XdcodeErr;
 use xdcode_protocol::error::Result;
-use futures::future::BoxFuture;
+use xdcode_protocol::error::XdcodeErr;
 
 pub struct Host {
     pub clock: AtomicI64,

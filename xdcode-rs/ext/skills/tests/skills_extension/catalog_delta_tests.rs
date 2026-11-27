@@ -12,6 +12,7 @@ async fn skill_sources_spend_the_same_remaining_budget() -> TestResult {
     };
     render_catalogs(&[], &enabled, &mut previous).await?;
 
+    // One release-notes row fits the 100-token budget. The larger entry sorts first.
     let large = "Detailed architectural guidance. ".repeat(40);
     let small = "Draft release notes. ".repeat(9);
     let entries = [
@@ -30,7 +31,7 @@ async fn skill_sources_spend_the_same_remaining_budget() -> TestResult {
     assert!(!emitted.contains("architecture-review"), "{emitted}");
     let used = previous
         .values()
-        .filter_map(|sample| sample["usage"]["tokens"].as_u64())
+        .filter_map(|s| s["usage"]["tokens"].as_u64())
         .sum::<u64>();
     assert!((50..=100).contains(&used), "{used}");
 
@@ -43,6 +44,45 @@ async fn skill_sources_spend_the_same_remaining_budget() -> TestResult {
     let empty = render_catalogs(&[], &disabled, &mut previous).await?;
     assert!(empty.contains("skills are currently available"), "{empty}");
     assert_eq!(render_catalogs(&[], &disabled, &mut previous).await?, "");
+    let omitted = TestConfig {
+        omit_descriptions: true,
+        ..enabled
+    };
+    previous.clear();
+    let emitted =
+        render_catalogs(&[("notes", "Hidden description.")], &enabled, &mut previous).await?;
+    assert!(emitted.contains("description shown above"), "{emitted}");
+    assert!(
+        emitted.contains("- host-notes: Hidden description."),
+        "{emitted}"
+    );
+    // Resume a snapshot written before the description policy was persisted.
+    for snapshot in previous.values_mut() {
+        snapshot.as_object_mut().unwrap().remove("omitDescriptions");
+    }
+    let emitted =
+        render_catalogs(&[("notes", "Hidden description.")], &omitted, &mut previous).await?;
+    assert!(
+        emitted.contains("OR the task clearly matches a skill's name shown above, you must use that skill for that turn."),
+        "{emitted}"
+    );
+    assert!(emitted.contains("- executor-notes: "), "{emitted}");
+    assert!(!emitted.contains("Hidden description."), "{emitted}");
+    assert_eq!(
+        render_catalogs(&[("notes", "Edited description.")], &omitted, &mut previous).await?,
+        ""
+    );
+    // A policy change still refreshes instructions when no more rows fit the budget.
+    let emitted =
+        render_catalogs(&[("notes", "Edited description.")], &enabled, &mut previous).await?;
+    assert!(emitted.contains("description shown above"), "{emitted}");
+    assert!(!emitted.contains("- executor-notes:"), "{emitted}");
+    assert!(!emitted.contains("- cloud-notes:"), "{emitted}");
+    assert!(!emitted.contains("- host-notes:"), "{emitted}");
+    assert_eq!(
+        render_catalogs(&[("notes", "Edited description.")], &enabled, &mut previous).await?,
+        ""
+    );
     Ok(())
 }
 
@@ -57,8 +97,14 @@ async fn grant_expiry_withdraws_only_missing_skills_when_metadata_budget_is_exha
     let original = [("unrelated", "Removed independently.")];
     for grant_when_removed in [None, Some("granting-turn")] {
         let mut previous = serde_json::Map::new();
-        let baseline =
-            render_catalogs_for_step(&original, &enabled, &mut previous, None, 60_000).await?;
+        let baseline = render_catalogs_for_step(
+            &original,
+            &enabled,
+            &mut previous,
+            /*granting_turn*/ None,
+            /*context_window*/ 60_000,
+        )
+        .await?;
         assert!(baseline.contains("- executor-unrelated:"), "{baseline}");
         let both = [
             original[0],
@@ -71,21 +117,33 @@ async fn grant_expiry_withdraws_only_missing_skills_when_metadata_budget_is_exha
             &enabled,
             &mut previous,
             Some("granting-turn"),
-            60_000,
+            /*context_window*/ 60_000,
         )
         .await?;
         assert!(granted.contains("- executor-permanent:"), "{granted}");
         assert!(granted.contains("- executor-independent:"), "{granted}");
         assert!(granted.contains("- executor-temporary:"), "{granted}");
-        let expired =
-            render_catalogs_for_step(&survivor, &enabled, &mut previous, grant_when_removed, 1)
-                .await?;
+        let expired = render_catalogs_for_step(
+            &survivor,
+            &enabled,
+            &mut previous,
+            grant_when_removed,
+            /*context_window*/ 1,
+        )
+        .await?;
         assert_eq!(
             expired,
             format!("\n## Selected-environment skills update\n{REVALIDATION}")
         );
         assert_eq!(
-            render_catalogs_for_step(&survivor, &enabled, &mut previous, None, 1).await?,
+            render_catalogs_for_step(
+                &survivor,
+                &enabled,
+                &mut previous,
+                /*granting_turn*/ None,
+                /*context_window*/ 1
+            )
+            .await?,
             ""
         );
         let restored = [survivor[0], ("temporary", "Turn only.")];
@@ -96,18 +154,32 @@ async fn grant_expiry_withdraws_only_missing_skills_when_metadata_budget_is_exha
                     &enabled,
                     &mut previous,
                     Some("reapproved"),
-                    1,
+                    /*context_window*/ 1,
                 )
                 .await?,
                 expected
             );
         }
         assert_eq!(
-            render_catalogs_for_step(&survivor, &enabled, &mut previous, None, 1,).await?,
+            render_catalogs_for_step(
+                &survivor,
+                &enabled,
+                &mut previous,
+                /*granting_turn*/ None,
+                /*context_window*/ 1,
+            )
+            .await?,
             format!("\n## Selected-environment skills update\n{REVALIDATION}")
         );
         assert_eq!(
-            render_catalogs_for_step(&[], &enabled, &mut previous, None, 1).await?,
+            render_catalogs_for_step(
+                &[],
+                &enabled,
+                &mut previous,
+                /*granting_turn*/ None,
+                /*context_window*/ 1
+            )
+            .await?,
             ""
         );
     }
@@ -126,7 +198,14 @@ async fn legacy_filesystem_catalog_revalidates_missing_rows_once() -> TestResult
     let mut previous = serde_json::Map::new();
     let survivor = [("stay", "Keep this skill.")];
     let both = [survivor[0], ("gone", "Temporarily available.")];
-    render_catalogs_for_step(&both, &config, &mut previous, None, 60_000).await?;
+    render_catalogs_for_step(
+        &both,
+        &config,
+        &mut previous,
+        /*granting_turn*/ None,
+        /*context_window*/ 60_000,
+    )
+    .await?;
     for snapshot in previous.values_mut() {
         snapshot.as_object_mut().unwrap().remove("tracksGrants");
     }
@@ -149,7 +228,10 @@ async fn render_catalogs(
     config: &TestConfig,
     previous: &mut serde_json::Map<String, serde_json::Value>,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    render_catalogs_for_step(skills, config, previous, None, 5_000).await
+    render_catalogs_for_step(
+        skills, config, previous, /*granting_turn*/ None, /*context_window*/ 5_000,
+    )
+    .await
 }
 
 async fn render_catalogs_for_step(
@@ -214,7 +296,7 @@ async fn render_catalogs_for_step(
             thread_store: &thread_store,
         })
         .await;
-    start_registered_turn(&registry, &session_store, &thread_store, turn_id).await;
+    refresh_registered_catalogs_for_step(&registry, &session_store, &thread_store, turn_id).await;
     let roots = [SelectedCapabilityRoot {
         id: "skills".to_string(),
         location: CapabilityRootLocation::Environment {
@@ -231,13 +313,14 @@ async fn render_catalogs_for_step(
         &roots,
         WorldStateContributionInput {
             previous_world_state: Some(previous),
-            step_store: &ExtensionData::new("step"),
+            step_store: &step_store,
             model_info: &ModelInfo {
-                context_window: Some(5_000),
+                context_window: Some(context_window),
+                include_skills_usage_instructions: true,
                 ..catalog_model_info()
             },
             thread_id: xdcode_protocol::ThreadId::new(),
-            turn_id: "turn",
+            turn_id,
             environments: &[],
             extension_metrics: None,
             session_store: &session_store,

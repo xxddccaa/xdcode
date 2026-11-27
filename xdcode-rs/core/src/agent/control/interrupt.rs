@@ -10,6 +10,7 @@ use xdcode_protocol::ThreadId;
 use xdcode_protocol::error::Result as XdcodeResult;
 use xdcode_protocol::error::XdcodeErr;
 use xdcode_protocol::error::XdcodeErrorDetails;
+use xdcode_protocol::protocol::Op;
 
 impl LocalAgentControl {
     /// Interrupts a spawned agent's current task, preserving the status observed before dispatch.
@@ -38,7 +39,7 @@ impl LocalAgentControl {
             XdcodeErr::UnsupportedOperation("target agent is missing an agent_path".to_string())
         })?;
         let snapshot = self.inspect_agent(target).await?;
-        match self.interrupt_agent(target).await {
+        match self.interrupt_agent(target, Op::InterruptAgent).await {
             Ok(_) => {}
             Err(err)
                 if matches!(

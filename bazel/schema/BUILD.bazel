@@ -3,7 +3,7 @@ load("//bazel/rules:schema_bundle.bzl", "schema_bundle")
 schema_bundle(
     name = "public-schema-bundle",
     testonly = True,
-    generator = "//xdcode-rs/app-server-protocol:schema-generator",
+    generator = "//xdcode-rs/app-server-protocol:schema-generator-on-demand",
     tags = ["manual"],
 )
 

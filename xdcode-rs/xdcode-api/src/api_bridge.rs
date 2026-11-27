@@ -12,6 +12,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use xdcode_protocol::auth::PlanType;
 use xdcode_protocol::error::ConnectionFailedError;
+use xdcode_protocol::error::ProviderRejection;
 use xdcode_protocol::error::RetryLimitReachedError;
 use xdcode_protocol::error::UnexpectedResponseError;
 use xdcode_protocol::error::UsageLimitReachedError;
@@ -24,21 +25,28 @@ pub fn map_api_error(err: ApiError) -> XdcodeErr {
         ApiError::Retryable { retry_after, .. }
         | ApiError::RateLimitExceeded { retry_after, .. }
         | ApiError::ServerOverloaded { retry_after }
+        | ApiError::PolicyCapacityUnavailable { retry_after }
         | ApiError::Transport(TransportError::Http { retry_after, .. }) => *retry_after,
         ApiError::Transport(_)
         | ApiError::Api { .. }
         | ApiError::Stream(_)
+        | ApiError::WebsocketMessageTooLarge
         | ApiError::ContentFilter
         | ApiError::ResponseIncomplete(_)
         | ApiError::ContextWindowExceeded
+        | ApiError::SpendLimitExceeded(_)
         | ApiError::QuotaExceeded
         | ApiError::UsageNotIncluded
         | ApiError::SessionBudgetExceeded
         | ApiError::FlexUnavailable
         | ApiError::RateLimit(_)
         | ApiError::InvalidRequest { .. }
+        | ApiError::AccessProgramNotEnabled { .. }
+        | ApiError::InvalidAudioInput { .. }
         | ApiError::ModelNotFound { .. }
         | ApiError::InvalidPrompt { .. }
+        | ApiError::InferenceHookDenied { .. }
+        | ApiError::ContentPolicyViolation { .. }
         | ApiError::CyberPolicy { .. }
         | ApiError::BioPolicy { .. }
         | ApiError::MisalignmentPolicyViolation { .. } => None,
@@ -53,6 +61,9 @@ pub fn map_api_error(err: ApiError) -> XdcodeErr {
 fn map_api_error_details(err: ApiError) -> XdcodeErr {
     match err {
         ApiError::ContextWindowExceeded => XdcodeErr::ContextWindowExceeded,
+        ApiError::SpendLimitExceeded(scope) => {
+            XdcodeErrorDetails::APISpendLimitExceeded(scope).into()
+        }
         ApiError::QuotaExceeded => XdcodeErr::QuotaExceeded,
         ApiError::UsageNotIncluded => XdcodeErr::UsageNotIncluded,
         ApiError::SessionBudgetExceeded => XdcodeErr::SessionBudgetExceeded,
@@ -61,11 +72,17 @@ fn map_api_error_details(err: ApiError) -> XdcodeErr {
             XdcodeErr::new(XdcodeErrorDetails::RateLimitExceeded(message))
         }
         ApiError::Stream(msg) => XdcodeErr::Stream(msg),
+        ApiError::WebsocketMessageTooLarge => {
+            XdcodeErr::new(XdcodeErrorDetails::WebsocketMessageTooLarge)
+        }
         ApiError::ContentFilter => XdcodeErr::new(XdcodeErrorDetails::ContentFilter),
         ApiError::ResponseIncomplete(incomplete) => {
             XdcodeErr::new(XdcodeErrorDetails::ResponseIncomplete(incomplete))
         }
         ApiError::ServerOverloaded { .. } => XdcodeErr::ServerOverloaded,
+        ApiError::PolicyCapacityUnavailable { .. } => {
+            XdcodeErr::new(XdcodeErrorDetails::PolicyCapacityUnavailable)
+        }
         ApiError::FlexUnavailable => XdcodeErr::new(XdcodeErrorDetails::FlexUnavailable),
         ApiError::Api { status, message } => {
             let user_message = api_error_user_message(status, &message);
@@ -81,11 +98,27 @@ fn map_api_error_details(err: ApiError) -> XdcodeErr {
             })
         }
         ApiError::InvalidRequest { message } => XdcodeErr::InvalidRequest(message),
+        ApiError::AccessProgramNotEnabled { message } => {
+            XdcodeErrorDetails::AccessProgramNotEnabled(ProviderRejection::Stream(message)).into()
+        }
+        ApiError::InvalidAudioInput {
+            message,
+            per_recording,
+        } => XdcodeErr::new(XdcodeErrorDetails::InvalidAudioInput {
+            message,
+            per_recording,
+        }),
         ApiError::ModelNotFound { message, status } => {
             XdcodeErr::new(XdcodeErrorDetails::ModelNotFound { message, status })
         }
         ApiError::InvalidPrompt { message } => {
             XdcodeErr::new(XdcodeErrorDetails::InvalidPrompt { message })
+        }
+        ApiError::InferenceHookDenied { message } => {
+            XdcodeErr::new(XdcodeErrorDetails::InferenceHookDenied { message })
+        }
+        ApiError::ContentPolicyViolation { message, status } => {
+            XdcodeErrorDetails::ContentPolicyViolation { message, status }.into()
         }
         ApiError::CyberPolicy { message } => {
             XdcodeErr::new(XdcodeErrorDetails::CyberPolicy { message })
@@ -119,6 +152,9 @@ fn map_api_error_details(err: ApiError) -> XdcodeErr {
                     && let Some(error) = provider_error
                 {
                     match error.get("code").and_then(Value::as_str) {
+                        Some("policy_capacity_unavailable") => {
+                            return XdcodeErr::new(XdcodeErrorDetails::PolicyCapacityUnavailable);
+                        }
                         Some("server_is_overloaded") => return XdcodeErr::ServerOverloaded,
                         Some("slow_down") => {
                             return XdcodeErr::new(XdcodeErrorDetails::RateLimitExceeded(
@@ -233,8 +269,6 @@ fn map_api_error_details(err: ApiError) -> XdcodeErr {
                                 Some(
                                     "insufficient_quota"
                                         | "credit_balance_exhausted"
-                                        | "organization_spend_limit_exceeded"
-                                        | "project_spend_limit_exceeded"
                                         | "organization_usage_limit_exceeded"
                                 )
                             )
@@ -256,7 +290,7 @@ fn map_api_error_details(err: ApiError) -> XdcodeErr {
                         .unwrap_or(body_text);
                     XdcodeErr::new(XdcodeErrorDetails::RateLimitExceeded(message))
                 } else {
-                    XdcodeErr::UnexpectedStatus(UnexpectedResponseError {
+                    let response = UnexpectedResponseError {
                         status,
                         user_message: api_error_user_message(status, &body_text),
                         body: body_text,
@@ -268,7 +302,26 @@ fn map_api_error_details(err: ApiError) -> XdcodeErr {
                             X_PROVIDER_AUTHORIZATION_ERROR_HEADER,
                         ),
                         identity_error_code: extract_x_error_json_code(headers.as_ref()),
-                    })
+                    };
+                    let body_code = parsed_body.as_ref().and_then(|body| {
+                        ["/detail/code", "/error/code"]
+                            .into_iter()
+                            .find_map(|path| body.pointer(path)?.as_str())
+                    });
+                    let code = body_code.or(response.identity_error_code.as_deref());
+                    match (status, code) {
+                        (
+                            http::StatusCode::FORBIDDEN,
+                            Some("invalid_workspace_selected" | "xdcode_workspace_access_denied"),
+                        ) => XdcodeErrorDetails::WorkspaceAccessDenied(response).into(),
+                        (http::StatusCode::FORBIDDEN, Some("access_program_not_enabled")) => {
+                            XdcodeErrorDetails::AccessProgramNotEnabled(ProviderRejection::Http(
+                                response,
+                            ))
+                            .into()
+                        }
+                        _ => XdcodeErr::UnexpectedStatus(response),
+                    }
                 }
             }
             TransportError::RetryLimit => XdcodeErr::RetryLimit(RetryLimitReachedError {

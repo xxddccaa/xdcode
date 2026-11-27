@@ -22,13 +22,6 @@ use pretty_assertions::assert_eq;
 use serde_json::Value;
 use serde_json::json;
 use test_case::test_case;
-use tracing::Subscriber;
-use tracing::span::Attributes;
-use tracing::span::Id;
-use tracing_subscriber::Layer;
-use tracing_subscriber::layer::Context as LayerContext;
-use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::util::SubscriberInitExt;
 use xdcode_config::Constrained;
 use xdcode_config::types::McpServerConfig;
 use xdcode_config::types::McpServerTransportConfig;
@@ -44,6 +37,7 @@ use xdcode_extension_api::McpServerContribution;
 use xdcode_extension_api::McpServerContributionContext;
 use xdcode_extension_api::McpServerContributor;
 use xdcode_features::Feature;
+use xdcode_mcp::McpServerKey;
 use xdcode_mcp::XDCODE_APPS_MCP_SERVER_NAME;
 use xdcode_protocol::mcp::McpServerConnectionStatus;
 use xdcode_protocol::models::PermissionProfile;
@@ -231,6 +225,7 @@ async fn mcp_calls_stay_bound_to_each_thread() -> anyhow::Result<()> {
             end.invocation,
             McpInvocation {
                 server: SERVER_NAME.to_string(),
+                environment_id: None,
                 tool: "echo".to_string(),
                 arguments: Some(json!({ "message": call_id })),
             }
@@ -273,125 +268,16 @@ async fn mcp_calls_stay_bound_to_each_thread() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn cached_stdio_negotiates_sharing_on_first_use() -> anyhow::Result<()> {
-    skip_if_no_network!(Ok(()));
-    core_test_support::skip_if_remote!(Ok(()), "the shared stdio fixture runs on the host");
-    skip_if_wine_exec!(Ok(()), "requires the native stdio server");
-
-    let responses_server = responses::start_mock_server().await;
-    let command = core_test_support::stdio_server_bin()?;
-    let fixture = test_xdcode()
-        .with_model_info_override("gpt-5.4", |model| model.supports_search_tool = false)
-        .with_config(move |config| {
-            config
-                .features
-                .disable(Feature::Mcp20260728)
-                .expect("legacy protocol");
-            config
-                .features
-                .disable(Feature::McpConnectionSharing)
-                .expect("disable discovery");
-            config.permissions.approval_policy = Constrained::allow_any(AskForApproval::Never);
-            config
-                .permissions
-                .set_permission_profile(PermissionProfile::Disabled)
-                .expect("test permissions");
-            config
-                .mcp_servers
-                .set(
-                    serde_json::from_value(json!({
-                        "cached_rmcp": {
-                            "command": command,
-                            "cwd": config.cwd,
-                            "env": { "MCP_TEST_DYNAMIC_SERVER_METADATA": "1" },
-                            "enabled_tools": ["echo"]
-                        }
-                    }))
-                    .expect("stdio config"),
-                )
-                .expect("set stdio config");
-        })
-        .build_with_auto_env(&responses_server)
-        .await?;
-    wait_for_mcp_server(&fixture.xdcode, SERVER_NAME).await?;
-    let mut config = fixture.config.clone();
-    config.features.enable(Feature::McpConnectionSharing)?;
-    let start_child = |config| {
-        fixture.thread_manager.start_thread(StartThreadOptions {
-            session_source: Some(SessionSource::SubAgent(SubAgentSource::Other(
-                "cached-sharing".to_string(),
-            ))),
-            ..StartThreadOptions::new(config)
-        })
-    };
-    let first = start_child(config.clone()).await?.thread;
-    let second = start_child(config).await?.thread;
-    let legacy_sibling = start_child(fixture.config.clone()).await?.thread;
-    for thread in [&first, &second, &legacy_sibling] {
-        let (config, _) = thread.current_mcp_config_and_runtime_context().await;
-        assert_eq!(
-            thread
-                .mcp_connection_statuses(&config)
-                .await
-                .get(SERVER_NAME),
-            Some(&McpServerConnectionStatus::NotStarted)
-        );
-    }
-
-    let mut processes = Vec::new();
-    for thread in [&fixture.xdcode, &first, &second] {
-        let result = thread
-            .call_mcp_tool(
-                SERVER_NAME,
-                "echo",
-                Some(json!({"message":"identify process"})),
-                None,
-            )
-            .await?;
-        let content = result.structured_content.expect("echo result");
-        processes.push(content["echo"].as_str().expect("process label").to_owned());
-    }
-    assert_ne!(processes[0], processes[1]);
-    assert_eq!(processes[1], processes[2]);
-
-    let response =
-        responses::mount_sse_once(&responses_server, responses::sse_completed("unrelated")).await;
-    legacy_sibling
-        .start_or_steer_turn(user_turn("Continue without calling any tools."))
-        .await?;
-    wait_for_event(&legacy_sibling, |event| {
-        matches!(event, EventMsg::TurnComplete(_))
-    })
-    .await;
-    let (config, _) = legacy_sibling
-        .current_mcp_config_and_runtime_context()
-        .await;
-    assert_eq!(
-        legacy_sibling
-            .mcp_connection_statuses(&config)
-            .await
-            .get(SERVER_NAME),
-        Some(&McpServerConnectionStatus::NotStarted)
-    );
-    let legacy = &processes[0];
-    assert_definition(
-        &response,
-        &format!("Use the tools from {legacy}."),
-        &format!("Echo from {legacy}."),
-    );
-
-    legacy_sibling.shutdown_and_wait().await?;
-    first.shutdown_and_wait().await?;
-    second.shutdown_and_wait().await?;
-    fixture.xdcode.shutdown_and_wait().await?;
-    Ok(())
-}
-
 #[tokio::test]
 async fn apps_cache_filled_during_binding_capture_reaches_the_model() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
+    apps_requests_during_peer_discovery(/*share*/ true).await?;
+    Ok(())
+}
 
+pub(super) async fn apps_requests_during_peer_discovery(
+    share: bool,
+) -> anyhow::Result<Vec<responses::ResponsesRequest>> {
     struct ChildAppsEndpoint(String);
 
     impl McpServerContributor<Config> for ChildAppsEndpoint {
@@ -437,6 +323,11 @@ async fn apps_cache_filled_during_binding_capture_reaches_the_model() -> anyhow:
             pending_apps.chatgpt_base_url
         ))));
         let test = apps_enabled_builder(apps.chatgpt_base_url)
+            .with_apps_tools_cache(if share {
+                Default::default()
+            } else {
+                xdcode_core::XdcodeAppsToolsCache::without_shared_snapshot()
+            })
             .with_model_info_override("gpt-5.5", |model| model.supports_search_tool = false)
             .with_extensions(Arc::new(extensions.build()))
             .with_config(move |config| {
@@ -524,24 +415,59 @@ async fn apps_cache_filled_during_binding_capture_reaches_the_model() -> anyhow:
             .start_thread(StartThreadOptions::new(peer_config))
             .await?;
         wait_for_mcp_server(&peer, XDCODE_APPS_MCP_SERVER_NAME).await?;
+        // The non-refreshing client-local API never exposes a shared provider.
+        assert_eq!(peer.apps_tools_from_mcp_client().await.is_empty(), share);
         release_waiting.send(())?;
-        wait_for_event(&child, |event| matches!(event, EventMsg::TurnComplete(_))).await;
-        // The child's own Apps client must still be pending when its request reaches inference.
-        release_apps.send(())?;
-        let body = response.single_request().body_json();
+        if share {
+            wait_for_event(&child, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+            // Inference used the peer snapshot before the child finished startup.
+            release_apps.send(())?;
+        } else {
+            wait_for_event(&child, |event| {
+                matches!(event, EventMsg::McpStartupUpdate(update)
+                    if update.server == SERVER_NAME && matches!(update.status, McpStartupStatus::Ready))
+            })
+            .await;
+            // Apps is the only remaining startup gate. Keep it closed while inference can run.
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            assert!(
+                response.requests().is_empty(),
+                "the first model request must wait for the child's Apps startup"
+            );
+            assert!(child.apps_tools_from_mcp_client().await.is_empty());
+            release_apps.send(())?;
+            wait_for_event(&child, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+        }
+        let mut requests = vec![response.single_request()];
+        let body = requests[0].body_json();
         assert!(
             responses::namespace_child_tool(
                 &body,
                 SEARCH_CALENDAR_NAMESPACE,
-                SEARCH_CALENDAR_CREATE_TOOL,
+                SEARCH_CALENDAR_CREATE_TOOL
             )
-            .is_some(),
-            "the first model request must include the peer's Apps tools: {body}"
+            .is_some()
         );
+        // Only the child's searchable endpoint returns timezone options.
+        assert_eq!(
+            body["tools"].to_string().contains("timezone_option_3"),
+            !share
+        );
+        if !share {
+            let next = mount_sse_once(&server, responses::sse_completed("next-turn")).await;
+            child.start_or_steer_turn(user_turn("next")).await?;
+            wait_for_event(&child, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+            requests.push(next.single_request());
+            assert!(
+                requests[1].body_json()["tools"]
+                    .to_string()
+                    .contains("timezone_option_3")
+            );
+        }
 
         child.shutdown_and_wait().await?;
         peer.shutdown_and_wait().await?;
-        Ok(())
+        Ok(requests)
     })
     .await
     .context("timed out exercising an Apps cache fill during binding capture")?
@@ -682,21 +608,14 @@ async fn cached_http_mcp_starts_lazily_for_subagents(
     Ok(())
 }
 
-// Keep spawned tasks on the thread with the scoped tracing subscriber.
-#[tokio::test(flavor = "current_thread")]
-async fn cached_mcp_startup_is_eager_for_root_and_lazy_for_subagents() -> anyhow::Result<()> {
-    skip_if_wine_exec!(
-        Ok(()),
-        "requires a Windows test_stdio_server in the Wine-exec environment"
-    );
-    skip_if_no_network!(Ok(()));
-
+pub(super) async fn cached_stdio_first_use_scenario() -> anyhow::Result<Vec<Value>> {
     let responses_server = responses::start_mock_server().await;
     let command = remote_aware_stdio_server_bin()?;
     let environment_id = remote_aware_environment_id();
     let fixture = test_xdcode()
         .with_model_info_override("gpt-5.4", |model| model.supports_search_tool = false)
         .with_config(move |config| {
+            core_test_support::test_xdcode::configure_scenario_catalog(config);
             config.update_plan_enabled = true;
             config.permissions.approval_policy = Constrained::allow_any(AskForApproval::Never);
             config
@@ -769,18 +688,21 @@ async fn cached_mcp_startup_is_eager_for_root_and_lazy_for_subagents() -> anyhow
         &format!("Echo from {first_process}."),
     );
 
+    let mut eager_config = fixture.config.clone();
+    eager_config
+        .features
+        .disable(Feature::McpLazyStdioStartup)?;
     let control = fixture
         .thread_manager
-        .start_thread(StartThreadOptions::new(fixture.config.clone()))
+        .start_thread(StartThreadOptions::new(eager_config))
         .await?
         .thread;
     wait_for_mcp_server(&control, SERVER_NAME).await?;
     let control_pid = wait_for_new_pid(fs.as_ref(), &pid_file, Some(&first_pid)).await?;
     control.shutdown_and_wait().await?;
 
-    let mut treatment = fixture.config.clone();
-    treatment.features.enable(Feature::McpLazyStdioStartup)?;
-    let mut required_config = treatment.clone();
+    // A required server still needs a live connection even when the catalog is warm.
+    let mut required_config = fixture.config.clone();
     let mut servers = required_config.mcp_servers.get().clone();
     servers
         .get_mut(SERVER_NAME)
@@ -821,7 +743,7 @@ async fn cached_mcp_startup_is_eager_for_root_and_lazy_for_subagents() -> anyhow
         ..
     } = fixture
         .thread_manager
-        .start_thread(StartThreadOptions::new(treatment))
+        .start_thread(StartThreadOptions::new(fixture.config.clone()))
         .await?;
     second_thread.submit(Op::Interrupt).await?;
 
@@ -870,7 +792,7 @@ async fn cached_mcp_startup_is_eager_for_root_and_lazy_for_subagents() -> anyhow
         second_thread
             .mcp_connection_statuses(&mcp_config)
             .await
-            .get(SERVER_NAME),
+            .get(&McpServerKey::unscoped(SERVER_NAME)),
         Some(&McpServerConnectionStatus::NotStarted),
     );
     assert_eq!(
@@ -1047,11 +969,17 @@ async fn cached_mcp_startup_is_eager_for_root_and_lazy_for_subagents() -> anyhow
         filtered_thread
             .mcp_connection_statuses(&mcp_config)
             .await
-            .get(SERVER_NAME),
+            .get(&McpServerKey::unscoped(SERVER_NAME)),
         Some(&McpServerConnectionStatus::NotStarted),
     );
     let result = filtered_thread
-        .call_mcp_tool(SERVER_NAME, "cwd", Some(json!({})), /*meta*/ None)
+        .call_mcp_tool(
+            SERVER_NAME,
+            /*environment_id*/ None,
+            "cwd",
+            Some(json!({})),
+            /*meta*/ None,
+        )
         .await?;
     assert_ne!(result.is_error, Some(true));
     let filtered_pid = wait_for_new_pid(fs.as_ref(), &pid_file, Some(&second_pid)).await?;
@@ -1170,5 +1098,138 @@ async fn cached_mcp_startup_is_eager_for_root_and_lazy_for_subagents() -> anyhow
     );
     interrupted_thread.shutdown_and_wait().await?;
     responses_server.verify().await;
+    // Substitute stable names before the snapshot renderer hashes each tool definition.
+    [
+        unused_response,
+        unused_done_response,
+        cached_response,
+        cached_done_response,
+    ]
+    .iter()
+    .map(|response| {
+        let body = response
+            .single_request()
+            .body_json()
+            .to_string()
+            .replace(&cached_process, "cached-helper")
+            .replace(&second_process, "live-helper");
+        Ok(serde_json::from_str(&body)?)
+    })
+    .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cached_stdio_negotiates_sharing_on_first_use() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+    core_test_support::skip_if_remote!(Ok(()), "the shared stdio fixture runs on the host");
+    skip_if_wine_exec!(Ok(()), "requires the native stdio server");
+
+    let responses_server = responses::start_mock_server().await;
+    let command = core_test_support::stdio_server_bin()?;
+    let fixture = test_xdcode()
+        .with_model_info_override("gpt-5.4", |model| model.supports_search_tool = false)
+        .with_config(move |config| {
+            config
+                .features
+                .disable(Feature::Mcp20260728)
+                .expect("legacy protocol");
+            config
+                .features
+                .disable(Feature::McpConnectionSharing)
+                .expect("disable discovery");
+            config.permissions.approval_policy = Constrained::allow_any(AskForApproval::Never);
+            config
+                .permissions
+                .set_permission_profile(PermissionProfile::Disabled)
+                .expect("test permissions");
+            config
+                .mcp_servers
+                .set(
+                    serde_json::from_value(json!({
+                        "cached_rmcp": {
+                            "command": command,
+                            "cwd": config.cwd,
+                            "env": { "MCP_TEST_DYNAMIC_SERVER_METADATA": "1" },
+                            "enabled_tools": ["echo"]
+                        }
+                    }))
+                    .expect("stdio config"),
+                )
+                .expect("set stdio config");
+        })
+        .build_with_auto_env(&responses_server)
+        .await?;
+    wait_for_mcp_server(&fixture.xdcode, SERVER_NAME).await?;
+    let mut config = fixture.config.clone();
+    config.features.enable(Feature::McpConnectionSharing)?;
+    let start_child = |config| {
+        fixture.thread_manager.start_thread(StartThreadOptions {
+            session_source: Some(SessionSource::SubAgent(SubAgentSource::Other(
+                "cached-sharing".to_string(),
+            ))),
+            ..StartThreadOptions::new(config)
+        })
+    };
+    let first = start_child(config.clone()).await?.thread;
+    let second = start_child(config).await?.thread;
+    let legacy_sibling = start_child(fixture.config.clone()).await?.thread;
+    for thread in [&first, &second, &legacy_sibling] {
+        let (config, _) = thread.current_mcp_config_and_runtime_context().await;
+        assert_eq!(
+            thread
+                .mcp_connection_statuses(&config)
+                .await
+                .get(&McpServerKey::unscoped(SERVER_NAME)),
+            Some(&McpServerConnectionStatus::NotStarted)
+        );
+    }
+
+    let mut processes = Vec::new();
+    for thread in [&fixture.xdcode, &first, &second] {
+        let result = thread
+            .call_mcp_tool(
+                SERVER_NAME,
+                /*environment_id*/ None,
+                "echo",
+                Some(json!({"message":"identify process"})),
+                /*meta*/ None,
+            )
+            .await?;
+        let content = result.structured_content.expect("echo result");
+        processes.push(content["echo"].as_str().expect("process label").to_owned());
+    }
+    assert_ne!(processes[0], processes[1]);
+    assert_eq!(processes[1], processes[2]);
+
+    let response =
+        responses::mount_sse_once(&responses_server, responses::sse_completed("unrelated")).await;
+    legacy_sibling
+        .start_or_steer_turn(user_turn("Continue without calling any tools."))
+        .await?;
+    wait_for_event(&legacy_sibling, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+    let (config, _) = legacy_sibling
+        .current_mcp_config_and_runtime_context()
+        .await;
+    assert_eq!(
+        legacy_sibling
+            .mcp_connection_statuses(&config)
+            .await
+            .get(&McpServerKey::unscoped(SERVER_NAME)),
+        Some(&McpServerConnectionStatus::NotStarted)
+    );
+    let legacy = &processes[0];
+    assert_definition(
+        &response,
+        &format!("Use the tools from {legacy}."),
+        &format!("Echo from {legacy}."),
+    );
+
+    legacy_sibling.shutdown_and_wait().await?;
+    first.shutdown_and_wait().await?;
+    second.shutdown_and_wait().await?;
+    fixture.xdcode.shutdown_and_wait().await?;
     Ok(())
 }

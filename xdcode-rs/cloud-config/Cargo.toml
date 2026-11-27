@@ -13,11 +13,13 @@ chrono = { workspace = true, features = ["serde"] }
 xdcode-async-utils = { workspace = true }
 xdcode-backend-client = { workspace = true }
 xdcode-config = { workspace = true }
+xdcode-exec-server = { workspace = true }
 xdcode-http-client = { workspace = true }
 xdcode-keyring-store = { workspace = true }
 xdcode-login = { workspace = true }
 xdcode-otel = { workspace = true }
 xdcode-protocol = { workspace = true }
+xdcode-rmcp-client = { workspace = true }
 hmac = "0.12.1"
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

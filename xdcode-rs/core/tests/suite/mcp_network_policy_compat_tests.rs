@@ -34,8 +34,9 @@ async fn trusted_server_without_policy_support_keeps_caller_metadata() -> anyhow
         .xdcode
         .call_mcp_tool(
             "legacy",
+            /*environment_id*/ None,
             "network_policy_meta",
-            None,
+            /*arguments*/ None,
             Some(json!({"caller": "keep", "xdcode/network-policy-meta": {"enabled": true}})),
         )
         .await?;

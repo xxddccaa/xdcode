@@ -13,10 +13,13 @@ use serde_json::Value;
 use serde_json::json;
 use test_case::test_case;
 use wiremock::matchers::body_partial_json;
+use xdcode_core::RestrictRootCapabilities;
 use xdcode_core::StartThreadOptions;
 use xdcode_core::TurnInputRequest;
 use xdcode_protocol::approvals::ElicitationAction;
 use xdcode_protocol::config_types::ApprovalsReviewer;
+use xdcode_protocol::mcp::ClientMcpExtensions;
+use xdcode_protocol::mcp::PROVIDER_STANDARD_FORM_INPUT_EXTENSION_ID;
 use xdcode_protocol::models::PermissionProfile;
 use xdcode_protocol::protocol::AskForApproval;
 use xdcode_protocol::protocol::EventMsg;
@@ -24,6 +27,7 @@ use xdcode_protocol::protocol::Op;
 use xdcode_protocol::protocol::SessionSource;
 use xdcode_protocol::protocol::SubAgentSource;
 use xdcode_protocol::protocol::ThreadSettingsOverrides;
+use xdcode_protocol::protocol::ThreadSource;
 use xdcode_protocol::user_input::UserInput;
 
 const SERVER: &str = r#"
@@ -69,6 +73,7 @@ pub(super) enum Caller {
     Root,
     Subagent,
     FullAccessSubagent,
+    FullAccessHost(Option<RestrictRootCapabilities>),
 }
 
 #[derive(Clone, Copy)]
@@ -84,6 +89,8 @@ pub(super) enum RequestKind {
 #[test_case(Caller::Root, RequestKind::BrowserAuth; "root_browser_auth_remains_interactive")]
 #[test_case(Caller::Root, RequestKind::ShutdownFormInput; "pending_root_form_is_abandoned_before_shutdown")]
 #[test_case(Caller::Subagent, RequestKind::FormInput; "subagent_receives_form_input")]
+#[test_case(Caller::FullAccessHost(None), RequestKind::FormInput; "full_access_host_receives_form_input")]
+#[test_case(Caller::FullAccessHost(Some(RestrictRootCapabilities)), RequestKind::FormInput; "restricted_full_access_host_declines_form_input")]
 #[test_case(Caller::Subagent, RequestKind::Permission; "subagent_permission_remains_interactive")]
 #[test_case(Caller::FullAccessSubagent, RequestKind::Permission; "full_access_subagent_automatically_approves_permission")]
 #[test_case(Caller::Subagent, RequestKind::StrictReview; "subagent_keeps_strict_automatic_safety_review")]
@@ -143,28 +150,43 @@ pub(super) async fn mcp_server_elicitation_scenario(
             "default_tools_approval_mode": "approve"
         }
     }))?)?;
-    let full_access = matches!(caller, Caller::FullAccessSubagent);
-    let expects_prompt = !full_access && !matches!(request_kind, RequestKind::StrictReview);
-    let session_source = if matches!(caller, Caller::Root) {
-        SessionSource::Exec
-    } else {
-        SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-            parent_thread_id: test.session_configured.thread_id,
-            depth: 1,
-            agent_path: None,
-            agent_nickname: None,
-            agent_role: None,
-        })
+    let full_access = matches!(
+        caller,
+        Caller::FullAccessSubagent | Caller::FullAccessHost(_)
+    );
+    let expects_prompt = match caller {
+        Caller::FullAccessHost(restriction) => restriction.is_none(),
+        Caller::FullAccessSubagent => false,
+        Caller::Root | Caller::Subagent => !matches!(request_kind, RequestKind::StrictReview),
     };
-    let thread = test
-        .thread_manager
-        .start_thread(StartThreadOptions {
-            session_source: Some(session_source),
-            environments: Some(vec![test.executor_environment().request()]),
-            ..StartThreadOptions::new(config)
-        })
-        .await?
-        .thread;
+    let mut options = StartThreadOptions {
+        environments: Some(vec![test.executor_environment().request()]),
+        ..StartThreadOptions::new(config)
+    };
+    options.session_source = Some(match caller {
+        Caller::Root => SessionSource::Exec,
+        Caller::Subagent | Caller::FullAccessSubagent => {
+            SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id: test.session_configured.thread_id,
+                depth: 1,
+                agent_path: None,
+                agent_nickname: None,
+                agent_role: None,
+            })
+        }
+        Caller::FullAccessHost(restriction) => {
+            options.thread_source = Some(ThreadSource::User);
+            options.client_mcp_extensions = ClientMcpExtensions::new([(
+                PROVIDER_STANDARD_FORM_INPUT_EXTENSION_ID.to_string(),
+                json!({}),
+            )]);
+            if let Some(restriction) = restriction {
+                options.thread_extension_init.insert(restriction);
+            }
+            SessionSource::Custom("host".to_string())
+        }
+    });
+    let thread = test.thread_manager.start_thread(options).await?.thread;
     wait_for_mcp_server(&thread, "elicitation").await?;
     let tool_call = responses::mount_sse_once(
         &server,
@@ -314,6 +336,8 @@ pub(super) async fn mcp_server_elicitation_scenario(
             "action": "accept", "content": {},
             "_meta": {"approvals_reviewer": "auto_review"}
         })
+    } else if matches!(caller, Caller::FullAccessHost(Some(_))) {
+        json!({"action": "decline"})
     } else {
         json!({"action": "accept", "content": response_content})
     };

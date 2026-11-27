@@ -1,4 +1,5 @@
 use super::*;
+use crate::app::session_lifecycle::FreshSessionStart;
 use core_test_support::responses;
 use pretty_assertions::assert_eq;
 use xdcode_protocol::protocol::CatalogModelSelection;
@@ -310,10 +311,21 @@ async fn new_inherits_confirmed_catalog_routing_effort_and_mode_before_first_tur
             command
         );
         let mut tui = crate::tui::test_support::make_test_tui()?;
+        // `/new` normally pumps the real terminal while starting; run the same
+        // inheritance path without taking over a terminal in tests.
+        let AppEvent::NewSession { name } = event else {
+            unreachable!("filtered to NewSession")
+        };
         fixture
             .app
-            .handle_event(&mut tui, &mut fixture.server, event)
-            .await?;
+            .start_fresh_session(
+                &mut tui,
+                &mut fixture.server,
+                FreshSessionStart::PreserveCurrentView(None),
+                None,
+                name,
+            )
+            .await;
         let new_thread = fixture.app.chat_widget.thread_id().unwrap();
         assert_ne!(new_thread, old_thread);
         assert_eq!(
@@ -396,7 +408,10 @@ async fn new_settings_rejection_preserves_old_session_command_and_attachments() 
             .app
             .chat_widget
             .set_remote_image_urls(vec!["https://example.invalid/draft.png".into()]);
-        fixture.app.chat_widget.attach_image(image_path);
+        fixture.app.chat_widget.attach_image(
+            image_path,
+            crate::chatwidget::ClipboardPasteContext::Composer,
+        );
         let input_before = fixture
             .app
             .chat_widget
@@ -411,10 +426,21 @@ async fn new_settings_rejection_preserves_old_session_command_and_attachments() 
             .find(|event| matches!(event, AppEvent::NewSession { .. }))
             .expect("new command");
         let mut tui = crate::tui::test_support::make_test_tui()?;
+        // `/new` normally pumps the real terminal while starting; run the same
+        // inheritance path without taking over a terminal in tests.
+        let AppEvent::NewSession { name } = event else {
+            unreachable!("filtered to NewSession")
+        };
         fixture
             .app
-            .handle_event(&mut tui, &mut fixture.server, event)
-            .await?;
+            .start_fresh_session(
+                &mut tui,
+                &mut fixture.server,
+                FreshSessionStart::PreserveCurrentView(None),
+                None,
+                name,
+            )
+            .await;
         assert_eq!(fixture.app.chat_widget.thread_id(), Some(old_thread));
         assert_eq!(fixture.app.active_thread_id, Some(old_thread));
         assert_eq!(
@@ -489,7 +515,14 @@ async fn new_without_catalog_confirms_explicit_service_default_and_plan_mode() -
     let mut tui = crate::tui::test_support::make_test_tui()?;
     fixture
         .app
-        .start_fresh_session(&mut tui, &mut fixture.server, None, None, None)
+        .start_fresh_session(
+            &mut tui,
+            &mut fixture.server,
+            // Same inheritance path as `/new`, without taking over a real terminal.
+            FreshSessionStart::PreserveCurrentView(None),
+            None,
+            None,
+        )
         .await;
     assert_ne!(fixture.app.chat_widget.thread_id(), Some(thread_id));
     assert_eq!(
@@ -539,7 +572,7 @@ async fn clear_retains_launch_model_priority_instead_of_new_inheritance() -> Res
         .start_fresh_session(
             &mut tui,
             &mut fixture.server,
-            Some(ThreadStartSource::Clear),
+            FreshSessionStart::PreserveCurrentView(Some(ThreadStartSource::Clear)),
             None,
             None,
         )

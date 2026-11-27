@@ -13,6 +13,8 @@ use tokio::time::timeout;
 use xdcode_app_server_protocol::ConfigBatchWriteParams;
 use xdcode_app_server_protocol::ConfigEdit;
 use xdcode_app_server_protocol::ConfigWriteResponse;
+use xdcode_app_server_protocol::HookEventName;
+use xdcode_app_server_protocol::HookSource;
 use xdcode_app_server_protocol::HooksListParams;
 use xdcode_app_server_protocol::HooksListResponse;
 use xdcode_app_server_protocol::MergeStrategy;
@@ -111,10 +113,17 @@ command_windows = """Write-Output '{"continue":false}'"""
         let list = mcp
             .send_hooks_list_request(HooksListParams {
                 cwds: vec![xdcode_home.path().to_path_buf()],
+                ..Default::default()
             })
             .await?;
         let HooksListResponse { data } = mcp.read_response(list).await?;
-        let hook = &data[0].hooks[0];
+        let hook = data[0]
+            .hooks
+            .iter()
+            .find(|hook| {
+                hook.source == HookSource::User && hook.event_name == HookEventName::PreCompact
+            })
+            .expect("user config should register the pre-compact hook");
         let trust = mcp
             .send_config_batch_write_request(ConfigBatchWriteParams {
                 edits: vec![ConfigEdit {

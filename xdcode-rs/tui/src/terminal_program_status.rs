@@ -14,12 +14,16 @@ use std::sync::OnceLock;
 
 use crossterm::Command;
 use ratatui::crossterm::execute;
+use xdcode_terminal_detection::TerminalBackend;
 use xdcode_terminal_detection::TerminalInfo;
 use xdcode_terminal_detection::TerminalName;
 use xdcode_terminal_detection::terminal_info;
 
 static SESSION_STATUS_STATE: SessionStatusState = SessionStatusState::new();
 static TERMINAL_PROGRAM_STATUS_SUPPORT: OnceLock<TerminalProgramStatusSupport> = OnceLock::new();
+
+// VTE 0.54 introduced a parser that safely ignores unknown OSC sequences.
+const MIN_VTE_VERSION_WITH_SAFE_OSC: u32 = 5400;
 
 struct SessionStatusState {
     last_emitted: Mutex<EmittedSessionStatus>,
@@ -217,12 +221,19 @@ fn terminal_program_status_support(
     stdout_is_terminal: bool,
     screen_active: bool,
 ) -> TerminalProgramStatusSupport {
-    let osc_21337 = stdout_is_terminal
+    let osc_7501 = stdout_is_terminal
+        && match terminal.backend {
+            Some(TerminalBackend::Vte { version }) => {
+                version.is_none_or(|version| version >= MIN_VTE_VERSION_WITH_SAFE_OSC)
+            }
+            None => true,
+        };
+    let osc_21337 = osc_7501
         && terminal.name == TerminalName::Iterm2
         && terminal.multiplexer.is_none()
         && !screen_active;
     TerminalProgramStatusSupport {
-        osc_7501: stdout_is_terminal,
+        osc_7501,
         osc_21337,
     }
 }

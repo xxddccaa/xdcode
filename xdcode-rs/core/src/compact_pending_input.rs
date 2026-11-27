@@ -15,8 +15,7 @@ pub(crate) fn pending_mail_sequence(history: &[ResponseItemEnvelope]) -> Option<
         .iter()
         .filter(|envelope| matches!(envelope.item, ResponseItem::AgentMessage { .. }))
         .filter_map(|envelope| envelope.metadata.as_ref()?.history_sequence)
-        .filter(|sequence| *sequence > sampled_through)
-        .min()
+        .find(|sequence| *sequence > sampled_through)
 }
 
 pub(crate) fn is_retained_pending_mail(envelope: &ResponseItemEnvelope, first: u64) -> bool {

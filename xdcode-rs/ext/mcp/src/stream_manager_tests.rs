@@ -62,6 +62,8 @@ async fn connect_loaded_task(
         .on_thread_ready(ThreadReadyInput {
             config: &(),
             session_source: &SessionSource::Exec,
+            history_initialization: xdcode_extension_api::HistoryInitialization::New,
+            history_mode: xdcode_protocol::protocol::ThreadHistoryMode::Legacy,
             session_store: &session_store,
             thread_store: &thread_store,
         })

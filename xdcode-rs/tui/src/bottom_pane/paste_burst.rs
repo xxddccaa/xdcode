@@ -293,7 +293,7 @@ impl PasteBurst {
     ///
     /// - [`FlushResult::Paste`] when a paste burst was active and buffered text is emitted as one
     ///   pasted string.
-    /// - [`FlushResult::Typed`] when a single fast first ASCII char was being held (flicker
+    /// - [`FlushResult::Typed`] when a single fast first char was being held (flicker
     ///   suppression) and no burst followed before the timeout elapsed.
     /// - [`FlushResult::None`] when the timeout has not elapsed, or there is nothing to flush.
     pub fn flush_if_due(&mut self, now: Instant) -> FlushResult {
@@ -357,6 +357,22 @@ impl PasteBurst {
             || self
                 .last_plain_char_time
                 .is_some_and(|t| now.duration_since(t) <= PASTE_BURST_CHAR_INTERVAL)
+    }
+
+    /// Keep input in this composer while keys can still belong to its paste.
+    pub(super) fn handoff_deadline(&self) -> Option<Instant> {
+        let interval = if self.is_active_internal() {
+            PASTE_BURST_ACTIVE_IDLE_TIMEOUT
+        } else {
+            PASTE_BURST_CHAR_INTERVAL
+        };
+        self.last_plain_char_time
+            .map(|last_key| last_key + interval)
+            .max(self.burst_window_until)
+    }
+
+    pub(super) fn preserve_window_until(&mut self, deadline: Instant) {
+        self.burst_window_until = self.burst_window_until.max(Some(deadline));
     }
 
     /// Keep the burst window alive.

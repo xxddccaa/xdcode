@@ -1,7 +1,7 @@
 //! Resolve the cyber treatment for an exec turn from the connected server's catalog.
 
 use crate::RequestIdSequencer;
-use xdcode_app_server_client::InProcessAppServerClient;
+use xdcode_app_server_client::AppServerClient;
 use xdcode_app_server_protocol::Account;
 use xdcode_app_server_protocol::ClientRequest;
 use xdcode_app_server_protocol::CyberAccessProgram;
@@ -11,18 +11,23 @@ use xdcode_app_server_protocol::ModelListParams;
 use xdcode_app_server_protocol::ModelListResponse;
 use xdcode_features::Feature;
 use xdcode_features::Features;
+use xdcode_model_provider_info::ModelProviderInfo;
 use xdcode_protocol::model_types::ModelAccessPrograms;
 
 pub(crate) async fn program_for_turn(
     features: &Features,
-    client: &InProcessAppServerClient,
+    client: &AppServerClient,
     request_ids: &mut RequestIdSequencer,
     model: &str,
-    provider: &str,
+    provider_id: &str,
+    provider: Option<&ModelProviderInfo>,
     enabled: bool,
 ) -> anyhow::Result<Option<CyberAccessProgram>> {
-    if provider != "provider" {
-        anyhow::ensure!(!enabled, "Daybreak requires the Provider model provider");
+    if !provider.is_some_and(|provider| provider.supports_cyber_access_programs(provider_id)) {
+        anyhow::ensure!(
+            !enabled,
+            "Daybreak requires a model provider with Cyber access program support"
+        );
         return Ok(None);
     }
 
@@ -89,7 +94,7 @@ pub(crate) async fn program_for_turn(
 }
 
 async fn read_account(
-    client: &InProcessAppServerClient,
+    client: &AppServerClient,
     request_ids: &mut RequestIdSequencer,
 ) -> anyhow::Result<Option<Account>> {
     let account = client

@@ -5,6 +5,7 @@ fn user_verification_server_request(thread_id: ThreadId, request_id: i64) -> Ser
     ServerRequest::McpServerElicitationRequest {
         request_id: AppServerRequestId::Integer(request_id),
         params: McpServerElicitationRequestParams {
+            environment_id: None,
             thread_id: thread_id.to_string(),
             turn_id: Some("turn-verification".to_string()),
             server_name: "deployments".to_string(),
@@ -40,7 +41,11 @@ async fn inactive_thread_user_verification_replays_queued_request_once() -> Resu
     let primary_thread_id = ThreadId::new();
     let side_thread_id = ThreadId::new();
     let thread_id = ThreadId::new();
-    let request = user_verification_server_request(thread_id, /*request_id*/ 11);
+    let mut request = user_verification_server_request(thread_id, /*request_id*/ 11);
+    let ServerRequest::McpServerElicitationRequest { params, .. } = &mut request else {
+        panic!("expected MCP elicitation request");
+    };
+    params.environment_id = Some("env-b".to_string());
 
     app.primary_thread_id = Some(primary_thread_id);
     app.active_thread_id = Some(side_thread_id);
@@ -117,7 +122,7 @@ async fn side_toggle_surfaces_pending_verification_from_an_inactive_thread() -> 
         );
         let mut tui = crate::tui::test_support::make_test_tui()?;
         enable_side_retention(&mut app)?;
-        tui.set_owned_screen(true)?;
+        tui.set_owned_screen(/*owned*/ true)?;
         app.select_agent_thread(&mut tui, &mut app_server, side_thread_id)
             .await?;
         assert_eq!(app.active_thread_id, Some(side_thread_id));
@@ -154,8 +159,8 @@ async fn side_toggle_surfaces_pending_verification_from_an_inactive_thread() -> 
         app_server.shutdown().await?;
         Ok(())
     };
-    Box::pin(check_return(false)).await?;
-    Box::pin(check_return(true)).await
+    Box::pin(check_return(/*hide*/ false)).await?;
+    Box::pin(check_return(/*hide*/ true)).await
 }
 
 #[tokio::test]
@@ -250,19 +255,23 @@ async fn inactive_thread_user_verification_preserves_foreground_stream() -> Resu
         /*replay_kind*/ None,
     );
     app.chat_widget.handle_server_notification(
-        ServerNotification::ItemCompleted(xdcode_app_server_protocol::ItemCompletedNotification {
-            thread_id: foreground_thread_id.to_string(),
-            turn_id: "turn-foreground".to_string(),
-            completed_at_ms: 0,
-            item: ThreadItem::AgentMessage {
-                id: "message-foreground".to_string(),
-                text: "The foreground answer continues.".to_string(),
-                phase: None,
-                memory_citation: None,
-                delivery: None,
-                questions: None,
-            },
-        }),
+        ServerNotification::ItemCompleted(
+            xdcode_app_server_protocol::ItemCompletedNotification::new(
+                foreground_thread_id.to_string(),
+                "turn-foreground".to_string(),
+                ThreadItemPayload::AgentMessage {
+                    moderation: None,
+                    id: "message-foreground".to_string(),
+                    text: "The foreground answer continues.".to_string(),
+                    phase: None,
+                    memory_citation: None,
+                    delivery: None,
+                    questions: None,
+                },
+                /*started_at_ms*/ None,
+                /*completed_at_ms*/ 0,
+            ),
+        ),
         /*replay_kind*/ None,
     );
 

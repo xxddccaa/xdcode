@@ -20,6 +20,7 @@ use xdcode_terminal_detection::TerminalName;
 #[test]
 fn windows_terminal_uses_full_screen_unless_zellij_is_active() {
     let mut terminal = TerminalInfo {
+        backend: None,
         name: TerminalName::WindowsTerminal,
         term_program: None,
         version: None,

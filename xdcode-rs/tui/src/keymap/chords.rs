@@ -28,6 +28,7 @@ use tokio::time::Instant;
 use xdcode_config::types::KeybindingsSpec;
 use xdcode_config::types::TuiKeymap;
 
+pub(crate) const CHORD_REVEAL_DELAY: Duration = Duration::from_millis(/*millis*/ 350);
 pub(crate) const KEY_CHORD_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 1);
 
 const FIRST_DISPATCH_FUNCTION_KEY: u8 = xdcode_config::types::MAX_FUNCTION_KEY + 1;
@@ -44,27 +45,45 @@ const LIST_RESERVED_BINDINGS: &[(&str, KeyBinding)] = &[
 
 /// Compact set of keymap contexts that share one active input path.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct KeymapContextSet(u32);
+pub(crate) struct KeymapContextSet(u64);
 
-const ACTIVITY_FOCUS: u32 = 1 << 13;
-const TRANSCRIPT_CLOSE: u32 = 1 << 15;
-const WARNINGS_FOCUS: u32 = 1 << 16;
-const VOICE_TOGGLE: u32 = 1 << 17;
-const RAW_KEY_CAPTURE: u32 = 1 << 18;
-const VOICE_TOGGLE_BLOCKED: u32 = 1 << 19;
-const TRANSCRIPT_ACTIONS: u32 = 1 << 20;
-const SIDE_PANE: u32 = 1 << 22;
-const MAIN_COMPOSER_FOCUS: u32 = 1 << 23;
-const PANE_DIRECTION: u32 = 1 << 24;
-const OPEN_PANE: u32 = 1 << 25;
-const FOCUSED_SIDE_PANE: u32 = 1 << 26;
-const SIDEBAR_CHOOSER: u32 = 1 << 27;
-const SIDEBAR_RESIZE: u32 = 1 << 28;
-const FOCUSED_SIDEBAR: u32 = 1 << 29;
+const ACTIVITY_FOCUS: u64 = 1 << 13;
+const TRANSCRIPT_CLOSE: u64 = 1 << 15;
+const WARNINGS_FOCUS: u64 = 1 << 16;
+const VOICE_TOGGLE: u64 = 1 << 17;
+const RAW_KEY_CAPTURE: u64 = 1 << 18;
+const VOICE_TOGGLE_BLOCKED: u64 = 1 << 19;
+const TRANSCRIPT_ACTIONS: u64 = 1 << 20;
+const BACKEND_CYCLING: u64 = 1 << 21;
+const SIDE_PANE: u64 = 1 << 22;
+const MAIN_COMPOSER_FOCUS: u64 = 1 << 23;
+const PANE_DIRECTION: u64 = 1 << 24;
+const OPEN_PANE: u64 = 1 << 25;
+const FOCUSED_SIDE_PANE: u64 = 1 << 26;
+const SIDEBAR_CHOOSER: u64 = 1 << 27;
+const SIDEBAR_RESIZE: u64 = 1 << 28;
+const FOCUSED_SIDEBAR: u64 = 1 << 29;
+const TRANSCRIPT_SELECT: u64 = 1 << 30;
+const COMPOSER_EDIT_ONLY: u64 = 1 << 31;
+const CLOUD_ENVIRONMENT_SELECTION: u64 = 1 << 32;
+const COMPOSER_SUBMIT: u64 = 1 << 33;
 
-const TRANSCRIPT_BROWSING: u32 = 1 << 14;
+const TRANSCRIPT_BROWSING: u64 = 1 << 14;
 
 impl KeymapContextSet {
+    /// Retain submission while an argument suggestion is open.
+    pub(crate) const fn with_composer_submit(self) -> Self {
+        Self(self.0 | COMPOSER_SUBMIT)
+    }
+
+    pub(crate) const fn composer_edit_only() -> Self {
+        Self(COMPOSER_EDIT_ONLY)
+    }
+
+    pub(crate) const fn without_composer_edits(self) -> Self {
+        Self(self.0 | COMPOSER_EDIT_ONLY)
+    }
+
     pub(crate) const fn new(context: KeymapContext) -> Self {
         Self(context_bit(context))
     }
@@ -73,6 +92,15 @@ impl KeymapContextSet {
     /// Other global actions remain inactive so existing list remaps keep priority.
     pub(crate) const fn activity() -> Self {
         Self(context_bit(KeymapContext::List) | context_bit(KeymapContext::Global) | ACTIVITY_FOCUS)
+    }
+
+    /// Offer backend cycling only while the new conversation control is visible.
+    pub(crate) const fn with_backend_cycling(self) -> Self {
+        Self(self.0 | BACKEND_CYCLING)
+    }
+
+    pub(crate) const fn with_cloud_environment_selection(self) -> Self {
+        Self(self.0 | CLOUD_ENVIRONMENT_SELECTION)
     }
 
     /// Add only the detail-close action to an owned composer path.
@@ -97,6 +125,11 @@ impl KeymapContextSet {
                 | context_bit(KeymapContext::Global)
                 | TRANSCRIPT_ACTIONS,
         )
+    }
+
+    /// Enable Markdown marking while the transcript owns the selection caret.
+    pub(crate) const fn with_transcript_select(self) -> Self {
+        Self(self.0 | TRANSCRIPT_SELECT)
     }
 
     /// Warning pages admit navigation plus their own toggle and copy.
@@ -198,6 +231,29 @@ impl KeymapContextSet {
 
     /// Whether this input path can dispatch the action, including focus-specific exclusions.
     pub(crate) fn contains_action(self, action: KeymapActionId) -> bool {
+        if self.0 & COMPOSER_SUBMIT != 0
+            && action.context == KeymapContext::Composer
+            && action.action == "submit"
+        {
+            return true;
+        }
+        if self.0 & COMPOSER_EDIT_ONLY != 0 && action.context == KeymapContext::Composer {
+            let edit = matches!(action.action, "undo" | "redo");
+            return edit != self.contains(KeymapContext::Composer);
+        }
+        if action.context == KeymapContext::Composer && matches!(action.action, "undo" | "redo") {
+            return self.contains(KeymapContext::Composer) && self.contains(KeymapContext::Editor);
+        }
+        if action.context == KeymapContext::Pager && action.action == "mark_markdown" {
+            return self.0 & TRANSCRIPT_SELECT != 0;
+        }
+        if action.context == KeymapContext::Global {
+            match action.action {
+                "change_host" => return self.0 & BACKEND_CYCLING != 0,
+                "choose_cloud_environment" => return self.0 & CLOUD_ENVIRONMENT_SELECTION != 0,
+                _ => {}
+            }
+        }
         if action.is_side_pane() {
             let required = match action.action {
                 "focus_pane_left" | "focus_pane_right" => PANE_DIRECTION,
@@ -256,7 +312,7 @@ impl KeymapContextSet {
     }
 }
 
-const fn context_bit(context: KeymapContext) -> u32 {
+const fn context_bit(context: KeymapContext) -> u64 {
     1 << match context {
         KeymapContext::Global => 0,
         KeymapContext::Chat => 1,
@@ -294,15 +350,18 @@ impl RuntimeChordBinding {
 
     /// Transcript selection remains active beside pager actions on native transcript surfaces.
     fn overlaps(&self, action: KeymapActionId) -> bool {
-        self.action.overlaps(action)
-            || (matches!(
-                (self.action.context, self.action.action),
-                (KeymapContext::Global, "select_transcript")
-            ) || matches!(
+        let transcript = KeymapContextSet::transcript().with_transcript_select();
+        let selection_action = |action: KeymapActionId| {
+            matches!(
                 (action.context, action.action),
                 (KeymapContext::Global, "select_transcript")
-            )) && KeymapContextSet::transcript().contains_action(self.action)
-                && KeymapContextSet::transcript().contains_action(action)
+                    | (KeymapContext::Pager, "mark_markdown")
+            )
+        };
+        self.action.overlaps(action)
+            || (selection_action(self.action) || selection_action(action))
+                && transcript.contains_action(self.action)
+                && transcript.contains_action(action)
             || self.is_leader()
                 && [
                     KeymapContextSet::browsing(),
@@ -546,6 +605,48 @@ pub(crate) struct PendingChord {
 }
 
 impl PendingChord {
+    pub(crate) fn actions(self, keymap: &RuntimeChordKeymap) -> Vec<(KeymapActionId, Vec<String>)> {
+        let mut actions = Vec::<(KeymapActionId, Vec<String>)>::new();
+        for binding in self.completions(keymap) {
+            let action = binding.action;
+            let key = binding.chord.completion.display_label();
+            if let Some((_, keys)) = actions.iter_mut().find(|(id, _)| *id == action) {
+                keys.push(key);
+            } else {
+                actions.push((action, vec![key]));
+            }
+        }
+        actions
+    }
+
+    pub(crate) fn guide(
+        self,
+        keymap: &RuntimeChordKeymap,
+        is_available: impl Fn(KeymapActionId) -> bool,
+    ) -> Option<crate::bottom_pane::ShortcutHud> {
+        use crate::bottom_pane::ShortcutHud;
+        use ratatui::style::Stylize;
+        let rows: Vec<_> = self
+            .actions(keymap)
+            .into_iter()
+            .filter(|(action, _)| is_available(*action))
+            .map(|(action, keys)| {
+                ShortcutHud::item(
+                    keys.join(" / "),
+                    crate::keymap_setup::action_label(action.action).into(),
+                )
+            })
+            .collect();
+        if rows.is_empty() {
+            return None;
+        }
+        Some(ShortcutHud::new(
+            self.prefix.display_label(),
+            rows,
+            vec!["Esc cancel".dim().into()],
+        ))
+    }
+
     pub(crate) fn completions(
         self,
         keymap: &RuntimeChordKeymap,
@@ -570,70 +671,39 @@ impl KeyChordMatcher {
         self.pending.is_some()
     }
 
-    /// Only workspace leaders use the passive overlay. Other chord prefixes retain their footer.
+    /// Workspace leaders support pane-specific labels and wheel passthrough.
     pub(crate) fn workspace_leader(&self) -> Option<PendingChord> {
         self.pending
-            .filter(|pending| pending.persistent && pending.contexts.0 & PANE_DIRECTION != 0)
+            .filter(|p| p.persistent && p.contexts.0 & PANE_DIRECTION != 0)
     }
 
-    /// Derive one presentation for the pending chord from the matcher that owns it.
-    pub(crate) fn pending_hint_items(
+    pub(crate) fn visible_pending(
+        &self,
+        frames: &crate::tui::FrameRequester,
+    ) -> Option<PendingChord> {
+        let pending = self.pending?;
+        let elapsed = pending.started_at.elapsed();
+        if elapsed < CHORD_REVEAL_DELAY {
+            frames.schedule_frame_in(CHORD_REVEAL_DELAY - elapsed);
+            return None;
+        }
+        if !pending.persistent {
+            let remaining = KEY_CHORD_TIMEOUT.checked_sub(elapsed)?;
+            if remaining.is_zero() {
+                return None;
+            }
+            frames.schedule_frame_in(remaining);
+        }
+        Some(pending)
+    }
+
+    pub(crate) fn guide(
         &self,
         keymap: &RuntimeChordKeymap,
-        width: u16,
-    ) -> Option<Vec<(String, String)>> {
-        let pending = self.pending?;
-        let mut items = vec![(pending.prefix.display_label(), "then".to_string())];
-        for binding in keymap
-            .bindings
-            .iter()
-            .filter(|binding| {
-                let (code, modifiers) = binding.chord.completion.parts();
-                keymap
-                    .binding_for_completion(
-                        pending.prefix,
-                        KeyEvent::new(code, modifiers),
-                        pending.contexts,
-                    )
-                    .is_some_and(|active| std::ptr::eq(active, *binding))
-            })
-            .take(/*n*/ 6)
-        {
-            let label = match binding.action.action {
-                "open_presets" if pending.persistent => "presets",
-                "focus_activity" => "activity",
-                "find_transcript" => "find",
-                "open_warnings" => "warnings",
-                action => action,
-            };
-            items.push((
-                binding.chord.completion.display_label(),
-                label.replace('_', " "),
-            ));
-        }
-        items.push(("esc".to_string(), "cancel".to_string()));
-        if crate::bottom_pane::footer_hint_items_line(&items).width() > usize::from(width) {
-            let compact: Vec<_> = items[1..]
-                .iter()
-                .map(|(key, action)| {
-                    let action = match action.as_str() {
-                        "activity" => "inspect",
-                        action => action,
-                    };
-                    (key.clone(), action.to_string())
-                })
-                .collect();
-            let mut fitting = Vec::new();
-            for item in compact {
-                fitting.push(item);
-                if crate::bottom_pane::footer_hint_items_line(&fitting).width() > usize::from(width)
-                {
-                    fitting.pop();
-                }
-            }
-            return Some(fitting);
-        }
-        Some(items)
+        frames: &crate::tui::FrameRequester,
+    ) -> Option<crate::bottom_pane::ShortcutHud> {
+        let pending = self.visible_pending(frames)?;
+        pending.guide(keymap, |_| true)
     }
 
     pub(crate) fn cancel(&mut self) -> bool {

@@ -3,8 +3,6 @@
 //! Mouse capture is suppressed only when the containing session explicitly reports mouse off.
 //! Missing tmux or an inconclusive probe preserves the normal input policy.
 
-use std::io::Read;
-use std::io::Seek;
 use std::process::Command;
 use std::process::Stdio;
 use std::sync::atomic::AtomicBool;
@@ -15,9 +13,9 @@ use std::time::Instant;
 
 use itertools::Itertools;
 
+use crate::command_output::command_stdout_before_deadline;
+
 const PROBE_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 1);
-const PROBE_POLL_INTERVAL: Duration = Duration::from_millis(/*millis*/ 10);
-const MAX_PROBE_OUTPUT_BYTES: u64 = 4096;
 static PROBE_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 
 /// Capture policy for the current terminal setup, shared by fullscreen and overlays.
@@ -77,40 +75,6 @@ pub(super) fn options() -> Options {
         .unwrap_or_default()
 }
 
-fn command_stdout_before_deadline(command: &mut Command, deadline: Instant) -> Option<Vec<u8>> {
-    if Instant::now() >= deadline {
-        return None;
-    }
-    let mut stdout = tempfile::tempfile().ok()?;
-    command.stdout(stdout.try_clone().ok()?);
-    let mut child = command.spawn().ok()?;
-    loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                if !status.success() {
-                    return None;
-                }
-                stdout.rewind().ok()?;
-                let mut output = Vec::new();
-                stdout
-                    .take(MAX_PROBE_OUTPUT_BYTES)
-                    .read_to_end(&mut output)
-                    .ok()?;
-                return Some(output);
-            }
-            Ok(None) if !remaining.is_zero() => {
-                std::thread::sleep(remaining.min(PROBE_POLL_INTERVAL));
-            }
-            Ok(None) | Err(_) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
-            }
-        }
-    }
-}
-
 const OPTIONS_FORMAT: &str = concat!(
     "#{extended-keys-format}\t#{mouse}\t#{allow-passthrough}\t",
     "#{client_termname}\t#{client_termtype}\t#{client_termfeatures}",
@@ -133,15 +97,17 @@ fn read_options(pane: Option<&str>, mut run: impl FnMut(&[&str]) -> Option<Vec<u
         if matches!(mouse.trim(), "0" | "off") {
             options.mouse_capture = MouseCapture::DisabledByTmux;
         }
+        // tmux drops uploads from hidden panes unless passthrough is set to all.
         if let Some(("all", term, kind, features)) = fields.next_tuple()
             && (matches!(term, "xterm-ghostty" | "xterm-kitty")
                 || kind.starts_with("ghostty ")
                 || kind.starts_with("kitty("))
             && features.split(',').any(|feature| feature == "RGB")
         {
+            // Each pane owns 256 IDs in the upper half of the 24-bit placeholder color space.
             options.kitty_image_base = pane
-                .and_then(|pane| pane.strip_prefix('%'))
-                .and_then(|pane| pane.parse::<u32>().ok())
+                .and_then(|p| p.strip_prefix('%'))
+                .and_then(|p| p.parse::<u32>().ok())
                 .filter(|id| *id < 0x8000)
                 .map(|id| 0x80_0000 + (id << 8));
         }

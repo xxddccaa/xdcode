@@ -8,7 +8,6 @@ use base64::engine::general_purpose::STANDARD;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
-use tokio::sync::watch;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use xdcode_app_server_protocol::ClientResponsePayload;

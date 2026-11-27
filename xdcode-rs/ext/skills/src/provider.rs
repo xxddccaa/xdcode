@@ -10,9 +10,8 @@ use crate::HostSkillsSnapshot;
 use xdcode_exec_server::EnvironmentAccess;
 use xdcode_exec_server::ExecutorCapabilityDiscoverySnapshot;
 use xdcode_exec_server::ExecutorCapabilityDiscoveryV2Snapshot;
-use xdcode_exec_server::ResolvedSelectedCapabilityRoot;
+use xdcode_extension_api::AccessedSelectedCapabilityRoot;
 use xdcode_mcp::McpResourceClient;
-use xdcode_protocol::capabilities::SelectedCapabilityRoot;
 
 use crate::catalog::SkillAuthority;
 use crate::catalog::SkillCatalog;
@@ -29,11 +28,12 @@ pub use host::HostSkillProvider;
 
 pub(crate) const MAX_SKILL_RESOURCE_CONTENT_BYTES: usize = 1024 * 1024;
 
-#[derive(Clone, Debug)]
-pub struct SkillListQuery {
-    pub turn_id: String,
-    pub executor_roots: Vec<SelectedCapabilityRoot>,
-    pub resolved_executor_roots: Vec<ResolvedSelectedCapabilityRoot>,
+/// Catalog inputs with executor roots bound to filesystem access for this callback.
+#[derive(Clone)]
+pub struct SkillListQuery<'a> {
+    /// Absent for explicit cloud discovery before turn admission.
+    pub turn_id: Option<String>,
+    pub executor_roots: Vec<AccessedSelectedCapabilityRoot<'a>>,
     pub host_snapshot: Option<Arc<HostSkillsSnapshot>>,
     pub include_host_skills: bool,
     pub include_bundled_skills: bool,
@@ -54,7 +54,7 @@ pub struct SkillReadRequest<'a> {
     pub context: SkillReadContext<'a>,
 }
 
-/// Executor reads require callback access; other providers carry their own source context.
+/// Repository and executor reads require callback access; other sources retain provider context.
 #[derive(Clone)]
 pub enum SkillReadContext<'a> {
     Host {
@@ -95,7 +95,7 @@ pub trait SkillProvider: Send + Sync {
     }
 
     /// Providers set `is_partial` when listing omits entries; warnings are diagnostic only.
-    fn list(&self, query: SkillListQuery) -> SkillProviderFuture<'_, SkillCatalog>;
+    fn list<'a>(&'a self, query: SkillListQuery<'a>) -> SkillProviderFuture<'a, SkillCatalog>;
 
     fn read<'a>(
         &'a self,

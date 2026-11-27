@@ -265,7 +265,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -276,7 +276,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -287,7 +287,7 @@ checksum = "2a4385e2e34eb35d6b3efe798b9eb88096925d87726c0798709bf56d9ed84af3"
 
 [[package]]
 name = "app_test_support"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -494,6 +494,18 @@ dependencies = [
  "event-listener-strategy",
  "futures-core",
  "pin-project-lite",
+]
+
+[[package]]
+name = "async-compression"
+version = "0.4.44"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "515a1f282e33d55983c499d7e9e87082e81cbc32974825bf9032f928392d5844"
+dependencies = [
+ "compression-codecs",
+ "compression-core",
+ "pin-project-lite",
+ "tokio",
 ]
 
 [[package]]
@@ -1950,6 +1962,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "compression-codecs"
+version = "0.4.39"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2fe67f2944eef52fc7b106b8c9450d243a88701a0c065f7f57235e76abaed7df"
+dependencies = [
+ "compression-core",
+ "flate2",
+ "memchr",
+ "zstd 0.13.3",
+ "zstd-safe 7.2.4",
+]
+
+[[package]]
+name = "compression-core"
+version = "0.4.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2ebdda89edc534bf8d5dd2857562633b6495557e5846552ade994b99ed13c36a"
+
+[[package]]
 name = "concurrent-queue"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2028,9 +2059,12 @@ checksum = "7c74b8349d32d297c9134b8c88677813a227df8f779daa29bfc29c183fe3dca6"
 
 [[package]]
 name = "constant_time_eq"
-version = "0.4.2"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
+checksum = "9eb6feb175df65d0a3ccd3e73484e940d0ac664e8034f0519fd49a93db3071d9"
+dependencies = [
+ "rustversion",
+]
 
 [[package]]
 name = "convert_case"
@@ -2125,7 +2159,7 @@ dependencies = [
 
 [[package]]
 name = "core_test_support"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -2136,17 +2170,21 @@ dependencies = [
  "opentelemetry",
  "opentelemetry_sdk",
  "pretty_assertions",
+ "rcgen",
  "regex-lite",
  "serde_json",
  "shlex",
  "tempfile",
  "tokio",
+ "tokio-rustls",
  "tokio-tungstenite",
+ "toml 0.9.11+spec-1.1.0",
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
  "walkdir",
  "wiremock",
+ "xdcode-agent-graph-store",
  "xdcode-agent-message-board-host",
  "xdcode-analytics",
  "xdcode-arg0",
@@ -2156,6 +2194,7 @@ dependencies = [
  "xdcode-exec-server",
  "xdcode-extension-api",
  "xdcode-features",
+ "xdcode-guardian-context",
  "xdcode-guardian-v2",
  "xdcode-home",
  "xdcode-hooks",
@@ -2163,12 +2202,14 @@ dependencies = [
  "xdcode-login",
  "xdcode-model-provider-info",
  "xdcode-models-manager",
+ "xdcode-network-proxy",
  "xdcode-protocol",
  "xdcode-thread-store",
  "xdcode-utils-absolute-path",
  "xdcode-utils-cargo-bin",
  "xdcode-utils-path-uri",
- "zstd",
+ "xdcode-utils-rustls-provider",
+ "zstd 0.13.3",
 ]
 
 [[package]]
@@ -2324,7 +2365,7 @@ checksum = "d0a5c400df2834b80a4c3327b3aad3a4c4cd4de0629063962b03235697506a28"
 [[package]]
 name = "crossterm"
 version = "0.29.0"
-source = "git+https://github.com/openai-oss-forks/crossterm?rev=ed1cdab335221515706178d68495bba2aed1924f#ed1cdab335221515706178d68495bba2aed1924f"
+source = "git+https://github.com/openai-oss-forks/crossterm?rev=37ca4a27a9424ec5dbe6451f48c339d7b45f8d63#37ca4a27a9424ec5dbe6451f48c339d7b45f8d63"
 dependencies = [
  "bitflags 2.13.1",
  "crossterm_winapi",
@@ -2844,7 +2885,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e7c1832837b905bbfb5101e07cc24c8deddf52f93225eee6ead5f4d63d53ddcb"
 dependencies = [
  "const-oid 0.9.6",
- "pem-rfc7468",
+ "pem-rfc7468 0.7.0",
+ "zeroize",
+]
+
+[[package]]
+name = "der"
+version = "0.8.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a996a108feb8b427a6e12fcf6af4aa83409b79d72c15337d7741368131ee004"
+dependencies = [
+ "pem-rfc7468 1.0.0",
  "zeroize",
 ]
 
@@ -2878,11 +2929,10 @@ dependencies = [
 
 [[package]]
 name = "deranged"
-version = "0.5.5"
+version = "0.5.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ececcb659e7ba858fb4f10388c250a7252eb0a27373f1a72b8748afdd248e587"
+checksum = "9e9de72ce2ad1f90dc62fa25f0f430ef85eb4b0d8fa0be4f30373bc40a21d28e"
 dependencies = [
- "powerfmt",
  "serde_core",
 ]
 
@@ -3054,7 +3104,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users 0.5.2",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3210,7 +3260,7 @@ version = "0.16.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ee27f32b5c5292967d2d4a9d7f1e0b0aed2c15daded5a60300e4abb9d8020bca"
 dependencies = [
- "der",
+ "der 0.7.10",
  "digest 0.10.7",
  "elliptic-curve",
  "rfc6979",
@@ -3264,7 +3314,7 @@ dependencies = [
  "generic-array",
  "group",
  "hkdf 0.12.4",
- "pem-rfc7468",
+ "pem-rfc7468 0.7.0",
  "pkcs8",
  "rand_core 0.6.4",
  "sec1",
@@ -3411,7 +3461,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3428,6 +3478,15 @@ checksum = "de48cc4d1c1d97a20fd819def54b890cadde72ed3ad0c614822a0a433361be96"
 dependencies = [
  "cfg-if",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "etherparse"
+version = "0.21.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "17304d06addb3283cdc4bd528e42dd95e73c8ee2d6492ffce415e93660885449"
+dependencies = [
+ "arrayvec",
 ]
 
 [[package]]
@@ -3563,7 +3622,7 @@ checksum = "0ce92ff622d6dadf7349484f42c93271a0d49b7cc4d466a936405bacbe10aa78"
 dependencies = [
  "cfg-if",
  "rustix 1.1.4",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4063,7 +4122,7 @@ dependencies = [
  "gobject-sys",
  "libc",
  "system-deps",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5096,6 +5155,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "heapless"
+version = "0.9.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "25ba4bd83f9415b58b4ed8dc5714c76e626a105be4646c02630ad730ad3b5aa4"
+dependencies = [
+ "hash32 0.3.1",
+ "stable_deref_trait",
+]
+
+[[package]]
 name = "heck"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5139,6 +5208,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "hickory-proto"
+version = "0.26.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "12b92608f679a6fa515dd1d15c1ff89443026e391200a2c840c7afcba482893d"
+dependencies = [
+ "data-encoding",
+ "idna",
+ "ipnet",
+ "jni",
+ "once_cell",
+ "rand 0.10.1",
+ "ring",
+ "thiserror 2.0.18",
+ "tinyvec",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "hickory-resolver"
 version = "0.25.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5146,7 +5234,7 @@ checksum = "dc62a9a99b0bfb44d2ab95a7208ac952d31060efc16241c87eaf36406fecf87a"
 dependencies = [
  "cfg-if",
  "futures-util",
- "hickory-proto",
+ "hickory-proto 0.25.2",
  "ipconfig",
  "moka",
  "once_cell",
@@ -5487,7 +5575,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.58.0",
+ "windows-core 0.62.2",
 ]
 
 [[package]]
@@ -5704,9 +5792,9 @@ dependencies = [
 
 [[package]]
 name = "ignore"
-version = "0.4.25"
+version = "0.4.30"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d3d782a365a015e0f5c04902246139249abf769125006fbe7649e2ee88169b4a"
+checksum = "7b009b6744c1445efd7244084e25e498636412effb6760b55067553baa925cc7"
 dependencies = [
  "crossbeam-deque",
  "globset",
@@ -5940,7 +6028,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi",
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6303,9 +6391,9 @@ dependencies = [
 
 [[package]]
 name = "libsqlite3-sys"
-version = "0.37.0"
+version = "0.39.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b1f111c8c41e7c61a49cd34e44c7619462967221a6443b0ec299e0ac30cfb9b1"
+checksum = "14a5f01b87b92705d07b433c06f96cbc764637d81a0bffb5734ce17cf0f9a2b3"
 dependencies = [
  "cc",
  "pkg-config",
@@ -6314,9 +6402,9 @@ dependencies = [
 
 [[package]]
 name = "libz-sys"
-version = "1.1.29"
+version = "1.1.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "85bc9657773828b90eeb625adff10eeac83cc21bbfd8e23a03eaa8a33c9e28d9"
+checksum = "fee3f59f4321dab0c78d828942e7aa09d0bd8ad6e78a501977e6bf3d02938045"
 dependencies = [
  "cc",
  "libc",
@@ -6493,9 +6581,9 @@ dependencies = [
 
 [[package]]
 name = "lzma-rust2"
-version = "0.21.0"
+version = "0.22.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fde178a3caf126c440fa15628147772d8ee590a39477d711353fbe2e58a73a5b"
+checksum = "7277c9742229dc25243236d578b6471a798c554512c6f6a04365ec2e87c2a3bb"
 dependencies = [
  "sha2 0.11.0",
 ]
@@ -6515,6 +6603,12 @@ name = "mach2"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dae608c151f68243f2b000364e1f7b186d9c29845f7d2d85bd31b9ad77ad552b"
+
+[[package]]
+name = "managed"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0ca88d725a0a943b096803bd34e73a4437208b6077654cc4ecb2947a5f91618d"
 
 [[package]]
 name = "maplit"
@@ -6633,9 +6727,9 @@ dependencies = [
 
 [[package]]
 name = "mio"
-version = "1.2.0"
+version = "1.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "50b7e5b27aa02a74bac8c3f23f448f8d87ff11f92d3aac1a6ed369ee08cc56c1"
+checksum = "1788edb87fdc09c7e26304471e2f5be8cdefb1b6930d6e3985fc02ff53bf86ee"
 dependencies = [
  "libc",
  "log",
@@ -6720,8 +6814,8 @@ dependencies = [
 
 [[package]]
 name = "mxc-sdk"
-version = "1.0.0"
-source = "git+https://github.com/microsoft/mxc?rev=b21120168d70befe12356411423266bfef168446#b21120168d70befe12356411423266bfef168446"
+version = "1.1.0"
+source = "git+https://github.com/microsoft/mxc?rev=c66201839d63cae2239db5e92f1f1d6076cf5181#c66201839d63cae2239db5e92f1f1d6076cf5181"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -6731,6 +6825,7 @@ dependencies = [
  "flatbuffers",
  "getrandom 0.2.17",
  "libc",
+ "native-tls",
  "nix 0.29.0",
  "same-file",
  "semver",
@@ -6743,6 +6838,7 @@ dependencies = [
  "tokio",
  "tracelogging",
  "unicode-general-category",
+ "ureq",
  "url",
  "uuid",
  "widestring",
@@ -6921,7 +7017,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6979,9 +7075,9 @@ dependencies = [
 
 [[package]]
 name = "num-conv"
-version = "0.2.0"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cf97ec579c3c42f953ef76dbf8d55ac91fb219dde70e49aa4a6b7d74e9919050"
+checksum = "521739c6d2bac4aa25192232afe6841231376b2b26d4d9fae5ecf8ca5772e441"
 
 [[package]]
 name = "num-derive"
@@ -7419,15 +7515,14 @@ checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 
 [[package]]
 name = "openssl"
-version = "0.10.75"
+version = "0.10.82"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "08838db121398ad17ab8531ce9de97b244589089e290a384c900cb9ff7434328"
+checksum = "4de8111e94a56adca7ebfe6c365b6d42f99deb69b74b6becacd4204e2f193aa2"
 dependencies = [
  "bitflags 2.13.1",
  "cfg-if",
  "foreign-types",
  "libc",
- "once_cell",
  "openssl-macros",
  "openssl-sys",
 ]
@@ -7466,9 +7561,9 @@ dependencies = [
 
 [[package]]
 name = "openssl-sys"
-version = "0.9.111"
+version = "0.9.118"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "82cab2d520aa75e3c58898289429321eb788c3106963d0dc886ec7a5f4adc321"
+checksum = "19c413d6ec9ebaf5e1c829d355cb3e9f783778d700f135be0921d52fce3c60ae"
 dependencies = [
  "cc",
  "libc",
@@ -7534,6 +7629,7 @@ dependencies = [
  "tokio",
  "tonic",
  "tracing",
+ "zstd 0.13.3",
 ]
 
 [[package]]
@@ -7651,7 +7747,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d8fae84b431384b68627d0f9b3b1245fcf9f46f6c0e3dc902e9dce64edd1967"
 dependencies = [
  "libc",
- "windows-sys 0.48.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7852,6 +7948,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "pem-rfc7468"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a6305423e0e7738146434843d1694d621cce767262b2a86910beab705e4493d9"
+dependencies = [
+ "base64ct",
+]
+
+[[package]]
 name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8011,7 +8116,7 @@ version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f950b2377845cebe5cf8b5165cb3cc1a5e0fa5cfa3e1f7f55707d8fd82e0a7b7"
 dependencies = [
- "der",
+ "der 0.7.10",
  "spki",
 ]
 
@@ -8023,22 +8128,22 @@ checksum = "7edddbd0b52d732b21ad9a5fab5c704c14cd949e5e9a1ec5929a24fded1b904c"
 
 [[package]]
 name = "plist"
-version = "1.9.0"
+version = "1.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "092791278e026273c1b65bbdcfbba3a300f2994c896bd01ab01da613c29c46f1"
+checksum = "7da1d65da6dd5d1e44199ac0f58712d241c0f439f80adea8924d832384087f85"
 dependencies = [
  "base64 0.22.1",
  "indexmap 2.14.0",
- "quick-xml 0.39.4",
+ "quick-xml",
  "serde",
  "time",
 ]
 
 [[package]]
 name = "png"
-version = "0.18.0"
+version = "0.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "97baced388464909d42d89643fe4361939af9b7ce7a31ee32a168f832a70f2a0"
+checksum = "60769b8b31b2a9f263dae2776c37b1b28ae246943cf719eb6946a1db05128a61"
 dependencies = [
  "bitflags 2.13.1",
  "crc32fast",
@@ -8492,15 +8597,6 @@ checksum = "a993555f31e5a609f617c12db6250dedcac1b0a85076912c436e6fc9b2c8e6a3"
 
 [[package]]
 name = "quick-xml"
-version = "0.39.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cdcc8dd4e2f670d309a5f0e83fe36dfdc05af317008fea29144da1a2ac858e5e"
-dependencies = [
- "memchr",
-]
-
-[[package]]
-name = "quick-xml"
 version = "0.41.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e660451e55124f798a69a5af3f49ccfbefbd41910eefd25caf2393e1f3473ec1"
@@ -8531,7 +8627,7 @@ dependencies = [
  "futures-io",
  "pin-project-lite",
  "quinn-proto",
- "quinn-udp 0.5.14",
+ "quinn-udp 0.5.16",
  "rustc-hash",
  "rustls",
  "socket2 0.6.3",
@@ -8543,9 +8639,9 @@ dependencies = [
 
 [[package]]
 name = "quinn-proto"
-version = "0.11.18"
+version = "0.11.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a9746dbde176634f4f2f1faf2404e30a31b2bc1e9cafb5329c95d8177a18c9fc"
+checksum = "0e750cca55fe4f0439a15d0bb529da9651e79993e8e72c61a899a36d462befbe"
 dependencies = [
  "bytes",
  "getrandom 0.4.2",
@@ -8565,29 +8661,29 @@ dependencies = [
 
 [[package]]
 name = "quinn-udp"
-version = "0.5.14"
+version = "0.5.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "addec6a0dcad8a8d96a771f815f0eaf55f9d1805756410b39f5fa81332574cbd"
+checksum = "af66907df18639dcf4db56ca65490cabc4b27a97dbadd96f2926cca73298f016"
 dependencies = [
  "cfg_aliases 0.2.1",
  "libc",
  "once_cell",
  "socket2 0.6.3",
  "tracing",
- "windows-sys 0.60.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
 name = "quinn-udp"
-version = "0.6.1"
+version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "76150b617afc75e6e21ac5f39bc196e80b65415ae48d62dbef8e2519d040ce42"
+checksum = "47091c86514c2e11452cb228dee77037334b99d92a23e4c69aa5982261f39247"
 dependencies = [
  "cfg_aliases 0.2.1",
  "libc",
  "log",
  "socket2 0.6.3",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -9462,8 +9558,8 @@ dependencies = [
 
 [[package]]
 name = "rmcp"
-version = "3.5.1"
-source = "git+https://github.com/modelcontextprotocol/rust-sdk?rev=98a54789b80110ad210495c4ad845c89e1980471#98a54789b80110ad210495c4ad845c89e1980471"
+version = "3.6.0"
+source = "git+https://github.com/modelcontextprotocol/rust-sdk?rev=b11a40d889e022087d7f2b8cd23aa28e19ceaf5b#b11a40d889e022087d7f2b8cd23aa28e19ceaf5b"
 dependencies = [
  "async-trait",
  "base64 0.23.0",
@@ -9498,8 +9594,8 @@ dependencies = [
 
 [[package]]
 name = "rmcp-macros"
-version = "3.5.1"
-source = "git+https://github.com/modelcontextprotocol/rust-sdk?rev=98a54789b80110ad210495c4ad845c89e1980471#98a54789b80110ad210495c4ad845c89e1980471"
+version = "3.6.0"
+source = "git+https://github.com/modelcontextprotocol/rust-sdk?rev=b11a40d889e022087d7f2b8cd23aa28e19ceaf5b#b11a40d889e022087d7f2b8cd23aa28e19ceaf5b"
 dependencies = [
  "darling 0.24.0",
  "proc-macro2",
@@ -9887,7 +9983,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.4.15",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -9900,7 +9996,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -9959,7 +10055,7 @@ dependencies = [
  "security-framework 3.5.1",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -10196,7 +10292,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d3e97a565f76233a6003f9f5c54be1d9c5bdfa3eccfb189469f11ec4901c47dc"
 dependencies = [
  "base16ct",
- "der",
+ "der 0.7.10",
  "generic-array",
  "pkcs8",
  "subtle",
@@ -10755,6 +10851,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "smoltcp"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6f8b28ad56c6e35524a37dd492af5d1a47e31e1a4d175cd12f89c075f01980f"
+dependencies = [
+ "bitflags 1.3.2",
+ "byteorder",
+ "cfg-if",
+ "defmt 1.1.1",
+ "heapless 0.9.3",
+ "libc",
+ "managed",
+]
+
+[[package]]
 name = "socket2"
 version = "0.5.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10771,7 +10882,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a766e1110788c36f4fa1c2b71b387a7815aa65f88ce0229841826633d93723e"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "socks5-protocol"
+version = "0.3.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "24b4925e3858bd0a1ac69668653234b4bebb0d4cd32a111c31057837d3d99117"
+dependencies = [
+ "thiserror 1.0.69",
+ "tokio",
 ]
 
 [[package]]
@@ -10858,6 +10979,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "spiffe"
+version = "0.18.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "539d8f20779006e7e078d8ac7f30a7d7d77fdbbf1f343e1d4416c22772850fbf"
+dependencies = [
+ "hyper-util",
+ "thiserror 2.0.18",
+ "tokio",
+ "tonic",
+ "tower",
+ "url",
+]
+
+[[package]]
 name = "spin"
 version = "0.9.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10873,7 +11008,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d91ed6c858b01f942cd56b37a94b3e0a1798290327d1236e4d9cf4eaca44d29d"
 dependencies = [
  "base64ct",
- "der",
+ "der 0.7.10",
 ]
 
 [[package]]
@@ -10892,8 +11027,7 @@ dependencies = [
 [[package]]
 name = "sqlx-core"
 version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "05b44e85bf579a8eeb4ceaa77a3a523baf2bf0e9bac7e40f405d537b5d2d5ccb"
+source = "git+https://github.com/transact-rs/sqlx?rev=10462fa4414c6c7f1ed1d39bb31678e3b726878c#10462fa4414c6c7f1ed1d39bb31678e3b726878c"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -10916,7 +11050,7 @@ dependencies = [
  "rustls",
  "serde",
  "serde_json",
- "sha2 0.10.9",
+ "sha2 0.11.0",
  "smallvec",
  "thiserror 2.0.18",
  "time",
@@ -11036,8 +11170,7 @@ dependencies = [
 [[package]]
 name = "sqlx-sqlite"
 version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "488e99c397a62007e4229aec669a179816339afc6d2620ca6fa420dbee2e982c"
+source = "git+https://github.com/transact-rs/sqlx?rev=10462fa4414c6c7f1ed1d39bb31678e3b726878c#10462fa4414c6c7f1ed1d39bb31678e3b726878c"
 dependencies = [
  "atoi",
  "chrono",
@@ -11601,7 +11734,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -11657,7 +11790,7 @@ dependencies = [
  "parking_lot",
  "rustix 1.1.4",
  "signal-hook",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -11929,12 +12062,11 @@ dependencies = [
 
 [[package]]
 name = "time"
-version = "0.3.47"
+version = "0.3.55"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "743bd48c283afc0388f9b8827b976905fb217ad9e647fae3a379a9283c4def2c"
+checksum = "cdb87b95ec50ddfa440816d227a17b2ccbdda963a316a727fda0fc4334f7d134"
 dependencies = [
  "deranged",
- "itoa",
  "js-sys",
  "libc",
  "num-conv",
@@ -11947,15 +12079,15 @@ dependencies = [
 
 [[package]]
 name = "time-core"
-version = "0.1.8"
+version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7694e1cfe791f8d31026952abf09c69ca6f6fa4e1a1229e18988f06a04a12dca"
+checksum = "9e1c906769ad99c88eaa54e728060edef082f8e358ff32030cb7c7d315e81109"
 
 [[package]]
 name = "time-macros"
-version = "0.2.27"
+version = "0.2.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2e70e4c5a0e0a8a4823ad65dfe1a6930e4f4d756dcd9dd7939022b5e8c501215"
+checksum = "7e689342a48d2ea927c87ea50cabf8594854bf940e9310208848d680d668ed85"
 dependencies = [
  "num-conv",
  "time-core",
@@ -12098,7 +12230,7 @@ dependencies = [
 [[package]]
 name = "tokio-tungstenite"
 version = "0.28.0"
-source = "git+https://github.com/openai-oss-forks/tokio-tungstenite?rev=0e5b2d73aa18dd9f0a50ee9ff199d5aef7594186#0e5b2d73aa18dd9f0a50ee9ff199d5aef7594186"
+source = "git+https://github.com/openai-oss-forks/tokio-tungstenite?rev=7a920470d62138955446b64220c7609e46ad770e#7a920470d62138955446b64220c7609e46ad770e"
 dependencies = [
  "futures-util",
  "log",
@@ -12252,6 +12384,7 @@ dependencies = [
  "tower-layer",
  "tower-service",
  "tracing",
+ "zstd 0.13.3",
 ]
 
 [[package]]
@@ -12318,13 +12451,18 @@ version = "0.6.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d4e6559d53cc268e5031cd8429d05415bc4cb4aefc4aa5d6cc35fbf5b924a1f8"
 dependencies = [
+ "async-compression",
  "bitflags 2.13.1",
  "bytes",
+ "futures-core",
  "futures-util",
  "http 1.4.0",
  "http-body 1.0.1",
+ "http-body-util",
  "iri-string",
  "pin-project-lite",
+ "tokio",
+ "tokio-util",
  "tower",
  "tower-layer",
  "tower-service",
@@ -12585,7 +12723,7 @@ dependencies = [
 [[package]]
 name = "tungstenite"
 version = "0.27.0"
-source = "git+https://github.com/openai-oss-forks/tungstenite-rs?rev=4fffad30fe373adbdcffab9545e9e9bf4f2fc19f#4fffad30fe373adbdcffab9545e9e9bf4f2fc19f"
+source = "git+https://github.com/openai-oss-forks/tungstenite-rs?rev=e19950ef7828cb311e6d51a6bedcebf0192e055c#e19950ef7828cb311e6d51a6bedcebf0192e055c"
 dependencies = [
  "bytes",
  "data-encoding",
@@ -12797,6 +12935,35 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
+name = "ureq"
+version = "3.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dea7109cdcd5864d4eeb1b58a1648dc9bf520360d7af16ec26d0a9354bafcfc0"
+dependencies = [
+ "base64 0.22.1",
+ "der 0.8.3",
+ "log",
+ "native-tls",
+ "percent-encoding",
+ "rustls-pki-types",
+ "ureq-proto",
+ "utf8-zero",
+ "webpki-root-certs",
+]
+
+[[package]]
+name = "ureq-proto"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e994ba84b0bd1b1b0cf92878b7ef898a5c1760108fe7b6010327e274917a808c"
+dependencies = [
+ "base64 0.22.1",
+ "http 1.4.0",
+ "httparse",
+ "log",
+]
+
+[[package]]
 name = "url"
 version = "2.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -12820,6 +12987,12 @@ name = "utf-8"
 version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "09cc8ee72d2a9becf2f2febe0205bbed8fc6615b7cb429ad062dc7b7ddd036a9"
+
+[[package]]
+name = "utf8-zero"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b8c0a043c9540bae7c578c88f91dda8bd82e59ae27c21baca69c8b191aaf5a6e"
 
 [[package]]
 name = "utf8_iter"
@@ -12850,8 +13023,7 @@ dependencies = [
 [[package]]
 name = "v8"
 version = "152.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a10fe1a92da5c32c7c7f838ce36c0ccfcfd5edf0865b58bdde820aa64cea9888"
+source = "git+https://github.com/openai-oss-forks/rusty_v8.git?rev=90a65f887a0c0f048f3784afbcb320b373c8a2e0#90a65f887a0c0f048f3784afbcb320b373c8a2e0"
 dependencies = [
  "bindgen",
  "bitflags 2.13.1",
@@ -13164,12 +13336,12 @@ dependencies = [
 
 [[package]]
 name = "wayland-scanner"
-version = "0.31.10"
+version = "0.31.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9c324a910fd86ebdc364a3e61ec1f11737d3b1d6c273c0239ee8ff4bc0d24b4a"
+checksum = "338e30461b3a2b67d70eb30a6d89f8e0c93a833e07d2ae89085cd070c4a00ac0"
 dependencies = [
  "proc-macro2",
- "quick-xml 0.39.4",
+ "quick-xml",
  "quote",
 ]
 
@@ -13249,7 +13421,7 @@ dependencies = [
  "event-listener",
  "futures",
  "log",
- "quinn-udp 0.6.1",
+ "quinn-udp 0.6.3",
  "rtc",
  "tokio",
 ]
@@ -13415,7 +13587,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -14116,7 +14288,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-agent-extension"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "anyhow",
  "core_test_support",
@@ -14128,7 +14300,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-agent-graph-store"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "pretty_assertions",
  "serde",
@@ -14143,7 +14315,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-agent-identity"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -14163,7 +14335,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-agent-message-board-client"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -14186,7 +14358,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-agent-message-board-extension"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "futures",
  "serde_json",
@@ -14205,7 +14377,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-agent-message-board-host"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "chrono",
  "futures",
@@ -14222,7 +14394,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-agent-roles"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "serde",
  "toml 0.9.11+spec-1.1.0",
@@ -14235,8 +14407,9 @@ dependencies = [
 
 [[package]]
 name = "xdcode-analytics"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
+ "http 1.4.0",
  "os_info",
  "pretty_assertions",
  "serde",
@@ -14244,13 +14417,17 @@ dependencies = [
  "sha1 0.10.6",
  "tokio",
  "tracing",
+ "wiremock",
  "xdcode-app-server-protocol",
+ "xdcode-features",
  "xdcode-git-utils",
  "xdcode-http-client",
  "xdcode-login",
  "xdcode-model-provider",
+ "xdcode-model-provider-info",
  "xdcode-plugin",
  "xdcode-protocol",
+ "xdcode-runtime-agent-instance",
  "xdcode-state",
  "xdcode-utils-absolute-path",
  "xdcode-utils-path-uri",
@@ -14258,7 +14435,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-ansi-escape"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "ansi-to-tui",
  "pretty_assertions",
@@ -14269,7 +14446,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-api"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "anyhow",
  "assert_matches",
@@ -14280,6 +14457,7 @@ dependencies = [
  "eventsource-stream",
  "futures",
  "http 1.4.0",
+ "log",
  "pretty_assertions",
  "rcgen",
  "regex-lite",
@@ -14302,12 +14480,13 @@ dependencies = [
  "xdcode-http-client",
  "xdcode-protocol",
  "xdcode-utils-rustls-provider",
+ "xdcode-utils-string",
  "xdcode-websocket-client",
 ]
 
 [[package]]
 name = "xdcode-app-server"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "anyhow",
  "app_test_support",
@@ -14352,7 +14531,6 @@ dependencies = [
  "url",
  "uuid",
  "wiremock",
- "xdcode-agent-extension",
  "xdcode-agent-message-board-host",
  "xdcode-analytics",
  "xdcode-app-server-daemon",
@@ -14380,6 +14558,7 @@ dependencies = [
  "xdcode-git-utils",
  "xdcode-goal-extension",
  "xdcode-guardian-v2",
+ "xdcode-guardian-v3",
  "xdcode-history-notes-extension",
  "xdcode-home",
  "xdcode-hooks",
@@ -14403,6 +14582,8 @@ dependencies = [
  "xdcode-queue-extension",
  "xdcode-rmcp-client",
  "xdcode-rollout",
+ "xdcode-rollout-trace",
+ "xdcode-runtime-agent-instance",
  "xdcode-sandboxing",
  "xdcode-shell-command",
  "xdcode-skills",
@@ -14427,25 +14608,35 @@ dependencies = [
 
 [[package]]
 name = "xdcode-app-server-client"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
+ "color-eyre",
  "futures",
  "pretty_assertions",
  "serde",
  "serde_json",
  "tempfile",
+ "thiserror 2.0.18",
  "tokio",
  "tokio-tungstenite",
  "toml 0.9.11+spec-1.1.0",
  "tracing",
  "url",
+ "wiremock",
+ "xdcode-api",
  "xdcode-app-server",
  "xdcode-app-server-protocol",
+ "xdcode-app-server-transport",
  "xdcode-arg0",
+ "xdcode-backend-client",
+ "xdcode-cloud-client",
  "xdcode-config",
  "xdcode-core",
  "xdcode-exec-server",
  "xdcode-feedback",
+ "xdcode-http-client",
+ "xdcode-login",
+ "xdcode-model-provider",
  "xdcode-protocol",
  "xdcode-uds",
  "xdcode-utils-absolute-path",
@@ -14454,7 +14645,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-app-server-daemon"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -14484,7 +14675,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-app-server-protocol"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "anyhow",
  "inventory",
@@ -14506,6 +14697,7 @@ dependencies = [
  "xdcode-extension-items",
  "xdcode-history",
  "xdcode-protocol",
+ "xdcode-protocol-test-support",
  "xdcode-rollout",
  "xdcode-secrets",
  "xdcode-shell-command",
@@ -14513,16 +14705,16 @@ dependencies = [
  "xdcode-utils-cargo-bin",
  "xdcode-utils-path-uri",
  "xdcode-utils-redacted-string",
- "zstd",
+ "zstd 0.13.3",
 ]
 
 [[package]]
 name = "xdcode-app-server-protocol-noop-macros"
-version = "0.167.0"
+version = "0.172.0"
 
 [[package]]
 name = "xdcode-app-server-test-client"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -14539,16 +14731,19 @@ dependencies = [
  "xdcode-core",
  "xdcode-otel",
  "xdcode-protocol",
+ "xdcode-utils-cargo-bin",
  "xdcode-utils-cli",
 ]
 
 [[package]]
 name = "xdcode-app-server-transport"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
+ "anyhow",
  "axum",
  "base64 0.22.1",
  "chrono",
+ "core_test_support",
  "futures",
  "gethostname",
  "httpdate",
@@ -14568,26 +14763,29 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
+ "wiremock",
  "xdcode-api",
  "xdcode-app-server-protocol",
  "xdcode-config",
  "xdcode-core",
+ "xdcode-features",
  "xdcode-http-client",
  "xdcode-login",
  "xdcode-model-provider",
  "xdcode-protocol",
+ "xdcode-runtime-agent-instance",
  "xdcode-state",
  "xdcode-uds",
  "xdcode-utils-absolute-path",
  "xdcode-utils-rustls-provider",
  "xdcode-websocket-auth",
  "xdcode-websocket-client",
- "zstd",
+ "zstd 0.13.3",
 ]
 
 [[package]]
 name = "xdcode-apply-patch"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -14607,7 +14805,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-arg0"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "anyhow",
  "dotenvy",
@@ -14630,7 +14828,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-async-utils"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "pretty_assertions",
  "rand 0.9.3",
@@ -14640,7 +14838,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-attachment-store"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "pretty_assertions",
  "serde",
@@ -14650,7 +14848,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-aws-auth"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "aws-config",
  "aws-credential-types",
@@ -14676,27 +14874,34 @@ dependencies = [
 
 [[package]]
 name = "xdcode-backend-client"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "http 1.4.0",
  "pretty_assertions",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "url",
+ "uuid",
  "wiremock",
  "xdcode-api",
  "xdcode-backend-openapi-models",
+ "xdcode-features",
  "xdcode-http-client",
  "xdcode-login",
  "xdcode-model-provider",
  "xdcode-protocol",
+ "xdcode-response-debug-context",
+ "xdcode-runtime-agent-instance",
+ "xdcode-utils-absolute-path",
 ]
 
 [[package]]
 name = "xdcode-backend-openapi-models"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -14705,7 +14910,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-build-info"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "pretty_assertions",
  "semver",
@@ -14718,7 +14923,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-bwrap"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "cc",
  "libc",
@@ -14727,34 +14932,41 @@ dependencies = [
 
 [[package]]
 name = "xdcode-chatgpt"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "clap",
  "pretty_assertions",
  "serde",
  "serde_json",
  "tempfile",
  "tokio",
+ "uuid",
+ "wiremock",
  "xdcode-connectors",
  "xdcode-core",
+ "xdcode-features",
  "xdcode-git-utils",
  "xdcode-http-client",
  "xdcode-login",
  "xdcode-model-provider",
  "xdcode-plugin",
+ "xdcode-protocol",
+ "xdcode-runtime-agent-instance",
  "xdcode-utils-cargo-bin",
  "xdcode-utils-cli",
 ]
 
 [[package]]
 name = "xdcode-cli"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "anyhow",
  "app_test_support",
  "assert_cmd",
  "assert_matches",
+ "base64 0.22.1",
  "chrono",
  "clap",
  "clap_complete",
@@ -14766,7 +14978,6 @@ dependencies = [
  "insta",
  "jsonwebtoken",
  "libc",
- "libsqlite3-sys",
  "os_info",
  "owo-colors",
  "predicates",
@@ -14800,7 +15011,6 @@ dependencies = [
  "xdcode-app-server-protocol",
  "xdcode-app-server-test-client",
  "xdcode-arg0",
- "xdcode-aws-auth",
  "xdcode-build-info",
  "xdcode-cloud-config",
  "xdcode-config",
@@ -14808,6 +15018,7 @@ dependencies = [
  "xdcode-core-plugins",
  "xdcode-exec",
  "xdcode-exec-server",
+ "xdcode-exec-server-cli",
  "xdcode-execpolicy",
  "xdcode-extension-api",
  "xdcode-features",
@@ -14832,11 +15043,11 @@ dependencies = [
  "xdcode-sandboxing",
  "xdcode-skills-extension",
  "xdcode-state",
- "xdcode-stdio-to-uds",
  "xdcode-tcp-tunnel",
  "xdcode-terminal-detection",
  "xdcode-thread-store",
  "xdcode-tui",
+ "xdcode-uds",
  "xdcode-utils-absolute-path",
  "xdcode-utils-cargo-bin",
  "xdcode-utils-cli",
@@ -14847,12 +15058,12 @@ dependencies = [
  "xdcode-utils-redacted-string",
  "xdcode-websocket-auth",
  "xdcode-windows-sandbox",
- "zstd",
+ "zstd 0.13.3",
 ]
 
 [[package]]
 name = "xdcode-client"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "eventsource-stream",
  "futures",
@@ -14866,7 +15077,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-cloud-client"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -14878,6 +15089,8 @@ dependencies = [
  "hyper-util",
  "pretty_assertions",
  "prost",
+ "serde",
+ "serde_json",
  "thiserror 2.0.18",
  "tokio",
  "tokio-rustls",
@@ -14890,7 +15103,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-cloud-config"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -14909,20 +15122,24 @@ dependencies = [
  "xdcode-backend-client",
  "xdcode-config",
  "xdcode-core",
+ "xdcode-exec-server",
  "xdcode-http-client",
  "xdcode-keyring-store",
  "xdcode-login",
  "xdcode-otel",
  "xdcode-protocol",
+ "xdcode-rmcp-client",
 ]
 
 [[package]]
 name = "xdcode-cloud-tasks"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "chrono",
  "clap",
+ "core_test_support",
  "crossterm",
  "http 1.4.0",
  "insta",
@@ -14932,26 +15149,33 @@ dependencies = [
  "serde",
  "serde_json",
  "supports-color 3.0.2",
+ "tempfile",
  "tokio",
  "tokio-stream",
  "tracing",
  "tracing-subscriber",
  "unicode-segmentation",
  "unicode-width 0.2.1",
+ "uuid",
+ "wiremock",
+ "xdcode-agent-identity",
+ "xdcode-backend-client",
  "xdcode-cloud-tasks-client",
  "xdcode-cloud-tasks-mock-client",
  "xdcode-core",
+ "xdcode-features",
  "xdcode-git-utils",
  "xdcode-http-client",
  "xdcode-login",
  "xdcode-model-provider",
+ "xdcode-runtime-agent-instance",
  "xdcode-tui",
  "xdcode-utils-cli",
 ]
 
 [[package]]
 name = "xdcode-cloud-tasks-client"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -14966,7 +15190,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-cloud-tasks-mock-client"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "chrono",
  "diffy",
@@ -14975,10 +15199,11 @@ dependencies = [
 
 [[package]]
 name = "xdcode-code-mode"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "futures",
  "http-body-util",
+ "opentelemetry",
  "pretty_assertions",
  "prost",
  "rand 0.9.3",
@@ -14992,14 +15217,13 @@ dependencies = [
  "uuid",
  "xdcode-code-mode-protocol",
  "xdcode-http-client",
- "xdcode-install-context",
  "xdcode-otel",
  "xdcode-protocol",
 ]
 
 [[package]]
 name = "xdcode-code-mode-host"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -15019,16 +15243,19 @@ dependencies = [
  "xdcode-code-mode",
  "xdcode-code-mode-protocol",
  "xdcode-code-mode-runtime",
+ "xdcode-core",
  "xdcode-http-client",
  "xdcode-otel",
  "xdcode-otel-trace-websocket",
+ "xdcode-plugin-host",
  "xdcode-protocol",
  "xdcode-utils-cargo-bin",
+ "xdcode-utils-process",
 ]
 
 [[package]]
 name = "xdcode-code-mode-protocol"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "glob",
  "pretty_assertions",
@@ -15046,7 +15273,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-code-mode-runtime"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "base64 0.22.1",
  "deno_core_icudata",
@@ -15059,16 +15286,20 @@ dependencies = [
  "tracing",
  "v8",
  "xdcode-code-mode-protocol",
+ "xdcode-plugin-host",
  "xdcode-protocol",
+ "xdcode-utils-audio",
+ "xdcode-utils-output-truncation",
+ "xdcode-utils-string",
 ]
 
 [[package]]
 name = "xdcode-collaboration-mode-templates"
-version = "0.167.0"
+version = "0.172.0"
 
 [[package]]
 name = "xdcode-config"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -15091,6 +15322,7 @@ dependencies = [
  "serde_path_to_error",
  "sha2 0.10.9",
  "tempfile",
+ "test-case",
  "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
@@ -15122,7 +15354,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-config-schema"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -15131,7 +15363,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-connectors"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -15153,7 +15385,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-connectors-extension"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "serde_json",
  "thiserror 2.0.18",
@@ -15167,7 +15399,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-context-fragments"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "pretty_assertions",
  "serde_json",
@@ -15178,7 +15410,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-core"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -15209,6 +15441,7 @@ dependencies = [
  "predicates",
  "pretty_assertions",
  "rand 0.9.3",
+ "rcgen",
  "regex-lite",
  "rmcp",
  "serde",
@@ -15222,6 +15455,7 @@ dependencies = [
  "test-log",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-rustls",
  "tokio-tungstenite",
  "tokio-util",
  "toml 0.9.11+spec-1.1.0",
@@ -15248,6 +15482,7 @@ dependencies = [
  "xdcode-apply-patch",
  "xdcode-async-utils",
  "xdcode-attachment-store",
+ "xdcode-backend-client",
  "xdcode-client",
  "xdcode-code-mode",
  "xdcode-config",
@@ -15255,6 +15490,7 @@ dependencies = [
  "xdcode-context-fragments",
  "xdcode-core-plugins",
  "xdcode-diagnostics",
+ "xdcode-direct-tool-timing",
  "xdcode-exec-server",
  "xdcode-exec-server-test-support",
  "xdcode-execpolicy",
@@ -15291,6 +15527,7 @@ dependencies = [
  "xdcode-rmcp-client",
  "xdcode-rollout",
  "xdcode-rollout-trace",
+ "xdcode-runtime-agent-instance",
  "xdcode-sandboxing",
  "xdcode-shell-command",
  "xdcode-skills",
@@ -15300,11 +15537,14 @@ dependencies = [
  "xdcode-test-binary-support",
  "xdcode-thread-store",
  "xdcode-tools",
+ "xdcode-user-input",
  "xdcode-utils-absolute-path",
  "xdcode-utils-audio",
  "xdcode-utils-cache",
  "xdcode-utils-cargo-bin",
+ "xdcode-utils-critical-path",
  "xdcode-utils-git-discovery",
+ "xdcode-utils-head-tail-buffer",
  "xdcode-utils-home-dir",
  "xdcode-utils-image",
  "xdcode-utils-output-truncation",
@@ -15314,17 +15554,18 @@ dependencies = [
  "xdcode-utils-process",
  "xdcode-utils-pty",
  "xdcode-utils-redacted-string",
+ "xdcode-utils-rustls-provider",
  "xdcode-utils-stream-parser",
  "xdcode-utils-string",
  "xdcode-web-search-extension",
  "xdcode-windows-sandbox",
  "xdcode-windows-sandbox-test-support",
- "zstd",
+ "zstd 0.13.3",
 ]
 
 [[package]]
 name = "xdcode-core-api"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "xdcode-analytics",
  "xdcode-app-server-protocol",
@@ -15338,6 +15579,7 @@ dependencies = [
  "xdcode-home",
  "xdcode-image-generation-extension",
  "xdcode-login",
+ "xdcode-model-provider",
  "xdcode-model-provider-info",
  "xdcode-models-manager",
  "xdcode-protocol",
@@ -15347,7 +15589,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-core-plugin-common"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "semver",
  "serde",
@@ -15358,9 +15600,10 @@ dependencies = [
 
 [[package]]
 name = "xdcode-core-plugins"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "chrono",
  "dirs",
  "flate2",
@@ -15386,12 +15629,14 @@ dependencies = [
  "uuid",
  "wiremock",
  "xdcode-analytics",
+ "xdcode-api",
  "xdcode-app-server-protocol",
  "xdcode-config",
  "xdcode-connectors",
  "xdcode-core-plugin-common",
  "xdcode-exec-server",
  "xdcode-exec-server-test-support",
+ "xdcode-features",
  "xdcode-git-utils",
  "xdcode-hooks",
  "xdcode-http-client",
@@ -15401,6 +15646,7 @@ dependencies = [
  "xdcode-otel",
  "xdcode-plugin",
  "xdcode-protocol",
+ "xdcode-runtime-agent-instance",
  "xdcode-shell-command",
  "xdcode-skills",
  "xdcode-tools",
@@ -15415,7 +15661,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-diagnostics"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "libc",
  "pretty_assertions",
@@ -15423,15 +15669,18 @@ dependencies = [
 
 [[package]]
 name = "xdcode-direct-tool-timing"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "pretty_assertions",
+ "test-case",
+ "tokio",
+ "tokio-util",
  "xdcode-utils-critical-path",
 ]
 
 [[package]]
 name = "xdcode-exec"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -15463,6 +15712,7 @@ dependencies = [
  "xdcode-cloud-config",
  "xdcode-config",
  "xdcode-core",
+ "xdcode-exec-server",
  "xdcode-features",
  "xdcode-feedback",
  "xdcode-git-utils",
@@ -15479,12 +15729,12 @@ dependencies = [
  "xdcode-utils-path-uri",
  "xdcode-utils-sandbox-summary",
  "xdcode-worktree",
- "zstd",
+ "zstd 0.13.3",
 ]
 
 [[package]]
 name = "xdcode-exec-server"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -15497,6 +15747,7 @@ dependencies = [
  "futures",
  "http 1.4.0",
  "libc",
+ "notify",
  "opentelemetry",
  "opentelemetry_sdk",
  "pretty_assertions",
@@ -15519,7 +15770,6 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
- "which 8.0.0",
  "windows-sys 0.61.2",
  "wiremock",
  "xdcode-api",
@@ -15555,8 +15805,52 @@ dependencies = [
 ]
 
 [[package]]
+name = "xdcode-exec-server-cli"
+version = "0.172.0"
+dependencies = [
+ "anyhow",
+ "assert_matches",
+ "chrono",
+ "clap",
+ "futures",
+ "http 1.4.0",
+ "insta",
+ "jsonwebtoken",
+ "pretty_assertions",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tikv-jemallocator",
+ "tokio",
+ "toml 0.9.11+spec-1.1.0",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "wiremock",
+ "xdcode-api",
+ "xdcode-app-server",
+ "xdcode-arg0",
+ "xdcode-aws-auth",
+ "xdcode-build-info",
+ "xdcode-cloud-config",
+ "xdcode-config",
+ "xdcode-core",
+ "xdcode-exec-server",
+ "xdcode-http-client",
+ "xdcode-login",
+ "xdcode-model-provider",
+ "xdcode-protocol",
+ "xdcode-sandboxing",
+ "xdcode-utils-absolute-path",
+ "xdcode-utils-cargo-bin",
+ "xdcode-utils-cli",
+ "xdcode-utils-process",
+ "xdcode-websocket-auth",
+]
+
+[[package]]
 name = "xdcode-exec-server-protocol"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "base64 0.22.1",
  "pretty_assertions",
@@ -15574,7 +15868,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-exec-server-test-support"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "anyhow",
  "futures",
@@ -15589,9 +15883,10 @@ dependencies = [
 
 [[package]]
 name = "xdcode-execpolicy"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "anyhow",
+ "caseless",
  "clap",
  "multimap",
  "pretty_assertions",
@@ -15602,12 +15897,13 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "unicode-normalization",
  "xdcode-utils-absolute-path",
 ]
 
 [[package]]
 name = "xdcode-experimental-api-macros"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -15616,7 +15912,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-extension-api"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "futures",
  "pretty_assertions",
@@ -15639,7 +15935,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-extension-items"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "pretty_assertions",
  "schemars 0.8.22",
@@ -15651,7 +15947,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-external-agent-migration"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "chrono",
  "linkify",
@@ -15682,7 +15978,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-features"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "pretty_assertions",
  "schemars 0.8.22",
@@ -15696,7 +15992,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-feedback"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -15724,7 +16020,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-file-search"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -15740,7 +16036,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-file-system"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "bytes",
  "futures",
@@ -15754,7 +16050,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-file-watcher"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "notify",
  "pretty_assertions",
@@ -15765,20 +16061,23 @@ dependencies = [
 
 [[package]]
 name = "xdcode-git-attribution"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "serde_json",
  "tokio",
  "wiremock",
  "xdcode-backend-client",
  "xdcode-extension-api",
+ "xdcode-features",
  "xdcode-http-client",
  "xdcode-login",
+ "xdcode-model-provider",
+ "xdcode-runtime-agent-instance",
 ]
 
 [[package]]
 name = "xdcode-git-utils"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -15806,7 +16105,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-goal-extension"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -15831,7 +16130,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-guardian-context"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "pretty_assertions",
  "serde",
@@ -15840,17 +16139,19 @@ dependencies = [
  "xdcode-history",
  "xdcode-protocol",
  "xdcode-protocol-test-support",
+ "xdcode-utils-output-truncation",
 ]
 
 [[package]]
 name = "xdcode-guardian-reviewer"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "anyhow",
  "opentelemetry",
  "opentelemetry_sdk",
  "pretty_assertions",
  "rand 0.9.3",
+ "rmcp",
  "serde",
  "serde_json",
  "test-case",
@@ -15858,20 +16159,32 @@ dependencies = [
  "tokio-util",
  "tracing",
  "xdcode-analytics",
+ "xdcode-context-fragments",
  "xdcode-extension-api",
+ "xdcode-features",
  "xdcode-feedback",
+ "xdcode-file-system",
  "xdcode-guardian-context",
+ "xdcode-history",
  "xdcode-mcp",
+ "xdcode-models-manager",
  "xdcode-otel",
  "xdcode-prompts",
  "xdcode-protocol",
+ "xdcode-protocol-test-support",
+ "xdcode-rmcp-client",
+ "xdcode-shell-command",
+ "xdcode-utils-output-truncation",
+ "xdcode-utils-path-uri",
+ "xdcode-utils-string",
 ]
 
 [[package]]
 name = "xdcode-guardian-v2"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "core_test_support",
  "dirs",
  "http 1.4.0",
@@ -15879,11 +16192,13 @@ dependencies = [
  "pretty_assertions",
  "serde_json",
  "tempfile",
+ "test-case",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
  "uuid",
  "wiremock",
+ "xdcode-agent-identity",
  "xdcode-analytics",
  "xdcode-api",
  "xdcode-config",
@@ -15901,23 +16216,56 @@ dependencies = [
  "xdcode-prompts",
  "xdcode-protocol",
  "xdcode-protocol-test-support",
+ "xdcode-runtime-agent-instance",
  "xdcode-utils-cargo-bin",
  "xdcode-websocket-client",
- "zstd",
+ "zstd 0.13.3",
 ]
 
 [[package]]
 name = "xdcode-guardian-v3"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
+ "anyhow",
+ "chrono",
+ "core_test_support",
+ "futures",
+ "http 1.4.0",
+ "insta",
+ "pretty_assertions",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "test-case",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
+ "xdcode-analytics",
+ "xdcode-api",
+ "xdcode-attachment-store",
+ "xdcode-context-fragments",
+ "xdcode-core",
+ "xdcode-extension-api",
+ "xdcode-features",
+ "xdcode-guardian-context",
+ "xdcode-guardian-reviewer",
+ "xdcode-history",
+ "xdcode-http-client",
+ "xdcode-login",
  "xdcode-message-board",
+ "xdcode-model-provider",
  "xdcode-protocol",
  "xdcode-state",
+ "xdcode-thread-store",
+ "xdcode-tools",
+ "xdcode-utils-string",
+ "xdcode-websocket-client",
 ]
 
 [[package]]
 name = "xdcode-history"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "anyhow",
  "pretty_assertions",
@@ -15925,17 +16273,21 @@ dependencies = [
  "serde",
  "serde_json",
  "xdcode-protocol",
+ "xdcode-protocol-test-support",
  "xdcode-utils-absolute-path",
+ "xdcode-utils-model-facing-id",
 ]
 
 [[package]]
 name = "xdcode-history-notes-extension"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "core_test_support",
  "http 1.4.0",
  "insta",
  "pretty_assertions",
+ "schemars 0.8.22",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",
@@ -15956,7 +16308,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-home"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "pretty_assertions",
  "tempfile",
@@ -15968,7 +16320,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-hooks"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -15980,6 +16332,7 @@ dependencies = [
  "schemars 0.8.22",
  "serde",
  "serde_json",
+ "serde_path_to_error",
  "sha2 0.10.9",
  "tempfile",
  "tokio",
@@ -15997,7 +16350,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-http-client"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "bytes",
  "curl",
@@ -16032,12 +16385,25 @@ dependencies = [
  "windows-sys 0.61.2",
  "xdcode-utils-cargo-bin",
  "xdcode-utils-rustls-provider",
- "zstd",
+ "zstd 0.13.3",
+]
+
+[[package]]
+name = "xdcode-http-headers-helper"
+version = "0.172.0"
+dependencies = [
+ "anyhow",
+ "http 1.4.0",
+ "serde",
+ "serde_json",
+ "tokio",
+ "xdcode-utils-process",
+ "xdcode-utils-pty",
 ]
 
 [[package]]
 name = "xdcode-image-generation-extension"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "base64 0.22.1",
  "http 1.4.0",
@@ -16069,7 +16435,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-install-context"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "pretty_assertions",
  "semver",
@@ -16082,7 +16448,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-keyring-store"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "keyring",
  "pretty_assertions",
@@ -16093,18 +16459,25 @@ dependencies = [
 
 [[package]]
 name = "xdcode-linux-sandbox"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
+ "async-lock",
  "clap",
+ "etherparse",
+ "hickory-proto 0.26.3",
  "ignore",
+ "indexmap 2.14.0",
  "landlock",
  "libc",
  "pretty_assertions",
+ "rand 0.9.3",
  "rustix 1.1.4",
  "seccompiler",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "smoltcp",
+ "socks5-protocol",
  "tempfile",
  "test-case",
  "tokio",
@@ -16122,7 +16495,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-lmstudio"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "serde_json",
  "tokio",
@@ -16136,7 +16509,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-login"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -16145,6 +16518,7 @@ dependencies = [
  "http 1.4.0",
  "jsonwebtoken",
  "keyring",
+ "oauth2",
  "once_cell",
  "opentelemetry_sdk",
  "os_info",
@@ -16164,6 +16538,7 @@ dependencies = [
  "url",
  "urlencoding",
  "webbrowser",
+ "windows-sys 0.61.2",
  "wiremock",
  "xdcode-agent-identity",
  "xdcode-config",
@@ -16175,6 +16550,7 @@ dependencies = [
  "xdcode-secrets",
  "xdcode-terminal-detection",
  "xdcode-utils-cargo-bin",
+ "xdcode-utils-path",
  "xdcode-utils-process",
  "xdcode-utils-template",
  "xdcode-workload-identity",
@@ -16182,13 +16558,15 @@ dependencies = [
 
 [[package]]
 name = "xdcode-mcp"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "anyhow",
  "arc-swap",
  "assert_matches",
  "async-channel",
+ "base64 0.22.1",
  "futures",
+ "http 1.4.0",
  "insta",
  "lru",
  "pretty_assertions",
@@ -16204,6 +16582,7 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
+ "wiremock",
  "xdcode-api",
  "xdcode-async-utils",
  "xdcode-config",
@@ -16211,6 +16590,8 @@ dependencies = [
  "xdcode-diagnostics",
  "xdcode-exec-server",
  "xdcode-exec-server-test-support",
+ "xdcode-features",
+ "xdcode-http-client",
  "xdcode-login",
  "xdcode-model-provider",
  "xdcode-network-proxy",
@@ -16218,6 +16599,7 @@ dependencies = [
  "xdcode-plugin",
  "xdcode-protocol",
  "xdcode-rmcp-client",
+ "xdcode-runtime-agent-instance",
  "xdcode-utils-absolute-path",
  "xdcode-utils-cargo-bin",
  "xdcode-utils-path-uri",
@@ -16227,7 +16609,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-mcp-extension"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -16260,7 +16642,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-memories-extension"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "pretty_assertions",
  "schemars 0.8.22",
@@ -16282,7 +16664,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-memories-read"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "pretty_assertions",
  "xdcode-protocol",
@@ -16292,9 +16674,10 @@ dependencies = [
 
 [[package]]
 name = "xdcode-memories-write"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "chrono",
  "core_test_support",
  "futures",
@@ -16319,6 +16702,7 @@ dependencies = [
  "xdcode-protocol",
  "xdcode-rollout",
  "xdcode-rollout-trace",
+ "xdcode-runtime-agent-instance",
  "xdcode-secrets",
  "xdcode-state",
  "xdcode-terminal-detection",
@@ -16329,7 +16713,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-mermaid"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "insta",
  "pretty_assertions",
@@ -16338,7 +16722,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-message-board"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "base64 0.22.1",
  "caseless",
@@ -16363,7 +16747,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-message-board-mcp"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -16391,7 +16775,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-message-history"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "memchr",
  "pretty_assertions",
@@ -16405,12 +16789,15 @@ dependencies = [
 
 [[package]]
 name = "xdcode-model-provider"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
+ "anyhow",
  "base64 0.22.1",
  "chrono",
  "http 1.4.0",
  "pretty_assertions",
+ "rcgen",
+ "rustls",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -16422,6 +16809,7 @@ dependencies = [
  "xdcode-agent-identity",
  "xdcode-api",
  "xdcode-aws-auth",
+ "xdcode-features",
  "xdcode-feedback",
  "xdcode-http-client",
  "xdcode-keyring-store",
@@ -16431,15 +16819,17 @@ dependencies = [
  "xdcode-otel",
  "xdcode-protocol",
  "xdcode-response-debug-context",
+ "xdcode-runtime-agent-instance",
  "xdcode-secrets",
  "xdcode-utils-cargo-bin",
  "xdcode-utils-process",
  "xdcode-utils-redacted-string",
+ "xdcode-utils-rustls-provider",
 ]
 
 [[package]]
 name = "xdcode-model-provider-info"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "http 1.4.0",
  "maplit",
@@ -16458,7 +16848,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-models-manager"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "chrono",
  "pretty_assertions",
@@ -16477,7 +16867,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-multi-env-copy-file"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "anyhow",
  "core_test_support",
@@ -16503,10 +16893,9 @@ dependencies = [
 
 [[package]]
 name = "xdcode-mxc-sandbox"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "anyhow",
- "flatbuffers",
  "mxc-sdk",
  "pretty_assertions",
  "serde",
@@ -16524,7 +16913,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-network-proxy"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "anyhow",
  "aws-credential-types",
@@ -16575,7 +16964,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-ollama"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "assert_matches",
  "async-stream",
@@ -16595,7 +16984,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-otel"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "bytes",
  "chrono",
@@ -16611,28 +17000,31 @@ dependencies = [
  "opentelemetry_sdk",
  "os_info",
  "pretty_assertions",
+ "rcgen",
  "reqwest 0.12.28",
  "seccompiler",
  "serde",
  "serde_json",
  "strum_macros 0.28.0",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
- "tokio-tungstenite",
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
  "xdcode-api",
  "xdcode-http-client",
+ "xdcode-http-headers-helper",
  "xdcode-protocol",
  "xdcode-utils-absolute-path",
+ "xdcode-utils-process",
  "xdcode-utils-stream-parser",
  "xdcode-utils-string",
 ]
 
 [[package]]
 name = "xdcode-otel-trace-websocket"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -16643,7 +17035,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-plugin"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "pretty_assertions",
  "serde_json",
@@ -16657,8 +17049,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "xdcode-plugin-host"
+version = "0.172.0"
+dependencies = [
+ "futures",
+ "libc",
+ "pretty_assertions",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "xdcode-utils-cargo-bin",
+ "xdcode-utils-process",
+ "xdcode-utils-pty",
+]
+
+[[package]]
 name = "xdcode-process-hardening"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "libc",
  "pretty_assertions",
@@ -16666,11 +17075,12 @@ dependencies = [
 
 [[package]]
 name = "xdcode-prompts"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "anyhow",
  "pretty_assertions",
  "tracing",
+ "whoami 1.6.1",
  "xdcode-collaboration-mode-templates",
  "xdcode-context-fragments",
  "xdcode-execpolicy",
@@ -16684,7 +17094,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-protocol"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "anyhow",
  "chardetng",
@@ -16700,7 +17110,7 @@ dependencies = [
  "landlock",
  "libc",
  "pretty_assertions",
- "quick-xml 0.41.0",
+ "quick-xml",
  "schemars 0.8.22",
  "seccompiler",
  "serde",
@@ -16723,6 +17133,7 @@ dependencies = [
  "xdcode-network-proxy",
  "xdcode-utils-absolute-path",
  "xdcode-utils-image",
+ "xdcode-utils-model-facing-id",
  "xdcode-utils-path-uri",
  "xdcode-utils-redacted-string",
  "xdcode-utils-string",
@@ -16730,14 +17141,15 @@ dependencies = [
 
 [[package]]
 name = "xdcode-protocol-test-support"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
+ "uuid",
  "xdcode-protocol",
 ]
 
 [[package]]
 name = "xdcode-queue-extension"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "anyhow",
  "core_test_support",
@@ -16753,12 +17165,13 @@ dependencies = [
  "xdcode-protocol",
  "xdcode-state",
  "xdcode-thread-store",
+ "xdcode-user-input",
  "xdcode-utils-absolute-path",
 ]
 
 [[package]]
 name = "xdcode-realtime-webrtc"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "anyhow",
  "ctor 0.6.3",
@@ -16777,7 +17190,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-response-debug-context"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "base64 0.22.1",
  "http 1.4.0",
@@ -16788,7 +17201,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-responses-api-proxy"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -16812,7 +17225,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-rmcp-client"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -16851,6 +17264,7 @@ dependencies = [
  "xdcode-config",
  "xdcode-exec-server",
  "xdcode-http-client",
+ "xdcode-http-headers-helper",
  "xdcode-keyring-store",
  "xdcode-network-proxy",
  "xdcode-otel",
@@ -16864,7 +17278,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-rollout"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -16888,16 +17302,17 @@ dependencies = [
  "xdcode-protocol",
  "xdcode-state",
  "xdcode-utils-absolute-path",
+ "xdcode-utils-cargo-bin",
  "xdcode-utils-output-truncation",
  "xdcode-utils-path",
  "xdcode-utils-process",
  "xdcode-utils-string",
- "zstd",
+ "zstd 0.13.3",
 ]
 
 [[package]]
 name = "xdcode-rollout-trace"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "anyhow",
  "http 1.4.0",
@@ -16910,14 +17325,17 @@ dependencies = [
  "uuid",
  "xdcode-code-mode",
  "xdcode-protocol",
+ "zstd 0.13.3",
 ]
 
 [[package]]
 name = "xdcode-runtime-agent-instance"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "base64 0.22.1",
+ "bytes",
  "ed25519-dalek",
+ "futures",
  "http 1.4.0",
  "pretty_assertions",
  "rand 0.9.3",
@@ -16934,13 +17352,14 @@ dependencies = [
  "xdcode-features",
  "xdcode-http-client",
  "xdcode-login",
+ "xdcode-utils-absolute-path",
  "xdcode-utils-redacted-string",
  "zeroize",
 ]
 
 [[package]]
 name = "xdcode-sandboxing"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "anyhow",
  "dunce",
@@ -16951,7 +17370,6 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
- "url",
  "which 8.0.0",
  "xdcode-mxc-sandbox",
  "xdcode-network-proxy",
@@ -16968,7 +17386,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-secrets"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "age",
  "anyhow",
@@ -16989,7 +17407,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-shell-command"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -17012,7 +17430,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-skills"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "include_dir",
  "pretty_assertions",
@@ -17030,7 +17448,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-skills-extension"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "assert_matches",
  "blake3",
@@ -17070,7 +17488,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-state"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -17078,6 +17496,7 @@ dependencies = [
  "libsqlite3-sys",
  "log",
  "pretty_assertions",
+ "rand 0.9.3",
  "scopeguard",
  "serde",
  "serde_json",
@@ -17085,6 +17504,7 @@ dependencies = [
  "sqlx-macros",
  "sqlx-sqlite",
  "strum 0.27.2",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -17094,44 +17514,36 @@ dependencies = [
  "xdcode-history",
  "xdcode-protocol",
  "xdcode-utils-absolute-path",
-]
-
-[[package]]
-name = "xdcode-stdio-to-uds"
-version = "0.167.0"
-dependencies = [
- "anyhow",
- "pretty_assertions",
- "tempfile",
- "tokio",
- "xdcode-uds",
- "xdcode-utils-cargo-bin",
+ "xdcode-utils-model-facing-id",
 ]
 
 [[package]]
 name = "xdcode-tcp-tunnel"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "anyhow",
  "bytes",
  "clap",
+ "h2",
  "h3",
  "h3-quinn",
  "http 1.4.0",
+ "hyper-rustls",
+ "hyper-util",
  "pretty_assertions",
  "quinn",
- "rand 0.9.3",
  "rcgen",
  "rustls",
  "rustls-native-certs",
- "serde_json",
  "tokio",
+ "tokio-rustls",
+ "tower-service",
  "url",
 ]
 
 [[package]]
 name = "xdcode-terminal-detection"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "pretty_assertions",
  "tracing",
@@ -17139,7 +17551,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-test-binary-support"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "tempfile",
  "xdcode-arg0",
@@ -17147,7 +17559,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-thread-manager-sample"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -17158,8 +17570,9 @@ dependencies = [
 
 [[package]]
 name = "xdcode-thread-store"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
+ "caseless",
  "chrono",
  "futures",
  "pretty_assertions",
@@ -17179,17 +17592,18 @@ dependencies = [
  "xdcode-install-context",
  "xdcode-otel",
  "xdcode-protocol",
+ "xdcode-protocol-test-support",
  "xdcode-rollout",
  "xdcode-state",
  "xdcode-utils-absolute-path",
  "xdcode-utils-path",
  "xdcode-utils-path-uri",
- "zstd",
+ "zstd 0.13.3",
 ]
 
 [[package]]
 name = "xdcode-tools"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "bitflags 2.13.1",
  "jsonptr",
@@ -17215,7 +17629,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-tui"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "anyhow",
  "app_test_support",
@@ -17226,6 +17640,7 @@ dependencies = [
  "chrono",
  "clap",
  "color-eyre",
+ "core-foundation 0.10.1",
  "core_test_support",
  "crossterm",
  "derive_more 2.1.1",
@@ -17239,6 +17654,7 @@ dependencies = [
  "itertools 0.14.0",
  "lazy_static",
  "libc",
+ "objc2",
  "objc2-app-kit",
  "objc2-foundation",
  "opentelemetry_sdk",
@@ -17272,19 +17688,24 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "ts-rs",
  "two-face",
+ "unicode-bidi",
+ "unicode-linebreak",
  "unicode-segmentation",
  "unicode-width 0.2.1",
  "url",
  "urlencoding",
  "uuid",
  "vt100",
+ "vtparse",
  "webbrowser",
  "which 8.0.0",
  "windows-sys 0.61.2",
  "winsplit",
  "wiremock",
  "xdcode-ansi-escape",
+ "xdcode-api",
  "xdcode-app-server-client",
  "xdcode-app-server-daemon",
  "xdcode-app-server-protocol",
@@ -17313,15 +17734,18 @@ dependencies = [
  "xdcode-models-manager",
  "xdcode-otel",
  "xdcode-plugin",
+ "xdcode-prompts",
  "xdcode-protocol",
  "xdcode-protocol-test-support",
  "xdcode-realtime-webrtc",
  "xdcode-rollout",
  "xdcode-sandboxing",
  "xdcode-shell-command",
+ "xdcode-skills",
  "xdcode-state",
  "xdcode-terminal-detection",
  "xdcode-uds",
+ "xdcode-user-input",
  "xdcode-utils-absolute-path",
  "xdcode-utils-approval-presets",
  "xdcode-utils-cargo-bin",
@@ -17343,7 +17767,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-uds"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "async-io",
  "libc",
@@ -17356,8 +17780,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "xdcode-user-input"
+version = "0.172.0"
+dependencies = [
+ "anyhow",
+ "derive_more 2.1.1",
+ "pretty_assertions",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "xdcode-protocol",
+ "xdcode-utils-image",
+]
+
+[[package]]
 name = "xdcode-user-verification"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "base64 0.22.1",
  "block2",
@@ -17378,7 +17816,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-utils-absolute-path"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "dirs",
  "dunce",
@@ -17392,14 +17830,14 @@ dependencies = [
 
 [[package]]
 name = "xdcode-utils-approval-presets"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "xdcode-protocol",
 ]
 
 [[package]]
 name = "xdcode-utils-audio"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "base64 0.22.1",
  "pretty_assertions",
@@ -17413,7 +17851,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-utils-cache"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "lru",
  "sha1 0.10.6",
@@ -17422,7 +17860,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-utils-cargo-bin"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "assert_cmd",
  "runfiles",
@@ -17431,7 +17869,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-utils-cli"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "clap",
  "pretty_assertions",
@@ -17443,22 +17881,22 @@ dependencies = [
 
 [[package]]
 name = "xdcode-utils-critical-path"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "pretty_assertions",
 ]
 
 [[package]]
 name = "xdcode-utils-elapsed"
-version = "0.167.0"
+version = "0.172.0"
 
 [[package]]
 name = "xdcode-utils-fuzzy-match"
-version = "0.167.0"
+version = "0.172.0"
 
 [[package]]
 name = "xdcode-utils-git-discovery"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "futures",
  "pretty_assertions",
@@ -17470,8 +17908,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "xdcode-utils-head-tail-buffer"
+version = "0.172.0"
+dependencies = [
+ "pretty_assertions",
+]
+
+[[package]]
 name = "xdcode-utils-home-dir"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "dirs",
  "pretty_assertions",
@@ -17481,12 +17926,13 @@ dependencies = [
 
 [[package]]
 name = "xdcode-utils-image"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "base64 0.22.1",
  "divan",
  "image",
  "mime_guess",
+ "moxcms",
  "png",
  "thiserror 2.0.18",
  "tokio",
@@ -17495,7 +17941,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-utils-json-to-toml"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "pretty_assertions",
  "serde_json",
@@ -17503,8 +17949,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "xdcode-utils-model-facing-id"
+version = "0.172.0"
+dependencies = [
+ "blake3",
+ "pretty_assertions",
+ "schemars 0.8.22",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
 name = "xdcode-utils-oss"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "xdcode-core",
  "xdcode-lmstudio",
@@ -17514,7 +17973,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-utils-output-truncation"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "pretty_assertions",
  "serde_json",
@@ -17524,7 +17983,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-utils-path"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "dunce",
  "pretty_assertions",
@@ -17535,7 +17994,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-utils-path-uri"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "base64 0.22.1",
  "pretty_assertions",
@@ -17551,7 +18010,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-utils-plugins"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -17565,7 +18024,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-utils-process"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "pretty_assertions",
  "tokio",
@@ -17573,7 +18032,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-utils-pty"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "anyhow",
  "ctor 0.6.3",
@@ -17581,6 +18040,7 @@ dependencies = [
  "lazy_static",
  "libc",
  "log",
+ "nix 0.28.0",
  "portable-pty",
  "pretty_assertions",
  "shared_library",
@@ -17592,7 +18052,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-utils-readiness"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "assert_matches",
  "thiserror 2.0.18",
@@ -17602,7 +18062,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-utils-redacted-string"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "schemars 0.8.22",
  "serde",
@@ -17610,14 +18070,14 @@ dependencies = [
 
 [[package]]
 name = "xdcode-utils-rustls-provider"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "rustls",
 ]
 
 [[package]]
 name = "xdcode-utils-sandbox-summary"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "pretty_assertions",
  "xdcode-protocol",
@@ -17627,7 +18087,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-utils-sleep-inhibitor"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "core-foundation 0.9.4",
  "libc",
@@ -17637,14 +18097,14 @@ dependencies = [
 
 [[package]]
 name = "xdcode-utils-stream-parser"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "pretty_assertions",
 ]
 
 [[package]]
 name = "xdcode-utils-string"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "pretty_assertions",
  "regex-lite",
@@ -17654,14 +18114,14 @@ dependencies = [
 
 [[package]]
 name = "xdcode-utils-template"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "pretty_assertions",
 ]
 
 [[package]]
 name = "xdcode-v8-poc"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "pretty_assertions",
  "v8",
@@ -17669,7 +18129,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-voice-host"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "anyhow",
  "cpal",
@@ -17696,12 +18156,14 @@ dependencies = [
 
 [[package]]
 name = "xdcode-web-search-extension"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "http 1.4.0",
  "pretty_assertions",
  "schemars 0.8.22",
  "serde_json",
+ "tempfile",
+ "tokio",
  "url",
  "xdcode-api",
  "xdcode-core",
@@ -17718,7 +18180,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-websocket-auth"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -17737,7 +18199,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-websocket-client"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "futures",
  "pretty_assertions",
@@ -17753,7 +18215,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-windows-sandbox"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -17761,6 +18223,7 @@ dependencies = [
  "dirs-next",
  "dunce",
  "glob",
+ "ignore",
  "pretty_assertions",
  "rand 0.8.6",
  "serde",
@@ -17783,7 +18246,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-windows-sandbox-service"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "anyhow",
  "pretty_assertions",
@@ -17801,21 +18264,28 @@ dependencies = [
 
 [[package]]
 name = "xdcode-windows-sandbox-test-support"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "dirs",
 ]
 
 [[package]]
 name = "xdcode-workload-identity"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
+ "base64 0.22.1",
+ "hyper",
+ "hyper-util",
  "pretty_assertions",
+ "prost",
  "serde",
  "serde_json",
+ "spiffe",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tonic",
+ "tonic-prost",
  "url",
  "wiremock",
  "xdcode-http-client",
@@ -17823,7 +18293,7 @@ dependencies = [
 
 [[package]]
 name = "xdcode-worktree"
-version = "0.167.0"
+version = "0.172.0"
 dependencies = [
  "anyhow",
  "dunce",
@@ -18053,13 +18523,13 @@ dependencies = [
 
 [[package]]
 name = "zip"
-version = "9.0.0"
+version = "9.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "711e8c9646791c49b7eb799a19c4ae70a9b8372ddc6a1fa4778defd1e2aa5d5e"
+checksum = "6e04976da629d3b04204ba8105b396a193af8ad2583b2c79bfb3ab8af580a11e"
 dependencies = [
  "aes 0.9.3",
  "bzip2",
- "constant_time_eq 0.4.2",
+ "constant_time_eq 0.6.1",
  "crc32fast",
  "deflate64",
  "flate2",
@@ -18068,13 +18538,14 @@ dependencies = [
  "indexmap 2.14.0",
  "lzma-rust2",
  "memchr",
+ "nix 0.31.3",
  "pbkdf2 0.13.0",
  "sha1 0.11.0",
  "time",
  "typed-path",
  "zeroize",
  "zopfli",
- "zstd",
+ "zstd 0.14.3",
 ]
 
 [[package]]
@@ -18126,7 +18597,16 @@ version = "0.13.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e91ee311a569c327171651566e07972200e76fcfe2242a4fa446149a3881c08a"
 dependencies = [
- "zstd-safe",
+ "zstd-safe 7.2.4",
+]
+
+[[package]]
+name = "zstd"
+version = "0.14.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "db3ae9bf90af6e40197bef767eeefc46ad6397420fe873830bd85e5fbbfb3c70"
+dependencies = [
+ "zstd-safe 8.2.0",
 ]
 
 [[package]]
@@ -18139,10 +18619,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "zstd-sys"
-version = "2.0.16+zstd.1.5.7"
+name = "zstd-safe"
+version = "8.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "91e19ebc2adc8f83e43039e79776e3fda8ca919132d68a1fed6a5faca2683748"
+checksum = "ded520f16b29e1a9b771c722221b2b0a0398c2316d9bb3c42b458a5414d7434b"
+dependencies = [
+ "zstd-sys",
+]
+
+[[package]]
+name = "zstd-sys"
+version = "2.1.2+zstd.1.5.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "481ada9c543b2323cbb7bbdbb5249177fbf0188ed959ed2c15e4b22421c84ed3"
 dependencies = [
  "cc",
  "pkg-config",

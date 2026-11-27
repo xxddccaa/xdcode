@@ -1372,7 +1372,11 @@ async fn assert_terminal_failure(
 }
 
 #[test_case::test_case("flex_unavailable", 429, XdcodeErrorInfo::FlexUnavailable, "Flex capacity unavailable."; "flex")]
+#[test_case::test_case("api_key_spend_limit_exceeded", 429, XdcodeErrorInfo::ApiKeySpendLimitExceeded, "Your API key has reached its spend limit."; "api_key_spend_limit_exceeded")]
+#[test_case::test_case("project_spend_limit_exceeded", 429, XdcodeErrorInfo::ProjectSpendLimitExceeded, "Your API project has reached its spend limit."; "project_spend_limit_exceeded")]
+#[test_case::test_case("organization_spend_limit_exceeded", 429, XdcodeErrorInfo::OrganizationSpendLimitExceeded, "Your API organization has reached its spend limit."; "organization_spend_limit_exceeded")]
 #[test_case::test_case("model_not_found", 404, XdcodeErrorInfo::ModelNotFound, "Access to this deployment ended."; "model")]
+#[test_case::test_case("inference_hook_denied", 403, XdcodeErrorInfo::InferenceHookDenied, "Blocked by the workspace hook."; "inference_hook_denied")]
 #[tokio::test(flavor = "current_thread")]
 async fn http_and_sse_provider_errors_are_terminal(
     code: &str,
@@ -1383,7 +1387,7 @@ async fn http_and_sse_provider_errors_are_terminal(
     skip_if_no_network!(Ok(()));
 
     let error = json!({
-        "code": code, "message": message
+        "code": code, "message": message, "headers": {"retry-after": "300"},
     });
     for response in [
         ResponseTemplate::new(status)
@@ -1392,7 +1396,9 @@ async fn http_and_sse_provider_errors_are_terminal(
         responses::sse_response(responses::sse(vec![
             json!({"type": "error", "error": error}),
         ])),
-        responses::sse_response(responses::sse_failed("failed", code, message)),
+        responses::sse_response(responses::sse(vec![
+            json!({"type": "response.failed", "response": {"error": error}}),
+        ])),
     ] {
         let server = responses::start_mock_server().await;
         let response_mock = responses::mount_response_once(&server, response).await;
@@ -1429,7 +1435,11 @@ async fn http_and_sse_provider_errors_are_terminal(
 }
 
 #[test_case::test_case("flex_unavailable", 429, XdcodeErrorInfo::FlexUnavailable, "Flex capacity unavailable."; "flex")]
+#[test_case::test_case("api_key_spend_limit_exceeded", 429, XdcodeErrorInfo::ApiKeySpendLimitExceeded, "Your API key has reached its spend limit."; "api_key_spend_limit_exceeded")]
+#[test_case::test_case("project_spend_limit_exceeded", 429, XdcodeErrorInfo::ProjectSpendLimitExceeded, "Your API project has reached its spend limit."; "project_spend_limit_exceeded")]
+#[test_case::test_case("organization_spend_limit_exceeded", 429, XdcodeErrorInfo::OrganizationSpendLimitExceeded, "Your API organization has reached its spend limit."; "organization_spend_limit_exceeded")]
 #[test_case::test_case("model_not_found", 404, XdcodeErrorInfo::ModelNotFound, "Access to this deployment ended."; "model")]
+#[test_case::test_case("inference_hook_denied", 403, XdcodeErrorInfo::InferenceHookDenied, "Blocked by the workspace hook."; "inference_hook_denied")]
 #[tokio::test(flavor = "current_thread")]
 async fn websocket_provider_errors_are_terminal(
     code: &str,
@@ -1440,11 +1450,11 @@ async fn websocket_provider_errors_are_terminal(
     skip_if_no_network!(Ok(()));
 
     let error = json!({
-        "code": code, "message": message
+        "code": code, "message": message, "headers": {"retry-after": "300"},
     });
     for event in [
         json!({"type": "error", "status": status, "headers": {"retry-after": "300"}, "error": error}),
-        json!({"type": "error", "error": {"code": code, "message": message, "headers": {"retry-after": "300"}}}),
+        json!({"type": "error", "error": error}),
         json!({"type": "response.failed", "response": {"error": error}}),
     ] {
         let server = responses::start_websocket_server(vec![vec![
@@ -1911,8 +1921,14 @@ async fn websocket_rate_limit_without_retry_after_can_be_cancelled() -> Result<(
 
 /// When an overload stops giving advice, it is terminal even if the retry limit
 /// has been reached. The transport must not switch after that terminal error.
+#[test_case::test_case("policy_capacity_unavailable", "server_is_overloaded", XdcodeErrorInfo::ServerOverloaded; "prior_policy_failure_stays_on_its_attempt")]
+#[test_case::test_case("server_is_overloaded", "policy_capacity_unavailable", XdcodeErrorInfo::PolicyCapacityUnavailable; "terminal_policy_failure_is_preserved")]
 #[tokio::test(flavor = "current_thread")]
-async fn websocket_overload_retries_only_while_it_has_retry_after() -> Result<()> {
+async fn websocket_overload_retries_only_while_it_has_retry_after(
+    first_code: &str,
+    last_code: &str,
+    expected_error: XdcodeErrorInfo,
+) -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let mut telemetry = RetryTelemetryCapture::install();
@@ -1926,7 +1942,7 @@ async fn websocket_overload_retries_only_while_it_has_retry_after() -> Result<()
                 "type": "error",
                 "status": 503,
                 "error": {
-                    "code": "server_is_overloaded",
+                    "code": first_code,
                     "message": "This model is disabled.",
                     "headers": { "Retry-After": "1" }
                 }
@@ -1945,7 +1961,7 @@ async fn websocket_overload_retries_only_while_it_has_retry_after() -> Result<()
         vec![vec![json!({
             "type": "error",
             "status": 503,
-            "error": {"code": "server_is_overloaded", "message": "This model is disabled."}
+            "error": {"code": last_code, "message": "This model is disabled."}
         })]],
     ])
     .await;
@@ -1979,13 +1995,14 @@ async fn websocket_overload_retries_only_while_it_has_retry_after() -> Result<()
         match wait_for_event(&test.xdcode, |_| true).await {
             EventMsg::Error(error) => {
                 error_events += 1;
-                assert_eq!(
-                    error.xdcode_error_info,
-                    Some(XdcodeErrorInfo::ServerOverloaded)
-                );
+                assert_eq!(error.xdcode_error_info, Some(expected_error.clone()));
                 assert_eq!(
                     error.message,
-                    "Selected model is at capacity. Please try a different model."
+                    if last_code == "policy_capacity_unavailable" {
+                        "Policy-restricted capacity is unavailable. Please try again later."
+                    } else {
+                        "Selected model is at capacity. Please try a different model."
+                    }
                 );
             }
             EventMsg::StreamError(_) => stream_error_events += 1,
@@ -1997,7 +2014,7 @@ async fn websocket_overload_retries_only_while_it_has_retry_after() -> Result<()
             EventMsg::TurnComplete(event) => {
                 assert_eq!(
                     event.error.and_then(|error| error.xdcode_error_info),
-                    Some(XdcodeErrorInfo::ServerOverloaded)
+                    Some(expected_error.clone())
                 );
                 break;
             }

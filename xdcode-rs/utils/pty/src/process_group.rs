@@ -298,12 +298,12 @@ pub fn wait_for_process_group_exit(process_group_id: u32, grace: std::time::Dura
         #[cfg(target_os = "macos")]
         let exists = signal_process_group_with_member_fallback(
             process_group_id,
-            0,
+            /*signal*/ 0,
             signal_process_group_id,
             signal_process_id,
         );
         #[cfg(not(target_os = "macos"))]
-        let exists = signal_process_group_id(process_group_id as libc::pid_t, 0);
+        let exists = signal_process_group_id(process_group_id as libc::pid_t, /*signal*/ 0);
         if matches!(exists, Ok(false)) {
             break;
         }

@@ -38,9 +38,11 @@ use xdcode_app_server_protocol::TurnStatus;
 use xdcode_config::types::AuthCredentialsStoreMode;
 use xdcode_login::AuthKeyringBackendKind;
 use xdcode_login::login_with_api_key;
+use xdcode_models_manager::model_info::model_info_from_slug;
 use xdcode_protocol::model_types::MODEL_SPECIALTY_CYBER;
 use xdcode_protocol::model_types::ModelInfo;
 use xdcode_protocol::model_types::ModelPreset;
+use xdcode_protocol::model_types::ModelVisibility;
 use xdcode_protocol::model_types::ModelsResponse;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -274,6 +276,7 @@ requires_hosted_auth = true
                 limit: Some(100),
                 include_hidden: Some(true),
                 cursor: None,
+                ..Default::default()
             },
         })
         .await?;
@@ -394,6 +397,7 @@ async fn list_models_returns_all_models_with_large_limit() -> Result<()> {
                 limit: Some(100),
                 cursor: None,
                 include_hidden: None,
+                ..Default::default()
             },
         })
         .await?;
@@ -426,6 +430,7 @@ async fn list_models_includes_hidden_models() -> Result<()> {
                 limit: Some(100),
                 cursor: None,
                 include_hidden: Some(true),
+                ..Default::default()
             },
         })
         .await?;
@@ -446,9 +451,30 @@ async fn list_models_uses_remote_catalog_as_source_of_truth(
     let remote_models = [
         (
             json!("2030-01-01T00:00:00Z"),
-            json!({ "cyber": ["standard", "daybreak_blue"] }),
+            json!({
+                "cyber": ["standard", "daybreak_blue"],
+                "daybreak_availability": "available",
+            }),
         ),
-        (json!(null), json!({ "cyber": ["daybreak_red"] })),
+        (
+            json!(null),
+            json!({
+                "cyber": ["daybreak_red"],
+                "daybreak_availability": "available",
+            }),
+        ),
+        (
+            json!(null),
+            json!({ "cyber": [], "daybreak_availability": "unavailable_for_model" }),
+        ),
+        (
+            json!(null),
+            json!({ "cyber": ["standard"], "daybreak_availability": "future_status" }),
+        ),
+        (
+            json!(null),
+            json!({ "cyber": ["standard"], "daybreak_availability": "enrollment_required" }),
+        ),
         (json!(null), json!({ "cyber": [] })),
         (json!(null), json!(null)),
     ]
@@ -495,7 +521,8 @@ async fn list_models_uses_remote_catalog_as_source_of_truth(
         .and(header("authorization", format!("Bearer {bearer_token}")))
         .respond_with(
             ResponseTemplate::new(/*s*/ 200).set_body_json(ModelsResponse {
-                models: remote_models.clone(),
+                // This custom provider expects priority ordering even if the array is unsorted.
+                models: remote_models.iter().rev().cloned().collect(),
             }),
         )
         .expect(1..)
@@ -549,6 +576,7 @@ model_catalog_url = "{server_uri}/v1/models"
             limit: Some(100),
             cursor: None,
             include_hidden: None,
+            ..Default::default()
         })
         .await?;
     let response = mcp
@@ -570,9 +598,18 @@ model_catalog_url = "{server_uri}/v1/models"
             .map(|model| model["availableAccessPrograms"].clone())
             .collect::<Vec<_>>(),
         vec![
-            json!({ "cyber": ["standard", "daybreakBlue"] }),
-            json!({ "cyber": ["daybreakRed"] }),
-            json!({ "cyber": [] }),
+            json!({
+                "cyber": ["standard", "daybreakBlue"],
+                "daybreakAvailability": "available",
+            }),
+            json!({
+                "cyber": ["daybreakRed"],
+                "daybreakAvailability": "available",
+            }),
+            json!({ "cyber": [], "daybreakAvailability": "unavailableForModel" }),
+            json!({ "cyber": ["standard"], "daybreakAvailability": "default" }),
+            json!({ "cyber": ["standard"], "daybreakAvailability": "enrollmentRequired" }),
+            json!({ "cyber": [], "daybreakAvailability": "default" }),
             json!(null),
         ]
     );
@@ -608,6 +645,60 @@ model_catalog_url = "{server_uri}/v1/models"
 }
 
 #[tokio::test]
+async fn list_models_uses_display_order_and_marks_the_selection_default() -> Result<()> {
+    let home = TempDir::new()?;
+    let backend = MockServer::start().await;
+    let models = [("z-model", 3), ("a-model", 2), ("recommended", 1)]
+        .into_iter()
+        .map(|(slug, priority)| ModelInfo {
+            priority,
+            visibility: ModelVisibility::List,
+            ..model_info_from_slug(slug)
+        })
+        .collect();
+    Mock::given(method("GET"))
+        .and(path("/backend-api/xdcode/models"))
+        .respond_with(ResponseTemplate::new(/*s*/ 200).set_body_json(ModelsResponse { models }))
+        .mount(&backend)
+        .await;
+    write_chatgpt_auth(
+        home.path(),
+        ChatGptAuthFixture::new("chatgpt-access-token").plan_type("team"),
+        AuthCredentialsStoreMode::File,
+    )?;
+    std::fs::write(
+        home.path().join("config.toml"),
+        format!(
+            "provider_base_url = \"{}/backend-api/xdcode\"",
+            backend.uri()
+        ),
+    )?;
+    let mut server = TestAppServer::builder()
+        .with_xdcode_home(home.path())
+        .build_initialized()
+        .await?;
+    let response: ModelListResponse = server
+        .request(|request_id| ClientRequest::ModelList {
+            request_id,
+            params: ModelListParams::default(),
+        })
+        .await?;
+    assert_eq!(
+        response
+            .data
+            .iter()
+            .map(|row| (row.model.as_str(), row.is_default))
+            .collect::<Vec<_>>(),
+        [
+            ("z-model", false),
+            ("a-model", false),
+            ("recommended", true)
+        ]
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn list_models_pagination_works() -> Result<()> {
     let xdcode_home = TempDir::new()?;
     MockResponsesConfig::new("http://127.0.0.1:9").write(xdcode_home.path())?;
@@ -634,6 +725,7 @@ async fn list_models_pagination_works() -> Result<()> {
                     limit: Some(1),
                     cursor: cursor.clone(),
                     include_hidden: None,
+                    ..Default::default()
                 },
             })
             .await?;
@@ -672,6 +764,7 @@ async fn list_models_rejects_invalid_cursor() -> Result<()> {
             limit: None,
             cursor: Some("invalid".to_string()),
             include_hidden: None,
+            ..Default::default()
         })
         .await?;
 

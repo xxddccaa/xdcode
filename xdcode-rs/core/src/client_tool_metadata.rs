@@ -2,12 +2,11 @@
 //! Only the wire copy changes; model-visible input and WebSocket continuation history stay intact.
 
 use crate::tools::metadata_metrics;
-use crate::utils::json::serialized_json_bytes;
 use serde::Serialize;
+use xdcode_api::MAX_RESPONSE_MESSAGE_BYTES;
 use xdcode_protocol::models::ResponseItem;
 use xdcode_protocol::models::bound_executed_tool_calls_for_message;
-
-const MAX_RESPONSE_MESSAGE_BYTES: usize = 15 * 1024 * 1024;
+use xdcode_utils_string::serialized_json_bytes;
 
 pub(super) fn bounded_input<T: Serialize>(
     message: &T,

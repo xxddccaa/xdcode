@@ -223,6 +223,7 @@ pub(super) async fn exercise(
         .map(|request| {
             let mut body = request.body_json();
             // Keep every request and input item, but focus schema fingerprints on
+            // the local TUI namespace so unrelated built-ins do not churn this test.
             body["tools"]
                 .as_array_mut()
                 .expect("request tools")

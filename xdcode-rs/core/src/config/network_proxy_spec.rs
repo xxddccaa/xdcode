@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::net::IpAddr;
 use std::sync::Arc;
 use xdcode_config::NetworkConstraints;
@@ -113,6 +112,10 @@ impl NetworkProxySpec {
         host_and_port_from_network_addr(&self.config.proxy_url, /*default_port*/ 3128)
     }
 
+    pub fn transparent_tcp(&self) -> bool {
+        self.config.transparent_tcp
+    }
+
     pub fn socks_enabled(&self) -> bool {
         self.config.enable_socks5
     }
@@ -186,6 +189,19 @@ impl NetworkProxySpec {
         } else {
             (config, NetworkProxyConstraints::default())
         };
+        if config.enabled
+            && config.mitm
+            && !config.credential_broker
+            && config
+                .mitm_hooks
+                .iter()
+                .any(|hook| hook.actions.aws_sigv4.is_some())
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "local AWS SigV4 hooks require features.credential_masking for protected shell snapshots",
+            ));
+        }
         validate_policy_against_constraints(&config, &constraints).map_err(|err| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -217,33 +233,25 @@ impl NetworkProxySpec {
             Platform::native(),
             local_binding_policy,
         )?;
-        let mut builder = NetworkProxy::builder()
-            .state(Arc::new(state))
-            .managed_proxy_routing(managed_proxy_routing);
-        let retained_policy_decider = policy_decider.as_ref().map(Arc::clone);
-        if enable_network_approval_flow && !self.hard_deny_allowlist_misses {
-            if let Some(policy_decider) = policy_decider {
-                builder = builder.policy_decider_arc(policy_decider);
-            } else if Self::managed_sandbox_active(permission_profile) {
-                builder = builder
-                    .policy_decider(|_request| async { NetworkDecision::ask("not_allowed") });
-            }
-        }
-        if let Some(blocked_request_observer) = blocked_request_observer {
-            builder = builder.blocked_request_observer_arc(blocked_request_observer);
-        }
-        let proxy = builder.build().await.map_err(|err| {
-            std::io::Error::other(format!("failed to build network proxy: {err}"))
-        })?;
-        let handle = proxy
-            .run()
-            .await
-            .map_err(|err| std::io::Error::other(format!("failed to run network proxy: {err}")))?;
-        Ok(StartedNetworkProxy::new(
-            proxy,
-            handle,
-            retained_policy_decider,
-        ))
+        let active_decider: Option<Arc<dyn NetworkPolicyDecider>> =
+            if !enable_network_approval_flow || self.hard_deny_allowlist_misses {
+                None
+            } else if policy_decider.is_none() && Self::managed_sandbox_active(permission_profile) {
+                Some(Arc::new(|_request| async {
+                    NetworkDecision::ask("not_allowed")
+                }))
+            } else {
+                policy_decider.clone()
+            };
+        let (proxy, handle) = NetworkProxy::start_managed(
+            state,
+            managed_proxy_routing,
+            active_decider,
+            blocked_request_observer,
+        )
+        .await
+        .map_err(std::io::Error::other)?;
+        Ok(StartedNetworkProxy::new(proxy, handle, policy_decider))
     }
 
     pub(crate) fn recompute_for_permission_profile(
@@ -383,12 +391,15 @@ impl NetworkProxySpec {
         exec_policy: &Policy,
     ) -> std::io::Result<NetworkPolicyMetadata> {
         let direct_network = permission_profile.network_sandbox_policy().is_enabled();
+        // An owner can supply its own proxy when the controller is absent. A disabled
+        // controller vetoes that route, so file tools receive an offline policy.
         let proxy_active = match route.owner {
             Some(owner) => controller.map_or(owner.requires_proxy || direct_network, Self::enabled),
             None => route.primary_allows_proxy && controller.is_some_and(Self::enabled),
         };
         let network_enabled = proxy_active || (route.owner.is_none() && direct_network);
         let spec = if let Some(owner) = route.owner {
+            // Offline file tools retain the owner's traffic rules without needing a startable proxy.
             Self::compose_environment_policy(
                 controller,
                 owner,
@@ -399,10 +410,12 @@ impl NetworkProxySpec {
         } else if let Some(controller) = controller
             && proxy_active
         {
+            // The routed controller uses the thread's profile even for calls from another executor.
             let spec = controller.recompute_for_permission_profile(controller_profile)?;
             spec.with_exec_policy_network_rules(exec_policy)
                 .unwrap_or(spec)
         } else {
+            // Direct calls retain administrative policy, without importing unused proxy settings.
             Self::from_config_and_constraints(
                 Default::default(),
                 controller.and_then(|controller| controller.requirements.clone()),
@@ -411,10 +424,14 @@ impl NetworkProxySpec {
         };
 
         let config = spec.config;
+        // The native decider reviews fresh misses only for managed calls with approvals enabled.
         let can_review = (route.owner.is_some() || spec.requirements.is_some())
             && Self::managed_sandbox_active(permission_profile)
             && approval_policy != AskForApproval::Never;
+        // The domain-only MCP contract cannot check DNS answers at connect time.
+        // With local access restricted, only explicit IP grants are safe to forward.
         let require_ip_literal = proxy_active && !route.local_binding.resolve(&config);
+        // An MXC executor cannot launch an active proxy with an explicit local-binding denial.
         let can_route =
             !(require_ip_literal && route.local_binding == LocalBindingPolicy::RequireTrue);
         let mut allowed_domains = config.allowed_domains().unwrap_or_default();
@@ -424,6 +441,7 @@ impl NetworkProxySpec {
             });
         }
         let denied_domains = config.denied_domains().unwrap_or_default();
+        // The receiver cannot prompt for review or enforce a proxy hook's per-request restrictions.
         let mut additional_denials = config.review_domains;
         if proxy_active {
             additional_denials.extend(
@@ -454,6 +472,7 @@ impl NetworkProxySpec {
         if validate_policy_against_constraints(&spec.config, &spec.constraints).is_ok() {
             return Ok(spec);
         }
+        // A stale grant cannot invalidate saved denials. Fixed deny lists retain their configured set.
         spec.config.domains.clone_from(&self.config.domains);
         spec.config.apply_saved_domain_rules(Vec::new(), &denied);
         validate_policy_against_constraints(&spec.config, &spec.constraints).map_err(|err| {
@@ -530,6 +549,9 @@ impl NetworkProxySpec {
         }
         if let Some(socks_port) = requirements.socks_port {
             config.socks_url = format!("http://127.0.0.1:{socks_port}");
+        }
+        if let Some(transparent_tcp) = requirements.transparent_tcp {
+            config.transparent_tcp = transparent_tcp;
         }
         if let Some(allow_upstream_proxy) = requirements.allow_upstream_proxy {
             config.allow_upstream_proxy = allow_upstream_proxy;

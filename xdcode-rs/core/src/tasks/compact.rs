@@ -10,9 +10,7 @@ use crate::state::TaskKind;
 use tokio_util::sync::CancellationToken;
 use xdcode_features::Feature;
 use xdcode_model_provider::RemoteCompactionSupport;
-use xdcode_protocol::error::XdcodeErrorDetails;
-use xdcode_protocol::protocol::XdcodeErrorInfo;
-use xdcode_protocol::user_input::UserInput;
+use xdcode_user_input::ResolvedUserInput;
 
 #[derive(Clone, Copy, Default)]
 pub(crate) struct CompactTask;
@@ -42,6 +40,7 @@ impl SessionTask for CompactTask {
         );
         // Preparation errors must reach the task runner, which reports them to the client.
         session.emit_turn_started(&ctx, TaskKind::Compact).await;
+        session.check_rollout_budget()?;
         let step_context = session
             .capture_step_context(Arc::clone(&ctx), &cancellation_token)
             .await?;
@@ -51,6 +50,8 @@ impl SessionTask for CompactTask {
                 .await?,
         );
         if ctx.config.features.enabled(Feature::TokenBudget) {
+            // Preparing the context may wait; this reset never sends a model request.
+            session.check_rollout_budget()?;
             crate::compact_token_budget::run_manual_compact_task(
                 session,
                 step_context,
@@ -81,32 +82,23 @@ impl SessionTask for CompactTask {
                     "local",
                     /*manual*/ true,
                 );
-                let input = vec![UserInput::Text {
-                    text: ctx
-                        .config
+                let input = vec![ResolvedUserInput::text(
+                    ctx.config
                         .compact_prompt
                         .as_deref()
                         .unwrap_or(crate::compact::SUMMARIZATION_PROMPT)
                         .to_string(),
-                    // Compaction prompt is synthesized; no UI element ranges to preserve.
-                    text_elements: Vec::new(),
-                }];
-                crate::compact::run_compact_task(
-                    session.clone(),
-                    step_context,
-                    world_state,
-                    input,
-                    &cancellation_token,
-                )
-                .await
+                )];
+                crate::compact::run_compact_task(session.clone(), step_context, world_state, input)
+                    .await
             }
         };
         if let Err(err) = result {
-            if matches!(err.details(), XdcodeErrorDetails::TurnAborted) {
+            if super::ends_turn_as_interrupted(&err) {
                 return Err(err);
             }
             let error = err.to_xdcode_protocol_error();
-            if matches!(error, XdcodeErrorInfo::UsageLimitExceeded) {
+            if error.is_usage_limit() {
                 // Compaction already emitted the error; notify extensions without emitting it twice.
                 session
                     .emit_turn_error_lifecycle(ctx.as_ref(), error, err.details())

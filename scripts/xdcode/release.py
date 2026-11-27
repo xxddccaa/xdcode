@@ -145,7 +145,7 @@ def publish_release(
         if windows_only
         else "- GNU/Linux x86_64 archive, SHA-256 sidecar, and standalone offline installer.\n"
         "- macOS Apple Silicon (ARM64) archive and SHA-256 sidecar; Intel Macs are not supported.\n"
-        "- The Linux installer accepts explicit `--force` to switch the entrypoint without stopping existing sessions; integrity checks and old builds are retained.\n"
+        "- `install.sh` installs and upgrades on Linux and macOS with only bash, curl and tar (no Python); running sessions keep their build and old builds are retained.\n"
         "- macOS executables are ad-hoc signed, not Developer ID signed or notarized; see the bundled installation guide.\n"
     )
     notes = (

@@ -8,13 +8,17 @@ use crate::elicitation::ElicitationRegistration;
 use crate::session::SessionIo;
 use crate::session::SessionSettingsUpdate;
 use crate::session::Submission;
+use crate::session::emit_subagent_session_started;
+use crate::session::inject::validate_injected_response_item;
 use crate::session::new_submission_id;
+use crate::session::session::AppServerClientMetadata;
 use crate::session::session::Session;
 use crate::session::startup_prewarm::PrewarmInput;
 use crate::session::step_settings::StepSettingsUpdate;
 use crate::thread_startup_metadata::ThreadStartupMetadata;
 use chrono::DateTime;
 use chrono::Utc;
+use futures::future::BoxFuture;
 use rmcp::model::ReadResourceRequestParams;
 use std::any::Any;
 use std::path::PathBuf;
@@ -24,6 +28,7 @@ use tokio::sync::RwLock;
 use tokio::sync::oneshot;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
 use xdcode_diagnostics::Gauge;
 use xdcode_diagnostics::GaugeGuard;
 use xdcode_exec_server::SelectedCapabilityRootsStatus;
@@ -31,8 +36,11 @@ use xdcode_extension_api::ConversationHistorySnapshot;
 use xdcode_extension_api::ThreadIdleCause;
 use xdcode_features::Feature;
 use xdcode_history::RolloutItem;
+use xdcode_models_manager::ModelsManagerConfig;
 use xdcode_otel::SessionTelemetry;
 use xdcode_otel::current_span_w3c_trace_context;
+use xdcode_protocol::AgentPath;
+use xdcode_protocol::RequestCountry;
 use xdcode_protocol::ThreadId;
 use xdcode_protocol::config_types::ApprovalsReviewer;
 use xdcode_protocol::config_types::CollaborationMode;
@@ -43,8 +51,11 @@ use xdcode_protocol::error::Result as XdcodeResult;
 use xdcode_protocol::error::XdcodeErr;
 use xdcode_protocol::mcp::CallToolResult;
 use xdcode_protocol::mcp::ClientMcpExtensions;
+use xdcode_protocol::model_types::CatalogModel;
+use xdcode_protocol::model_types::ModelInfo;
 use xdcode_protocol::model_types::ReasoningEffort;
 use xdcode_protocol::models::ActivePermissionProfile;
+use xdcode_protocol::models::AgentMessageInputContent;
 use xdcode_protocol::models::PermissionProfile;
 use xdcode_protocol::models::ProfileWorkspaceRoot;
 use xdcode_protocol::models::ResponseItem;
@@ -52,10 +63,12 @@ use xdcode_protocol::protocol::AskForApproval;
 use xdcode_protocol::protocol::EnvironmentConfig;
 use xdcode_protocol::protocol::EnvironmentConfigState;
 use xdcode_protocol::protocol::Event;
+use xdcode_protocol::protocol::InterAgentCommunication;
 use xdcode_protocol::protocol::MultiAgentVersion;
 use xdcode_protocol::protocol::Op;
 use xdcode_protocol::protocol::SandboxPolicy;
 use xdcode_protocol::protocol::SessionSource;
+use xdcode_protocol::protocol::SubAgentSource;
 use xdcode_protocol::protocol::ThreadHistoryMode;
 use xdcode_protocol::protocol::ThreadMemoryMode;
 use xdcode_protocol::protocol::ThreadSettingsOverrides;
@@ -66,20 +79,25 @@ use xdcode_protocol::protocol::TurnEnvironmentRequests;
 use xdcode_protocol::protocol::TurnEnvironmentSelection;
 use xdcode_protocol::protocol::TurnEnvironmentSelections;
 use xdcode_protocol::protocol::W3cTraceContext;
+use xdcode_protocol::turn_input::InjectedResponseItem;
+use xdcode_protocol::turn_input::ItemRetention;
 use xdcode_protocol::turn_input::RecoverTurnRequest;
 use xdcode_protocol::turn_input::StartIfIdleSubmission;
 use xdcode_protocol::turn_input::SteerSubmission;
 use xdcode_protocol::turn_input::SuspendTurnOutcome;
+use xdcode_protocol::turn_input::TurnInput;
 use xdcode_protocol::turn_input::TurnInputMode;
 use xdcode_protocol::turn_input::TurnInputRequest;
 use xdcode_protocol::turn_input::TurnInputSubmission;
 use xdcode_protocol::turn_input::TurnStartOptions;
+use xdcode_protocol::user_input::UserInput;
 use xdcode_thread_store::PersistContext;
 use xdcode_thread_store::StoredThread;
 use xdcode_thread_store::StoredThreadHistory;
 use xdcode_thread_store::ThreadMetadataPatch;
 use xdcode_thread_store::ThreadStoreError;
 use xdcode_thread_store::ThreadStoreResult;
+use xdcode_user_input::ResolvedUserInput;
 use xdcode_utils_absolute_path::AbsolutePathBuf;
 use xdcode_utils_path_uri::LegacyAppPathString;
 use xdcode_utils_path_uri::PathUri;
@@ -91,6 +109,8 @@ static LIVE_THREADS: Gauge = Gauge::new("core.threads.live");
 #[derive(Clone, Debug)]
 pub struct ThreadConfigSnapshot {
     pub catalog_id: Option<String>,
+    /// Trusted host country inherited by future turns.
+    pub request_country: RequestCountry,
     /// Host data inherited by future turns; not included in persisted settings.
     pub turn_extension_init: xdcode_extension_api::ExtensionDataInit,
     pub model: String,
@@ -152,6 +172,8 @@ impl ThreadConfigSnapshot {
 #[derive(Clone, Default)]
 pub struct XdcodeThreadSettingsOverrides {
     pub catalog_selection: Option<xdcode_protocol::protocol::CatalogModelSelection>,
+    /// Omission preserves the runtime country.
+    pub request_country: Option<RequestCountry>,
     /// Replaces the data captured by future turns. Omission preserves it.
     pub turn_extension_init: Option<xdcode_extension_api::ExtensionDataInit>,
     pub environments: Option<TurnEnvironmentRequests>,
@@ -159,6 +181,8 @@ pub struct XdcodeThreadSettingsOverrides {
     pub profile_workspace_roots: Option<Vec<ProfileWorkspaceRoot>>,
     pub approval_policy: Option<AskForApproval>,
     pub approvals_reviewer: Option<ApprovalsReviewer>,
+    /// Retained selection when restoring an effective reviewer forced by policy.
+    pub requested_approvals_reviewer: Option<ApprovalsReviewer>,
     pub sandbox_policy: Option<SandboxPolicy>,
     pub permission_profile: Option<PermissionProfile>,
     pub active_permission_profile: Option<ActivePermissionProfile>,
@@ -186,28 +210,8 @@ pub enum ConfigRefreshOutcome {
 
 pub use xdcode_guardian_context::GuardianRootMessage;
 
-/// Authorization state that changes on genuine user input or history resets.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct GuardianAuthorizationVersion {
-    /// User-message/reset revision, preserved across compaction and internal context.
-    pub user_message_revision: u64,
-    /// False when required retained answers or root instructions are unavailable.
-    pub retained_context_complete: bool,
-}
-
-/// Bounded root conversation and authorization state from one history snapshot.
-#[derive(Debug, Eq, PartialEq)]
-pub struct GuardianRootSnapshot {
-    /// Authoritative root from which this evidence was captured.
-    pub root_thread_id: ThreadId,
-    /// Distinguishes a history reset from additional authorization in the same history.
-    pub(crate) history_reset_version: u64,
-    pub authorization_version: GuardianAuthorizationVersion,
-    /// Confirmed assistant context is relevant to review but cannot authorize an action.
-    pub review_context_revision: u64,
-    pub messages: Vec<GuardianRootMessage>,
-    pub trusted_skill_paths: Vec<String>,
-}
+pub use xdcode_guardian_reviewer::GuardianAuthorizationVersion;
+pub use xdcode_guardian_reviewer::GuardianRootSnapshot;
 
 pub struct XdcodeThread {
     pub(crate) session: Arc<Session>,
@@ -237,6 +241,54 @@ pub struct BackgroundTerminalInfo {
     pub cwd: PathUri,
 }
 
+/// Captures client attachment paths before an ordered request enters the session.
+pub(crate) async fn resolve_client_turn_input(
+    request: TurnInputRequest,
+) -> XdcodeResult<TurnInputRequest<ResolvedUserInput>> {
+    let input = match request.input {
+        TurnInput::UserInput { content, client_id } => TurnInput::UserInput {
+            content: resolve_client_inputs(content).await?,
+            client_id,
+        },
+        TurnInput::ResponseItem(item) => TurnInput::ResponseItem(item),
+        TurnInput::AnnotatedResponseItem(item) => TurnInput::AnnotatedResponseItem(item),
+        TurnInput::InterAgentCommunication(message) => TurnInput::InterAgentCommunication(message),
+    };
+    Ok(TurnInputRequest {
+        input,
+        user_item_uuid: request.user_item_uuid,
+        user_input_extension_data: request.user_input_extension_data,
+        thread_settings: request.thread_settings,
+        start: request.start,
+        additional_context: request.additional_context,
+        responsesapi_client_metadata: request.responsesapi_client_metadata,
+        trace: request.trace,
+    })
+}
+
+/// Captures local media off the async executor. Inline inputs do not need a blocking task.
+pub(crate) async fn resolve_client_inputs(
+    content: Vec<UserInput>,
+) -> XdcodeResult<Vec<ResolvedUserInput>> {
+    let has_local_media = content.iter().any(|item| {
+        matches!(
+            item,
+            UserInput::LocalImage { .. } | UserInput::LocalAudio { .. }
+        )
+    });
+    let resolve = move || {
+        content
+            .into_iter()
+            .map(ResolvedUserInput::from_client)
+            .collect()
+    };
+    if has_local_media {
+        Ok(tokio::task::spawn_blocking(resolve).await?)
+    } else {
+        Ok(resolve())
+    }
+}
+
 /// Conduit for the bidirectional stream of messages that compose a thread
 /// (formerly called a conversation) in Xdcode.
 impl XdcodeThread {
@@ -257,6 +309,12 @@ impl XdcodeThread {
             out_of_band_elicitations: Mutex::new(OutOfBandElicitations::default()),
             _diagnostics_guard: LIVE_THREADS.track(),
         }
+    }
+
+    /// Identifies this loaded agent tree, shared by its root and native children.
+    /// Loading a new tree gives it a new ID, even when reusing a persisted thread ID.
+    pub fn agent_tree_id(&self) -> Uuid {
+        self.session.services.local_agent_runtime.tree_id()
     }
 
     pub async fn submit(&self, op: Op) -> XdcodeResult<String> {
@@ -283,13 +341,12 @@ impl XdcodeThread {
             .await
     }
 
-    /// Reads this thread's configured clock, including an external or simulated clock.
-    pub async fn current_time(&self) -> XdcodeResult<DateTime<Utc>> {
+    /// Reads this thread's configured clock.
+    pub fn current_time(&self) -> XdcodeResult<DateTime<Utc>> {
         self.session
             .services
             .time_provider
             .current_time(self.session.thread_id)
-            .await
             .map_err(|error| XdcodeErr::Io(std::io::Error::other(error)))
     }
 
@@ -321,9 +378,57 @@ impl XdcodeThread {
         self.session.services.analytics_events_client.is_enabled()
     }
 
+    /// Looks up a live V2 tool invocation on a runtime with [`crate::HostToolInvocationLookup`].
+    pub fn tool_invocation(
+        &self,
+        turn_id: &str,
+        call_id: &str,
+    ) -> XdcodeResult<crate::ToolInvocationContext> {
+        crate::agent::host::tool_invocation(self, turn_id, call_id)
+    }
+
+    /// Creates an idle V2 child here with the invoking step's environments and live application
+    /// bindings. Compatible children share the parent's exec policy.
+    /// Ending the invocation or dropping this future aborts pending startup.
+    /// Success publishes the idle child and transfers ownership to the host. An error or dropped
+    /// future schedules cleanup of any provisional child. Already-durable history may remain.
+    pub async fn create_child(
+        &self,
+        invocation: &crate::ToolInvocationContext,
+        request: crate::ThreadCreateRequest,
+        reservation: crate::HostThreadSpawnReservation,
+    ) -> Result<crate::ThreadSpawnResult, crate::ThreadSpawnError> {
+        crate::agent::host::create(self, invocation, request, reservation).await
+    }
+
+    /// Reads the parent settings for this live tool invocation, including the dynamic tools
+    /// currently inheritable by a fresh child. The host chooses the child's name, role, and history.
+    pub async fn prepare_child(
+        &self,
+        invocation: &crate::ToolInvocationContext,
+    ) -> Result<crate::PreparedChildContext, crate::ThreadSpawnError> {
+        crate::agent::host::prepare(self, invocation).await
+    }
+
     /// Returns extension-owned data attached to this thread runtime.
     pub fn thread_extension_data(&self) -> &xdcode_extension_api::ExtensionData {
         &self.session.services.thread_extension_data
+    }
+
+    /// Generator used for response items produced on behalf of this thread.
+    pub fn item_id_generator(&self) -> &xdcode_protocol::ItemIdGenerator {
+        &self.session.item_id_generator
+    }
+
+    /// Returns tools from this thread’s ready, unshared Apps MCP client.
+    /// Returns an empty list if the client is absent, still starting, or uses
+    /// a shared catalog. Does not start or wait for discovery.
+    pub async fn apps_tools_from_mcp_client(&self) -> Vec<xdcode_mcp::ToolInfo> {
+        self.session
+            .services
+            .mcp_runtime
+            .apps_tools_from_mcp_client()
+            .await
     }
 
     /// Returns data captured by the named running turn, not newer thread settings.
@@ -359,6 +464,29 @@ impl XdcodeThread {
         self.io.session_loop_termination.clone().await;
     }
 
+    pub(crate) async fn emit_subagent_session_started(
+        &self,
+        client_metadata: AppServerClientMetadata,
+        resumed_created_at: Option<DateTime<Utc>>,
+    ) {
+        let SessionSource::SubAgent(source @ SubAgentSource::ThreadSpawn { .. }) =
+            &self.session_source
+        else {
+            return;
+        };
+        let config = self.config_snapshot().await;
+        emit_subagent_session_started(
+            &self.session.services.analytics_events_client,
+            client_metadata,
+            self.session.session_id(),
+            self.session.thread_id(),
+            config.parent_thread_id,
+            config,
+            source.clone(),
+            resumed_created_at,
+        );
+    }
+
     pub(crate) async fn emit_thread_ready_lifecycle(&self) {
         let contributors = self
             .session
@@ -370,12 +498,15 @@ impl XdcodeThread {
         if contributors.is_empty() {
             return;
         }
-        let config = self.config().await;
+        let (config, history_initialization, history_mode) =
+            self.session.thread_ready_config().await;
         for contributor in contributors {
             contributor
                 .on_thread_ready(xdcode_extension_api::ThreadReadyInput {
                     config: config.as_ref(),
                     session_source: &self.session_source,
+                    history_initialization,
+                    history_mode,
                     session_store: &self.session.services.session_extension_data,
                     thread_store: &self.session.services.thread_extension_data,
                 })
@@ -435,6 +566,7 @@ impl XdcodeThread {
         op: Op,
         trace: Option<W3cTraceContext>,
     ) -> XdcodeResult<String> {
+        // Use the same admission guard as MAv2 sends, retaining it through dispatch.
         let residency_guard = if matches!(op, Op::InterAgentCommunication { .. }) {
             self.session
                 .services
@@ -445,15 +577,43 @@ impl XdcodeThread {
             None
         };
         self.io
-            .submit_with_trace(op, trace, None, None, residency_guard, None)
+            .submit_with_trace(
+                op,
+                trace,
+                /*parent_turn_id*/ None,
+                /*root_turn_id*/ None,
+                residency_guard,
+                /*message_delivery*/ None,
+            )
             .await
+    }
+
+    /// Waits for input activity without consuming input, following native `wait_agent` behavior.
+    ///
+    /// The named turn supplies any already-buffered steering input. Subsequent activity is
+    /// thread-wide: ending or replacing that turn does not end this wait. Mailbox input
+    /// already pending is also observed. Callers own cancellation; dropping this future
+    /// does not consume input or affect execution. Each call observes independently.
+    pub async fn wait_for_input_activity(
+        &self,
+        turn_id: &str,
+        timeout: std::time::Duration,
+    ) -> crate::InputWaitOutcome {
+        crate::thread_input::wait_for_input_activity(&self.session, turn_id, timeout).await
     }
 
     /// Submits turn input without requiring the caller to inspect thread state.
     ///
-    /// The result describes whether Core started a turn, steered an active
-    /// turn, or declined it without recording or enqueueing the input.
-    /// User input and named standalone function-call outputs are accepted.
+    /// User input reports whether Core started or steered a turn. Agent messages
+    /// report acceptance into native delivery, which can wait for a later turn.
+    /// Declined input is neither recorded nor enqueued.
+    /// User input, agent messages, and named standalone function-call outputs are accepted.
+    /// Agent messages contain unformatted plaintext or encrypted content. Core adds
+    /// the agent-message context wrapper; callers must not add it themselves.
+    /// Agent messages request work here regardless of their `trigger_turn` flag.
+    /// Agent messages retain the recipient's settings. Only the message and `start`
+    /// options are passed to native delivery; `thread_settings`, `turn_extension_init`,
+    /// `additional_context`, and `responsesapi_client_metadata` are ignored.
     pub async fn start_or_steer_turn(
         &self,
         request: impl Into<WithTurnExtensionData<TurnInputRequest>>,
@@ -484,15 +644,17 @@ impl XdcodeThread {
             TurnInputSubmission::NotSubmitted { reason } => {
                 Ok(StartIfIdleSubmission::NotSubmitted { reason })
             }
-            TurnInputSubmission::Steered { .. } => {
-                unreachable!("start-if-idle submission cannot steer")
+            TurnInputSubmission::Steered { .. } | TurnInputSubmission::Accepted => {
+                unreachable!("start-if-idle submission must start or decline")
             }
         }
     }
 
     /// Starts a new internal continuation turn when idle, including in Plan mode.
     /// Rejects if a newer task has started, even if it has already finished.
-    /// The input must be a response item; it is never treated as user authorization.
+    /// Supply an internal response item, or empty input to wake on a result already
+    /// saved in history. An empty wake inherits the preceding turn's attribution
+    /// and adds no message or user authorization.
     pub async fn continue_turn_if_idle(
         &self,
         request: impl Into<WithTurnExtensionData<TurnInputRequest>>,
@@ -525,9 +687,11 @@ impl XdcodeThread {
             turn_id,
             thread_settings,
             trace,
+            prompt_cache_ttl,
             cyber_access_program,
         } = request;
         let start_options = TurnStartOptions {
+            prompt_cache_ttl,
             cyber_access_program,
             ..self.session.recovered_turn_start_options(&turn_id).await
         };
@@ -552,8 +716,8 @@ impl XdcodeThread {
             TurnInputSubmission::NotSubmitted { reason } => {
                 Ok(StartIfIdleSubmission::NotSubmitted { reason })
             }
-            TurnInputSubmission::Steered { .. } => {
-                unreachable!("recovered turn submission cannot steer")
+            TurnInputSubmission::Steered { .. } | TurnInputSubmission::Accepted => {
+                unreachable!("recovered turn submission must start or decline")
             }
         }
     }
@@ -582,16 +746,16 @@ impl XdcodeThread {
         let (reply, result) = oneshot::channel();
         self.io
             .tx_sub
-            .send(Submission {
+            .send(Box::new(Submission {
                 id: new_submission_id(),
-                op: Op::SuspendTurnAndShutdown { reply },
+                op: Op::SuspendTurnAndShutdown { reply }.into(),
                 turn_extension_init: None,
                 trace: current_span_w3c_trace_context(),
                 parent_turn_id: None,
                 root_turn_id: None,
                 residency_guard: None,
                 message_delivery: None,
-            })
+            }))
             .await
             .map_err(|_| XdcodeErr::Fatal("thread session has stopped".to_string()))?;
         let outcome = result
@@ -619,8 +783,8 @@ impl XdcodeThread {
             TurnInputSubmission::NotSubmitted { reason } => {
                 Ok(SteerSubmission::NotSubmitted { reason })
             }
-            TurnInputSubmission::Started { .. } => {
-                unreachable!("steer-only submission cannot start a turn")
+            TurnInputSubmission::Started { .. } | TurnInputSubmission::Accepted => {
+                unreachable!("steer-only submission must steer or decline")
             }
         }
     }
@@ -628,6 +792,33 @@ impl XdcodeThread {
     async fn submit_turn_input_with_mode(
         &self,
         request: impl Into<WithTurnExtensionData<TurnInputRequest>>,
+        mode: TurnInputMode,
+    ) -> XdcodeResult<TurnInputSubmission> {
+        let WithTurnExtensionData {
+            request,
+            turn_extension_init,
+        } = request.into();
+        self.submit_resolved_turn_input_with_mode(
+            WithTurnExtensionData {
+                request: resolve_client_turn_input(request).await?,
+                turn_extension_init,
+            },
+            mode,
+        )
+        .await
+    }
+
+    pub(crate) async fn start_or_steer_resolved_turn(
+        &self,
+        request: TurnInputRequest<ResolvedUserInput>,
+    ) -> XdcodeResult<TurnInputSubmission> {
+        self.submit_resolved_turn_input_with_mode(request.into(), TurnInputMode::StartOrSteer)
+            .await
+    }
+
+    async fn submit_resolved_turn_input_with_mode(
+        &self,
+        request: WithTurnExtensionData<TurnInputRequest<ResolvedUserInput>>,
         mode: TurnInputMode,
     ) -> XdcodeResult<TurnInputSubmission> {
         if !matches!(mode, TurnInputMode::Steer { .. }) {
@@ -648,12 +839,26 @@ impl XdcodeThread {
     ///
     /// This is the thread-level bridge to `Session::inject_if_running` for
     /// callers that only hold a `XdcodeThread`.
-    /// It returns the unchanged items when this thread has no active turn.
+    /// Returns the unchanged batch when there is no active turn or an item requires typed turn input.
     pub async fn inject_if_running(
         &self,
         items: Vec<ResponseItem>,
     ) -> Result<(), Vec<ResponseItem>> {
+        if items
+            .iter()
+            .try_for_each(validate_injected_response_item)
+            .is_err()
+        {
+            return Err(items);
+        }
         self.session.inject_if_running(items).await
+    }
+
+    /// Delivers an extension's untrusted context only to the turn that produced it.
+    pub async fn inject_untrusted_context_for_turn(&self, turn_id: &str, key: &str, value: String) {
+        self.session
+            .inject_untrusted_context_for_turn(turn_id, key, value)
+            .await;
     }
 
     /// Environment selections captured by the active turn, before later settings updates.
@@ -688,6 +893,22 @@ impl XdcodeThread {
         self.session.interrupted_turn().await
     }
 
+    /// Returns whether core owns a turn slot, including before `TurnStarted` is published.
+    pub async fn has_active_turn(&self) -> bool {
+        self.session.active_turn.lock().await.is_some()
+    }
+
+    /// Returns the current turn ID, including while its stop hook runs.
+    pub async fn current_turn_id(&self) -> Option<String> {
+        self.session
+            .active_turn
+            .lock()
+            .await
+            .as_ref()?
+            .turn_id
+            .clone()
+    }
+
     /// Returns the trusted root when the expected turn is currently active.
     pub async fn active_turn_root(&self, expected_turn_id: &str) -> Option<String> {
         let active = self.session.active_turn.lock().await;
@@ -702,14 +923,9 @@ impl XdcodeThread {
         &self,
         app_server_client_name: Option<String>,
         app_server_client_version: Option<String>,
-        mcp_elicitations_auto_deny: bool,
     ) -> ConstraintResult<()> {
         self.session
-            .set_app_server_client_info(
-                app_server_client_name,
-                app_server_client_version,
-                mcp_elicitations_auto_deny,
-            )
+            .set_app_server_client_info(app_server_client_name, app_server_client_version)
             .await
     }
 
@@ -723,7 +939,9 @@ impl XdcodeThread {
     }
 
     /// Queues settings for future turns and waits for Core to accept or reject them.
-    /// Rejections are returned to the caller instead of emitted as thread errors.
+    /// Rejections are returned to the caller instead of emitted as thread errors. A host-root
+    /// service-tier update also waits for local host acceptance outside Core's submission loop.
+    /// A handoff error leaves the settings committed locally. Callers can retry the same tier.
     pub async fn update_thread_settings(
         &self,
         thread_settings: impl Into<WithTurnExtensionData<ThreadSettingsOverrides>>,
@@ -754,7 +972,29 @@ impl XdcodeThread {
         settings: XdcodeThreadSettingsOverrides,
     ) -> ConstraintResult<()> {
         let updates = self.thread_settings_update(settings);
-        self.session.update_settings(updates).await.map(|_| ())
+        let commit = self.session.update_settings(updates).await?;
+        if let Some(accepted) = commit.host_acceptance {
+            let _ = accepted.await;
+        }
+        Ok(())
+    }
+
+    /// Replaces tools for subsequent model steps and future turns, preserving in-flight calls.
+    /// An empty list removes all dynamic tools. Persistent threads require host opt-in
+    /// so every reader can restore successful updates on resume.
+    ///
+    /// Once queued, stopping the caller does not cancel the update.
+    /// A persistence error can leave the durable result indeterminate; retry the same replacement
+    /// before continuing.
+    pub async fn replace_dynamic_tools(
+        &self,
+        tools: Vec<xdcode_protocol::dynamic_tools::DynamicToolSpec>,
+    ) -> XdcodeResult<()> {
+        let (reply, result) = oneshot::channel();
+        self.io
+            .submit(Op::ReplaceDynamicTools { tools, reply })
+            .await?;
+        result.await.unwrap_or(Err(XdcodeErr::InternalAgentDied))
     }
 
     /// Persists current settings without emitting a live settings event.
@@ -770,12 +1010,14 @@ impl XdcodeThread {
     ) -> SessionSettingsUpdate {
         let XdcodeThreadSettingsOverrides {
             catalog_selection,
+            request_country,
             turn_extension_init,
             environments: environment_requests,
             runtime_workspace_roots,
             profile_workspace_roots,
             approval_policy,
             approvals_reviewer,
+            requested_approvals_reviewer,
             sandbox_policy,
             permission_profile,
             active_permission_profile,
@@ -790,8 +1032,10 @@ impl XdcodeThread {
         } = overrides;
         SessionSettingsUpdate {
             catalog_selection,
+            requested_approvals_reviewer,
             turn_extension_init,
             step_settings: StepSettingsUpdate {
+                request_country,
                 model,
                 effort,
                 collaboration_mode,
@@ -875,11 +1119,121 @@ impl XdcodeThread {
         Ok(())
     }
 
-    /// Record raw Responses API items without starting a new turn.
-    pub async fn inject_response_items(&self, items: Vec<ResponseItem>) -> XdcodeResult<()> {
-        self.inject_response_items_for_turn(items).await?;
+    /// Review the final injected tool call without executing it.
+    pub async fn guardian_review(
+        &self,
+        cancellation: &CancellationToken,
+    ) -> XdcodeResult<crate::guardian_review::GuardianReviewResult> {
+        if self.session.active_turn.lock().await.is_some() {
+            return Err(XdcodeErr::InvalidRequest(
+                "thread has an active turn".into(),
+            ));
+        }
+        let history = self.session.clone_history().await;
+        let tool_call = history.raw_items().next_back().cloned().ok_or_else(|| {
+            XdcodeErr::InvalidRequest(
+                "expected a final plaintext exec_command, apply_patch, request_permissions, or MCP call"
+                    .into(),
+            )
+        })?;
+        crate::guardian::review_tool_call(&self.session, history, &tool_call, cancellation).await
+    }
+
+    /// Inject raw Responses items. Plaintext agent-mail batches in a native MAv2
+    /// runtime use queue-only mailbox delivery and its existing wake policy.
+    /// Other batches retain history-injection semantics.
+    pub fn inject_response_items(
+        &self,
+        items: Vec<ResponseItem>,
+    ) -> BoxFuture<'_, XdcodeResult<()>> {
+        // Keep the concrete future in core so callers don't each compile their own copy.
+        Box::pin(self.inject_response_items_inner(items))
+    }
+
+    async fn inject_response_items_inner(&self, items: Vec<ResponseItem>) -> XdcodeResult<()> {
+        let config = self.session.get_config().await;
+        // Native mail can represent this shape without changing its payload. Keep
+        // mixed history and multipart/encrypted items on the raw injection path.
+        if !config.multi_agent_v2.disable_native_tools
+            && !items.is_empty()
+            && let Some(messages) = items
+                .iter()
+                .map(|item| {
+                    let ResponseItem::AgentMessage {
+                        id,
+                        author,
+                        recipient,
+                        content,
+                        internal_chat_message_metadata_passthrough,
+                    } = item
+                    else {
+                        return None;
+                    };
+                    let [AgentMessageInputContent::InputText { text }] = content.as_slice() else {
+                        return None;
+                    };
+                    Some(InterAgentCommunication {
+                        id: id.clone(),
+                        author: AgentPath::try_from(author.as_str()).ok()?,
+                        recipient: AgentPath::try_from(recipient.as_str()).ok()?,
+                        other_recipients: Vec::new(),
+                        content: text.clone(),
+                        encrypted_content: None,
+                        internal_chat_message_metadata_passthrough:
+                            internal_chat_message_metadata_passthrough.clone(),
+                        trigger_turn: false,
+                    })
+                })
+                .collect::<Option<Vec<_>>>()
+            && match self.multi_agent_version() {
+                Some(version) => version,
+                None => self.session.resolve_multi_agent_version_for_model(
+                    self.selected_model_info().await.as_ref(),
+                    &config,
+                ),
+            } == MultiAgentVersion::V2
+        {
+            // Keep capacity eviction out between individual submissions. Each
+            // submission retains its own pin through dispatch after this batch returns.
+            let _batch_residency = self
+                .session
+                .services
+                .local_agent_runtime
+                .pin_v2_residency(self)
+                .await?;
+            for communication in messages {
+                self.submit(Op::InterAgentCommunication {
+                    communication,
+                    start_options: TurnStartOptions::default(),
+                })
+                .await?;
+            }
+            return Ok(());
+        }
+        self.inject_response_items_with_retention(items).await
+    }
+
+    /// Inject Responses items with explicit, persisted retention policies.
+    pub async fn inject_response_items_with_retention(
+        &self,
+        items: Vec<impl Into<InjectedResponseItem>>,
+    ) -> XdcodeResult<()> {
+        self.record_injected_items(items).await?;
         self.checkpoint_preparation().await?;
         Ok(())
+    }
+
+    /// Returns the first prompt for an approved plan, recording untrusted context if needed.
+    pub async fn prepare_approved_plan(
+        &self,
+        path: Option<&PathUri>,
+        markdown: &str,
+    ) -> XdcodeResult<String> {
+        let (prompt, items) = self.session.prepare_approved_plan(path, markdown).await?;
+        if !items.is_empty() {
+            self.inject_response_items(items).await?;
+        }
+        Ok(prompt)
     }
 
     /// Record raw Responses API items immediately before admitting a user turn.
@@ -891,35 +1245,42 @@ impl XdcodeThread {
         &self,
         items: Vec<ResponseItem>,
     ) -> XdcodeResult<()> {
+        self.record_injected_items(items).await
+    }
+
+    async fn record_injected_items(
+        &self,
+        items: Vec<impl Into<InjectedResponseItem>>,
+    ) -> XdcodeResult<()> {
         if items.is_empty() {
             return Err(XdcodeErr::InvalidRequest(
                 "items must not be empty".to_string(),
             ));
         }
-
-        let had_reference_context = self.session.reference_context_item().await.is_some();
-        let mut turn_context = if had_reference_context {
-            self.session.new_inject_items_context().await
-        } else {
-            self.session.new_default_turn().await
-        };
-        if self.session.reference_context_item().await.is_none() {
-            // Compaction can clear the reference while the recording context is built.
-            // Initial context must capture a step with a complete skills snapshot.
-            if had_reference_context {
-                turn_context = self.session.new_default_turn().await;
+        let items: Vec<InjectedResponseItem> = items.into_iter().map(Into::into).collect();
+        let mut indexed_items = items.iter().enumerate();
+        while let Some((index, item)) = indexed_items.next() {
+            validate_injected_response_item(&item.item)?;
+            if item.retention != ItemRetention::Always {
+                continue;
             }
-            // This history-only API runs without run_turn, so it owns its initial step.
-            let step_context = self
-                .session
-                .capture_step_context(Arc::clone(&turn_context), &CancellationToken::new())
-                .await?;
-            self.session
-                .record_context_updates_and_set_reference_context_item(step_context.as_ref())
-                .await?;
+            let needs_call = crate::tools::output_call_id(&item.item).is_some()
+                && !matches!(&item.item, ResponseItem::ToolSearchOutput { execution, .. } if execution == "server");
+            if (crate::tools::input_call_id(&item.item).is_some() || needs_call)
+                && !indexed_items.next().is_some_and(|(_, output)| {
+                    output.retention == ItemRetention::Always
+                        && crate::tools::is_matching_tool_output(&item.item, &output.item)
+                })
+            {
+                return Err(XdcodeErr::InvalidRequest(format!(
+                    "items[{index}]: retained tool calls and outputs must be adjacent in the same request, call first, with both marked always"
+                )));
+            }
         }
+
+        let turn_context = self.session.history_injection_context().await?;
         self.session
-            .inject_client_response_items(items, turn_context.as_ref())
+            .inject_client_response_items(items, &turn_context)
             .await;
         Ok(())
     }
@@ -943,6 +1304,13 @@ impl XdcodeThread {
     /// Returns startup metadata without the one-time initial message replay.
     pub fn startup_metadata(&self) -> &ThreadStartupMetadata {
         &self.startup_metadata
+    }
+
+    /// Whether this live thread joined the Daybreak propagation experiment at startup.
+    pub fn daybreak_program_propagation_enrolled(&self) -> bool {
+        self.thread_extension_data()
+            .get::<crate::agent::helper_daybreak::Enrollment>()
+            .is_some()
     }
 
     pub(crate) fn is_running(&self) -> bool {
@@ -1016,10 +1384,19 @@ impl XdcodeThread {
         self.session.state_db()
     }
 
-    pub async fn selected_model_info(&self) -> Arc<xdcode_protocol::model_types::ModelInfo> {
+    /// Resolves the model selected for future turns using this thread's catalog and settings.
+    pub async fn selected_model_info(&self) -> Arc<ModelInfo> {
         self.session.selected_model_info().await
     }
 
+    /// Looks up a named model in the catalog selected for this thread's provider and credentials.
+    pub async fn model_info(&self, model: &str, config: &ModelsManagerConfig) -> CatalogModel {
+        self.session
+            .services
+            .models_manager
+            .get_model_info(model, config)
+            .await
+    }
     pub async fn config_snapshot(&self) -> ThreadConfigSnapshot {
         self.session.thread_config_snapshot().await
     }
@@ -1071,15 +1448,39 @@ impl XdcodeThread {
             .collect()
     }
 
+    /// The thread's MCP manager also owns its actor-scoped plugin and runtime auth state.
+    pub fn mcp_manager(&self) -> Arc<crate::mcp::McpManager> {
+        Arc::clone(&self.session.services.mcp_manager)
+    }
+
     pub async fn config(&self) -> Arc<crate::config::Config> {
         self.session.get_config().await
+    }
+
+    /// List the thread's current hook declarations, including its selected, ready environments.
+    pub fn list_hooks(&self) -> xdcode_hooks::HookListOutcome {
+        let environments = self.session.services.turn_environments.snapshot_now();
+        let sources = crate::hook_environment_executor::environment_hook_sources(
+            &environments,
+            /*target_environments*/ &[],
+        );
+        self.session.hooks().list_with_environment_hooks(sources)
+    }
+
+    /// Rebuilds the MCP projection on the next regular turn, after turn start and before
+    /// tools are bound. Repeated requests coalesce without starting a background refresh.
+    pub fn reproject_mcp_on_next_turn(&self) {
+        self.session.reproject_mcp_on_next_turn();
     }
 
     /// Observes this thread's published MCP connections that match the requested config.
     pub async fn mcp_connection_statuses(
         &self,
         config: &xdcode_mcp::McpConfig,
-    ) -> std::collections::HashMap<String, xdcode_protocol::mcp::McpServerConnectionStatus> {
+    ) -> std::collections::HashMap<
+        xdcode_mcp::McpServerKey,
+        xdcode_protocol::mcp::McpServerConnectionStatus,
+    > {
         self.session
             .services
             .mcp_runtime
@@ -1093,6 +1494,14 @@ impl XdcodeThread {
         config: &crate::config::Config,
     ) -> (xdcode_mcp::McpConfig, xdcode_mcp::McpRuntimeContext) {
         self.session.runtime_mcp_config_and_context(config).await
+    }
+
+    /// Projects the current settings for a status read against the thread's published connections.
+    pub async fn mcp_status_config_and_context(
+        &self,
+        config: &crate::config::Config,
+    ) -> (xdcode_mcp::McpConfig, xdcode_mcp::McpRuntimeContext) {
+        self.session.mcp_status_config_and_context(config).await
     }
 
     /// Captures the exact MCP config and environment bindings for the current thread state.
@@ -1121,7 +1530,7 @@ impl XdcodeThread {
             .authorization_version(history.as_ref())
     }
 
-    /// Returns bounded root conversation evidence and its authorization version atomically.
+    /// Captures root originals and authorization before request-size preparation.
     pub async fn guardian_root_snapshot(&self) -> Option<GuardianRootSnapshot> {
         self.session
             .services
@@ -1150,7 +1559,17 @@ impl XdcodeThread {
         self.session.disable_mcp_enterprise_auth().await;
     }
 
-    /// Refresh MCP configuration and managed requirements without reloading unrelated settings.
+    /// Refresh managed Guardian policy for future turns without changing MCP state.
+    /// Session and user policy fallbacks remain pinned until their own reload.
+    pub async fn refresh_guardian_policy(
+        &self,
+        snapshot: &xdcode_config::GuardianPolicySnapshot,
+    ) -> ConfigRefreshOutcome {
+        self.session.refresh_guardian_policy(snapshot).await
+    }
+
+    /// Refresh MCP configuration, managed requirements, and session plugin and app overrides.
+    /// An omitted section preserves its current overrides. An empty map restores inheritance.
     /// A stale owner requires reloading from the current config before retrying.
     pub async fn refresh_mcp_config(
         &self,
@@ -1169,6 +1588,13 @@ impl XdcodeThread {
         &self,
     ) -> anyhow::Result<xdcode_mcp::XdcodeAppsToolSnapshot> {
         self.session.refresh_xdcode_apps_tools().await
+    }
+
+    /// Refreshes cloud plugin and skill catalogs before input admission, without starting a turn.
+    /// Serializes publication with step preparation and marks MCP dirty for later reconciliation.
+    /// Accepts complete or partial catalogs; failed discovery remains retryable.
+    pub async fn refresh_cloud_plugins(&self) -> anyhow::Result<()> {
+        self.session.refresh_cloud_plugins().await
     }
 
     /// Returns the environments configured for future turns.
@@ -1202,6 +1628,7 @@ impl XdcodeThread {
     pub async fn read_mcp_resource(
         &self,
         server: &str,
+        environment_id: Option<&str>,
         params: ReadResourceRequestParams,
     ) -> anyhow::Result<serde_json::Value> {
         self.session.refresh_mcp_if_dirty().await;
@@ -1209,7 +1636,7 @@ impl XdcodeThread {
             .session
             .services
             .mcp_runtime
-            .latest_read_resource(server, params)
+            .latest_read_resource(server, environment_id, params)
             .await?;
 
         Ok(serde_json::to_value(result)?)
@@ -1219,6 +1646,7 @@ impl XdcodeThread {
     pub async fn mcp_server_status_snapshot(
         &self,
         server: &str,
+        environment_id: Option<&str>,
         detail: xdcode_mcp::McpSnapshotDetail,
         expected_registration: Option<&xdcode_mcp::ResolvedMcpServer>,
     ) -> anyhow::Result<(
@@ -1230,7 +1658,28 @@ impl XdcodeThread {
         self.session
             .services
             .mcp_runtime
-            .server_status_snapshot(server, detail, expected_registration, &runtime_context)
+            .server_status_snapshot(
+                server,
+                environment_id,
+                detail,
+                expected_registration,
+                &runtime_context,
+            )
+            .await
+    }
+
+    /// Returns tool inventories from eligible connections on the requested page.
+    pub async fn matching_mcp_status_snapshot(
+        &self,
+        config: &xdcode_mcp::McpConfig,
+        auth: Option<&xdcode_login::XdcodeAuth>,
+        keys: &std::collections::HashSet<xdcode_mcp::McpServerKey>,
+        context: &xdcode_mcp::McpRuntimeContext,
+    ) -> xdcode_mcp::McpServerStatusSnapshot {
+        self.session
+            .services
+            .mcp_runtime
+            .matching_status_snapshot(config, auth, keys, context)
             .await
     }
 
@@ -1274,6 +1723,7 @@ impl XdcodeThread {
     pub async fn call_mcp_tool(
         &self,
         server: &str,
+        environment_id: Option<&str>,
         tool: &str,
         arguments: Option<serde_json::Value>,
         meta: Option<serde_json::Value>,
@@ -1282,12 +1732,8 @@ impl XdcodeThread {
         self.session
             .services
             .mcp_runtime
-            .latest_call_tool(
-                server, tool, /*environment_id*/ None, arguments, meta,
-                /*requested_timeout*/ None, /*wait_for_server*/ true,
-            )
+            .latest_call_tool_without_attribution(server, environment_id, tool, arguments, meta)
             .await
-            .map(|call| call.result)
     }
 
     pub fn enabled(&self, feature: Feature) -> bool {
@@ -1325,6 +1771,10 @@ impl XdcodeThread {
         &self,
         control: &dyn AgentControl,
     ) -> XdcodeResult<()> {
+        // The host checks and reserves capacity when the task starts.
+        if self.session.host_turn_admission().is_some() {
+            return Ok(());
+        }
         if self.session.active_turn.lock().await.is_some() {
             return Ok(());
         }

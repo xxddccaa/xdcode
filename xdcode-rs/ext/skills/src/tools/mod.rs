@@ -73,7 +73,11 @@ pub(crate) fn skill_tools(
         .get::<SkillsSessionState>()
         .and_then(|state| state.mcp_resources.clone());
     let analytics = SkillAnalytics::from_stores(session_store, thread_store);
+    let metrics = step_store
+        .get::<Arc<dyn ExtensionMetrics>>()
+        .map(|metrics| Arc::clone(metrics.as_ref()));
     let context = SkillToolContext {
+        thread_id: thread_store.level_id().to_string(),
         providers,
         mcp_resources,
         thread_state,
@@ -86,10 +90,14 @@ pub(crate) fn skill_tools(
         }),
         Arc::new(read::ReadTool {
             context: context.clone(),
+            metrics: metrics.clone(),
         }),
     ];
     if context.step_state.discovery_v2 {
-        tools.push(Arc::new(installations::InstallationsTool { context }));
+        tools.push(Arc::new(installations::InstallationsTool {
+            context,
+            metrics,
+        }));
     }
     tools
 }
@@ -204,6 +212,7 @@ impl SkillAnalytics {
 
 #[derive(Clone)]
 struct SkillToolContext {
+    thread_id: String,
     providers: SkillProviders,
     mcp_resources: Option<Arc<McpResourceClient>>,
     thread_state: Arc<SkillsThreadState>,
@@ -235,7 +244,7 @@ impl SkillToolContext {
                 .collect::<Vec<_>>()
         };
         let locator = package.as_str();
-        let exact = matching_entries(locator, None);
+        let exact = matching_entries(locator, /*alias_source*/ None);
         if !exact.is_empty() || locator.starts_with("skill://") {
             return Ok(exact);
         }
@@ -256,6 +265,7 @@ impl SkillToolContext {
                 })
             })
             .collect::<Vec<_>>();
+        // Separate environments can each have an installation of the same package.
         if let Some(((_, first), rest)) = named.split_first()
             && rest.iter().any(|(_, source)| {
                 source.authority != first.authority || source.package != first.package

@@ -20,6 +20,7 @@ use xdcode_core::config::ConfigBuilder;
 use xdcode_core::config::ConfigOverrides;
 pub use xdcode_core::test_support::TestXdcodeResponsesRequestKind;
 pub use xdcode_core::test_support::responses_metadata;
+use xdcode_features::Feature;
 use xdcode_utils_absolute_path::AbsolutePathBuf;
 pub use xdcode_utils_absolute_path::test_support::PathBufExt;
 pub use xdcode_utils_absolute_path::test_support::PathExt;
@@ -29,10 +30,13 @@ pub mod apps_test_server;
 pub mod code_mode_host;
 pub mod context_snapshot;
 pub mod exec_server;
+pub mod guardian;
 pub mod hooks;
 pub mod network_policy_mcp;
+pub mod oauth;
 pub mod process;
 pub mod responses;
+pub mod runtime_auth;
 pub mod startup;
 pub mod streaming_sse;
 mod test_environment;
@@ -211,6 +215,7 @@ pub async fn load_default_config_for_test_with_cloud_config_bundle(
     xdcode_home: &TempDir,
     cloud_config_bundle: CloudConfigBundleLoader,
 ) -> Config {
+    // xdcode has no hosted default provider; tests need an explicit local one.
     let config_path = xdcode_home.path().join("config.toml");
     if !config_path.exists() {
         std::fs::write(
@@ -227,14 +232,21 @@ experimental_bearer_token = "xdcode-test-credential"
         )
         .expect("write explicit test provider");
     }
-    ConfigBuilder::default()
+    let mut config = ConfigBuilder::default()
         .loader_overrides(LoaderOverrides::without_managed_config_for_tests())
         .xdcode_home(xdcode_home.path().to_path_buf())
         .harness_overrides(default_test_overrides())
         .cloud_config_bundle(cloud_config_bundle)
         .build()
         .await
-        .expect("defaults for test should always succeed")
+        .expect("defaults for test should always succeed");
+    for feature in [Feature::ToolSuggest, Feature::RecommendedPlugins] {
+        config
+            .features
+            .disable(feature)
+            .expect("test config should allow disabling plugin recommendations");
+    }
+    config
 }
 
 pub fn managed_network_requirements_loader() -> CloudConfigBundleLoader {
@@ -288,6 +300,16 @@ where
 {
     use tokio::time::Duration;
     wait_for_event_with_timeout(xdcode, predicate, Duration::from_secs(1)).await
+}
+
+pub async fn wait_for_successful_turn(xdcode: &XdcodeThread) {
+    use xdcode_protocol::protocol::EventMsg;
+
+    let event = wait_for_event(xdcode, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+    assert!(
+        matches!(&event, EventMsg::TurnComplete(completed) if completed.error.is_none()),
+        "turn failed: {event:?}"
+    );
 }
 
 /// Waits for a configured MCP server to finish startup and requires it to be ready.

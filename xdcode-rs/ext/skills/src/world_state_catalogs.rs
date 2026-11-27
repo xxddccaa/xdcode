@@ -130,10 +130,11 @@ impl<'a> CatalogRenderingContext<'a> {
         });
 
         let render_policy = if step_state.discovery_v2 {
-            SkillCatalogRenderPolicy::DiscoveryV2
+            SkillCatalogRenderPolicy::DISCOVERY_V2
         } else {
-            SkillCatalogRenderPolicy::ExtensionCompatible
-        };
+            SkillCatalogRenderPolicy::EXTENSION_COMPATIBLE
+        }
+        .with_omitted_descriptions(step_state.config.omit_descriptions);
         Some(Self {
             input,
             step_state,
@@ -195,10 +196,7 @@ impl<'a> CatalogRenderingContext<'a> {
                     &entry.id.0,
                     entry.authority.kind.to_string(),
                     &entry.name,
-                    entry
-                        .short_description
-                        .as_ref()
-                        .unwrap_or(&entry.description),
+                    self.render_policy.description(entry),
                     entry.rendered_path(),
                     entry.alias_root(),
                     entry.alias_root_order(),
@@ -250,7 +248,8 @@ impl<'a> CatalogRenderingContext<'a> {
             );
             let host = PreparedSkillCatalog::new(
                 &catalogs.host.catalog,
-                SkillCatalogRenderPolicy::CoreCompatible,
+                SkillCatalogRenderPolicy::CORE_COMPATIBLE
+                    .with_omitted_descriptions(self.step_state.config.omit_descriptions),
             );
             let grants = self
                 .input
@@ -275,7 +274,6 @@ impl<'a> CatalogRenderingContext<'a> {
                 }
             }
         }
-
         [
             (CatalogKind::Executor, catalogs.executor, rendered.executor),
             (CatalogKind::Cloud, catalogs.cloud, rendered.cloud),
@@ -327,7 +325,8 @@ impl<'a> CatalogRenderingContext<'a> {
             ),
             &PreparedSkillCatalog::new(
                 &catalogs.host.catalog,
-                SkillCatalogRenderPolicy::CoreCompatible,
+                SkillCatalogRenderPolicy::CORE_COMPATIBLE
+                    .with_omitted_descriptions(self.step_state.config.omit_descriptions),
             ),
             self.metadata_budget,
             self.include_usage,
@@ -384,7 +383,8 @@ impl<'a> CatalogRenderingContext<'a> {
             &PreparedSkillCatalog::new(&SkillCatalog::default(), self.render_policy),
             &PreparedSkillCatalog::new(
                 &catalogs.host.catalog,
-                SkillCatalogRenderPolicy::CoreCompatible,
+                SkillCatalogRenderPolicy::CORE_COMPATIBLE
+                    .with_omitted_descriptions(self.step_state.config.omit_descriptions),
             ),
             filesystem_budget,
             self.include_usage,
@@ -490,7 +490,7 @@ impl<'a> CatalogRenderingContext<'a> {
     }
 }
 
-/// Returns complete sections, omitting catalogs unavailable in this step.
+/// Renders catalog sections, retaining empty delta snapshots for shared budget accounting.
 pub(crate) fn render_world_state_sections(
     event_sink: Arc<dyn ExtensionEventSink>,
     input: WorldStateContributionInput<'_>,
@@ -521,6 +521,8 @@ pub(crate) fn render_world_state_sections(
     context
         .render_world_state_catalogs()
         .into_iter()
+        // Keep empty snapshots too: a source that becomes available later must use
+        // the same remaining budget instead of publishing another initial catalog.
         .filter(|catalog| {
             context.step_state.config.catalog_deltas_enabled
                 || catalog.status != CatalogStatus::Unavailable

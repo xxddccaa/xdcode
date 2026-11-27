@@ -6,9 +6,11 @@ mod turn;
 mod turn_token_usage;
 
 pub(crate) use crate::tools::ExecutedToolCalls;
+pub(crate) use additional_context::AdditionalContextFormat;
 pub(crate) use additional_context::AdditionalContextStore;
 pub(crate) use auto_compact_window::AutoCompactWindowIds;
 pub(crate) use auto_compact_window::AutoCompactWindowSnapshot;
+pub(crate) use auto_compact_window::ContextWindowIdGenerator;
 pub(crate) use service::SessionServices;
 pub(crate) use session::ReasoningEffortPin;
 pub(crate) use session::SessionState;

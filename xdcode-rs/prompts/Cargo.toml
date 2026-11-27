@@ -23,6 +23,7 @@ xdcode-protocol = { workspace = true }
 xdcode-utils-absolute-path = { workspace = true }
 xdcode-utils-template = { workspace = true }
 tracing = { workspace = true }
+whoami = { workspace = true }
 
 [dev-dependencies]
 xdcode-protocol-test-support = { workspace = true }

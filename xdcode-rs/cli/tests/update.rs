@@ -18,6 +18,9 @@ fn official_updater_commands_are_rejected() -> Result<()> {
             .assert()
             .failure();
     }
-    assert!(std::fs::read_dir(home.path())?.next().is_none());
+    // Only the launcher's scratch `tmp/` (arg0 helper links) may appear; no update state.
+    for entry in std::fs::read_dir(home.path())? {
+        assert_eq!(entry?.file_name(), "tmp");
+    }
     Ok(())
 }

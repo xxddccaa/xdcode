@@ -60,10 +60,13 @@ use xdcode_app_server_protocol::RemoteControlPairingStartResponse;
 use xdcode_app_server_protocol::RemoteControlPairingStatusParams;
 use xdcode_app_server_protocol::RemoteControlPairingStatusResponse;
 use xdcode_app_server_protocol::RemoteControlStatusChangedNotification;
+use xdcode_features::RuntimeAuthMode;
 use xdcode_login::AuthManager;
+use xdcode_runtime_agent_instance::RuntimeAuthSlot;
 use xdcode_state::StateRuntime;
 
 pub struct RemoteControlStartConfig {
+    pub runtime_auth: Option<(RuntimeAuthSlot, RuntimeAuthMode)>,
     pub remote_control_url: String,
     pub installation_id: String,
     pub policy: RemoteControlPolicy,
@@ -1005,3 +1008,7 @@ fn same_remote_control_enrollment(
 mod segment_tests;
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "runtime_auth_tests.rs"]
+mod runtime_auth_tests;

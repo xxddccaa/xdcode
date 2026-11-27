@@ -112,12 +112,6 @@ function findXdcodeExecutable() {
 
 const binaryPath = findXdcodeExecutable();
 
-// Use an asynchronous spawn instead of spawnSync so that Node is able to
-// respond to signals (e.g. Ctrl-C / SIGINT) while the native binary is
-// executing. This allows us to forward those signals to the child process
-// and guarantees that when either the child terminates or the parent
-// receives a fatal signal, both processes exit in a predictable manner.
-
 function isPnpmOwnedXdcodeInstall(nodeModulesDir) {
   if (!existsSync(path.join(nodeModulesDir, ".modules.yaml"))) {
     return false;
@@ -239,11 +233,17 @@ delete env.XDCODE_MANAGED_BY_PNPM;
 delete env.XDCODE_MANAGED_BY_VITE_PLUS;
 env[packageManagerEnvVar] = "1";
 
+// Replace Node so the native binary receives signals and exits directly.
+// Node exposes execve on Windows too, but calling it there is unsupported.
 if (process.platform !== "win32" && typeof process.execve === "function") {
+  // Node ignores SIGXFSZ, and ignored signals survive execve. Installing a
+  // handler lets execve restore the default disposition in the native binary.
   process.on("SIGXFSZ", () => {});
   process.execve(binaryPath, [binaryPath, ...process.argv.slice(2)], env);
 }
 
+// Older Node versions and Windows need a child process. Spawn asynchronously
+// so Node can forward signals while the native binary is executing.
 const child = spawn(binaryPath, process.argv.slice(2), {
   stdio: "inherit",
   env,
@@ -258,14 +258,9 @@ child.on("error", (err) => {
   process.exit(1);
 });
 
-// Forward common termination signals to the child so that it shuts down
-// gracefully. In the handler we temporarily disable the default behavior of
-// exiting immediately; once the child has been signaled we simply wait for
-// its exit event which will in turn terminate the parent (see below).
+// Keep forwarding signals until the child exits so a second signal can
+// interrupt a graceful shutdown.
 const forwardSignal = (signal) => {
-  if (child.killed) {
-    return;
-  }
   try {
     child.kill(signal);
   } catch {
@@ -293,6 +288,7 @@ const childResult = await new Promise((resolve) => {
 });
 
 if (childResult.type === "signal") {
+  // Preserve a failure exit code even if Node ignores the re-emitted signal.
   process.exitCode = 128 + constants.signals[childResult.signal];
   process.removeAllListeners(childResult.signal);
   process.kill(process.pid, childResult.signal);

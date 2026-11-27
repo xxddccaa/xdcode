@@ -4,10 +4,12 @@
 //! limits, add-credit nudges, and feedback uploads. Results are routed back through `AppEvent` so
 //! the main event loop remains single-threaded.
 
-use super::feedback_upload::fetch_feedback_upload;
+use super::feedback_upload::deliver_feedback;
 use super::plugin_mentions::fetch_plugin_mentions;
 use super::*;
 use crate::app_event::ConnectorsSnapshot;
+use crate::app_event::FeedbackDestination;
+use crate::app_event::FeedbackReceipt;
 use crate::app_info::app_info_from_api;
 use crate::chatwidget::ThreadUsageOutcome;
 use crate::config_update::format_config_error;
@@ -27,6 +29,7 @@ use xdcode_app_server_protocol::MarketplaceUpgradeResponse;
 use xdcode_app_server_protocol::McpServerOauthLoginParams;
 use xdcode_app_server_protocol::RequestId;
 
+use crate::hooks_rpc::HooksListTarget;
 use crate::hooks_rpc::fetch_hooks_list;
 use crate::hooks_rpc::write_hook_trust;
 use crate::hooks_rpc::write_hook_trusts;
@@ -45,6 +48,7 @@ impl App {
         app_server: &AppServerSession,
         request_id: String,
         name: String,
+        environment_id: Option<String>,
         thread_id: ThreadId,
     ) {
         let request_handle = app_server.request_handle();
@@ -54,6 +58,7 @@ impl App {
                 .request_typed(ClientRequest::McpServerOauthLogin {
                     request_id: RequestId::String(request_id.clone()),
                     params: McpServerOauthLoginParams {
+                        environment_id,
                         name,
                         thread_id: Some(thread_id.to_string()),
                         client_registration: None,
@@ -156,8 +161,14 @@ impl App {
         &mut self,
         app_server: &AppServerSession,
         thread_id: ThreadId,
-        request_id: u64,
+        request_id: Uuid,
     ) {
+        if !self
+            .chat_widget
+            .is_pending_thread_usage(thread_id, request_id)
+        {
+            return;
+        }
         let request_handle = app_server.request_handle();
         let app_event_tx = self.app_event_tx.clone();
         tokio::spawn(async move {
@@ -209,8 +220,11 @@ impl App {
     pub(super) fn refresh_status_line_workspace_headline(
         &mut self,
         app_server: &AppServerSession,
-        request_id: u64,
+        request_id: Uuid,
     ) {
+        if !self.chat_widget.is_pending_workspace_headline(request_id) {
+            return;
+        }
         let request_handle = app_server.request_handle();
         let app_event_tx = self.app_event_tx.clone();
         tokio::spawn(async move {
@@ -253,16 +267,24 @@ impl App {
     /// app-server RPC finishes. User-initiated skills refreshes still use the blocking app command path so
     /// callers that explicitly asked for fresh skill state do not race ahead of their own refresh.
     pub(super) fn refresh_startup_skills(&mut self, app_server: &AppServerSession) {
+        // A remote session refreshes its skills when thread/start supplies its cwd.
+        if app_server.thread_params_mode() == crate::ThreadParamsMode::Cloud
+            || (app_server.thread_params_mode() == crate::ThreadParamsMode::Remote
+                && self.chat_widget.thread_id().is_none())
+        {
+            self.skill_load_warnings.startup_complete = true;
+            return;
+        }
         let request_handle = app_server.request_handle();
         let app_event_tx = self.app_event_tx.clone();
-        let cwd = self.config.cwd.to_path_buf();
+        let cwd = self.chat_widget.session_cwd().clone();
         tokio::spawn(async move {
             let request_id = RequestId::String(format!("startup-skills-list-{}", Uuid::new_v4()));
             let result = fetch_skills_list(
                 request_handle,
                 request_id,
                 SkillsListParams {
-                    cwds: vec![cwd.clone()],
+                    cwds: vec![cwd.to_path_buf()],
                     force_reload: true,
                 },
             )
@@ -332,14 +354,18 @@ impl App {
         });
     }
 
-    pub(super) fn fetch_hooks_list(&mut self, app_server: &AppServerSession, cwd: PathBuf) {
+    pub(super) fn fetch_hooks_list(
+        &mut self,
+        app_server: &AppServerSession,
+        target: HooksListTarget,
+    ) {
         let request_handle = app_server.request_handle();
         let app_event_tx = self.app_event_tx.clone();
         tokio::spawn(async move {
-            let result = fetch_hooks_list(request_handle, cwd.clone())
+            let result = fetch_hooks_list(request_handle, &target)
                 .await
                 .map_err(|err| err.to_string());
-            app_event_tx.send(AppEvent::HooksLoaded { cwd, result });
+            app_event_tx.send(AppEvent::HooksLoaded { target, result });
         });
     }
 
@@ -611,7 +637,7 @@ impl App {
                     });
                 }
                 Err(err) => {
-                    tracing::warn!(error = %err, "plugin/list failed while refreshing plugin mention candidates");
+                    tracing::warn!(error = %err, "plugin/installed failed while refreshing plugin mention candidates");
                 }
             }
         });
@@ -624,30 +650,34 @@ impl App {
         reason: Option<String>,
         turn_id: Option<String>,
         include_logs: bool,
+        destination: FeedbackDestination,
     ) {
+        if destination == FeedbackDestination::LocalZip && app_server.uses_remote_workspace() {
+            self.chat_widget.add_info_message(
+                "Saving a feedback ZIP requires a local app server.".to_string(),
+                /*hint*/ None,
+            );
+            return;
+        }
         let request_handle = app_server.request_handle();
         let app_event_tx = self.app_event_tx.clone();
         let origin_thread_id = self.chat_widget.thread_id();
-        let rollout_path = if include_logs {
-            self.chat_widget.rollout_path()
-        } else {
-            None
-        };
-        let params = build_feedback_upload_params(
+        let params = build_feedback_params(
             origin_thread_id,
-            rollout_path,
+            self.chat_widget.rollout_path(),
             category,
             reason,
             turn_id,
             include_logs,
+            destination,
         );
         let xdcode_home = app_server.xdcode_home_path(&self.config.xdcode_home);
         let feedback = self.feedback.clone();
         tokio::spawn(async move {
-            let result = fetch_feedback_upload(request_handle, xdcode_home, params, feedback)
-                .await
-                .map(|response| response.thread_id)
-                .map_err(|err| err.to_string());
+            let result =
+                deliver_feedback(request_handle, xdcode_home, params, feedback, destination)
+                    .await
+                    .map_err(|err| format!("{err:#}"));
             app_event_tx.send(AppEvent::FeedbackSubmitted {
                 origin_thread_id,
                 category,
@@ -659,7 +689,7 @@ impl App {
 
     pub(super) fn handle_feedback_thread_event(&mut self, event: FeedbackThreadEvent) {
         match event.result {
-            Ok(thread_id) => {
+            Ok(FeedbackReceipt::Uploaded { thread_id }) => {
                 self.chat_widget
                     .add_to_history(crate::bottom_pane::feedback_success_cell(
                         event.category,
@@ -668,11 +698,16 @@ impl App {
                         event.feedback_audience,
                     ))
             }
+            Ok(FeedbackReceipt::Saved { path }) => {
+                self.chat_widget
+                    .add_to_history(history_cell::new_info_event(
+                        format!("Feedback ZIP saved to {path}"),
+                        /*hint*/ None,
+                    ))
+            }
             Err(err) => self
                 .chat_widget
-                .add_to_history(history_cell::new_error_event(format!(
-                    "Failed to upload feedback: {err}"
-                ))),
+                .add_to_history(history_cell::new_error_event(err)),
         }
     }
 
@@ -715,7 +750,7 @@ impl App {
         origin_thread_id: Option<ThreadId>,
         category: FeedbackCategory,
         include_logs: bool,
-        result: Result<String, String>,
+        result: Result<FeedbackReceipt, String>,
     ) {
         let event = FeedbackThreadEvent {
             category,
@@ -801,6 +836,7 @@ pub(super) async fn fetch_all_mcp_server_statuses(
             .request_typed(ClientRequest::McpServerStatusList {
                 request_id,
                 params: ListMcpServerStatusParams {
+                    environment_id: None,
                     cursor: cursor.clone(),
                     limit: Some(100),
                     detail: Some(detail),
@@ -1172,15 +1208,18 @@ pub(super) async fn write_hook_enabled(
         .wrap_err("config/batchWrite failed while updating hook enablement in TUI")
 }
 
-pub(super) fn build_feedback_upload_params(
+pub(super) fn build_feedback_params(
     origin_thread_id: Option<ThreadId>,
     rollout_path: Option<PathBuf>,
     category: FeedbackCategory,
     reason: Option<String>,
     turn_id: Option<String>,
     include_logs: bool,
+    destination: FeedbackDestination,
 ) -> FeedbackUploadParams {
-    let extra_log_files = if include_logs {
+    // The app-server `feedback/save` RPC handler selects persisted transcripts by thread ID.
+    // The TUI can already know a future rollout path before the first turn writes it.
+    let extra_log_files = if include_logs && destination == FeedbackDestination::Provider {
         rollout_path.map(|rollout_path| vec![rollout_path])
     } else {
         None
@@ -1272,6 +1311,11 @@ mod tests {
             .respond_with(wiremock::ResponseTemplate::new(/*s*/ 200).set_body_string("{}"))
             .mount(&server)
             .await;
+        std::fs::write(
+            app.config.xdcode_home.join("config.toml"),
+            format!("chatgpt_base_url = {:?}\n", server.uri()),
+        )
+        .expect("persist endpoint for account config reloads");
         write_chatgpt_auth(
             app.config.xdcode_home.as_path(),
             ChatGptAuthFixture::new("chatgpt-token").account_id("account-123"),
@@ -1315,8 +1359,9 @@ mod tests {
                 serde_json::json!({
                     "threads": [{
                         "thread_id": thread_id.to_string(),
-                        "estimated_usage_credits_micros": 46_000_000,
-                        "estimated_usage_usd_micros": 1_820_000
+                        "estimated_usage_credits_micros": 0,
+                        "estimated_usage_usd_micros": 0,
+                        "native_usage_usd_micros": 750_000
                     }]
                 }),
             ))
@@ -1329,9 +1374,10 @@ mod tests {
                 .await
                 .expect("read thread usage through the authenticated app server"),
             ThreadUsageOutcome::Available(ThreadUsage {
+                native_usage_usd_micros: Some(750_000),
                 thread_id: thread_id.to_string(),
-                estimated_usage_credits_micros: 46_000_000,
-                estimated_usage_usd_micros: Some(1_820_000),
+                estimated_usage_credits_micros: 0,
+                estimated_usage_usd_micros: Some(0),
                 groups: Vec::new(),
             })
         );
@@ -1490,6 +1536,7 @@ mod tests {
     fn mcp_inventory_maps_prefix_tool_names_by_server() {
         let statuses = vec![
             McpServerStatus {
+                environment_id: None,
                 server_capabilities: None,
                 tool_list_meta: None,
                 tools_error: None,
@@ -1516,6 +1563,7 @@ mod tests {
                 auth_status: xdcode_app_server_protocol::McpAuthStatus::Unsupported,
             },
             McpServerStatus {
+                environment_id: None,
                 server_capabilities: None,
                 tool_list_meta: None,
                 tools_error: None,
@@ -1571,17 +1619,18 @@ mod tests {
     }
 
     #[test]
-    fn build_feedback_upload_params_includes_thread_id_and_rollout_path() {
+    fn build_feedback_params_includes_thread_id_and_rollout_path() {
         let thread_id = ThreadId::new();
         let rollout_path = PathBuf::from("/tmp/rollout.jsonl");
 
-        let params = build_feedback_upload_params(
+        let params = build_feedback_params(
             Some(thread_id),
             Some(rollout_path.clone()),
             FeedbackCategory::SafetyCheck,
             Some("needs follow-up".to_string()),
             Some("turn-123".to_string()),
             /*include_logs*/ true,
+            FeedbackDestination::Provider,
         );
 
         assert_eq!(params.classification, "safety_check");
@@ -1600,14 +1649,15 @@ mod tests {
     }
 
     #[test]
-    fn build_feedback_upload_params_omits_rollout_path_without_logs() {
-        let params = build_feedback_upload_params(
+    fn build_feedback_params_omits_rollout_path_without_logs() {
+        let params = build_feedback_params(
             /*origin_thread_id*/ None,
             Some(PathBuf::from("/tmp/rollout.jsonl")),
             FeedbackCategory::GoodResult,
             /*reason*/ None,
             /*turn_id*/ None,
             /*include_logs*/ false,
+            FeedbackDestination::Provider,
         );
 
         assert_eq!(params.classification, "good_result");

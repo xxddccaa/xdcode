@@ -9,6 +9,7 @@ use xdcode_core::config::Config;
 use xdcode_feedback::XdcodeFeedback;
 use xdcode_state::LogWriteFailureReporter;
 
+use crate::outgoing_message::NotificationTarget;
 use crate::outgoing_message::OutgoingMessageSender;
 
 const LOG_WRITE_WARNING_WITH_FEEDBACK: &str = "Xdcode couldn't save diagnostic logs to its local database. Use /feedback with logs included before closing Xdcode, or run `xdcode doctor` for diagnostics.";
@@ -45,12 +46,13 @@ impl LogWriteWarningReporter {
         if !self.has_failure.swap(true, Ordering::Relaxed)
             && let Some(outgoing) = self.outgoing.upgrade()
         {
-            outgoing.try_send_server_notification(ServerNotification::Warning(
-                WarningNotification {
+            outgoing.try_send_server_notification(
+                NotificationTarget::Broadcast,
+                ServerNotification::Warning(WarningNotification {
                     thread_id: None,
                     message: self.message.to_string(),
-                },
-            ));
+                }),
+            );
         }
     }
 }

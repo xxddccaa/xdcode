@@ -15,8 +15,11 @@ workspace = true
 [dependencies]
 xdcode-backend-client = { workspace = true }
 xdcode-extension-api = { workspace = true }
+xdcode-features = { workspace = true }
 xdcode-http-client = { workspace = true }
 xdcode-login = { workspace = true }
+xdcode-model-provider = { workspace = true }
+xdcode-runtime-agent-instance = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["time"] }
 

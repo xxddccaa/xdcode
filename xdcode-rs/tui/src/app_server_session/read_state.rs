@@ -4,7 +4,7 @@ use super::*;
 use xdcode_app_server_protocol::ThreadReadState;
 
 pub(crate) fn unread_revision(state: Option<ThreadReadState>) -> Option<String> {
-    state.and_then(|state| state.first_unread.map(|_| state.revision))
+    state.and_then(|s| s.first_unread.map(|_| s.revision))
 }
 
 impl AppServerSession {
@@ -66,6 +66,7 @@ impl AppServerSession {
                 )
             };
             let mut result = send().await;
+            // Retrying the same revision cannot clear a result published in the meantime.
             if matches!(&result, Err(TypedRequestError::Server { source, .. }) if matches!(source.code, -32603 | -32001))
             {
                 tokio::time::sleep(Duration::from_millis(250)).await;

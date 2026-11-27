@@ -11,6 +11,7 @@ use wiremock::MockServer;
 use wiremock::ResponseTemplate;
 use wiremock::matchers::method;
 use wiremock::matchers::path;
+use xdcode_model_provider::ClientAuth;
 
 #[tokio::test]
 async fn ordinary_usage_permission_comes_from_backend_not_display_percent() {
@@ -178,7 +179,7 @@ fn test_client(base_url: &str, path_style: PathStyle) -> Client {
             ),
             xdcode_http_client::ClientRouteClass::Api,
         ),
-        auth_provider: xdcode_model_provider::unauthenticated_auth_provider(),
+        auth: ClientAuth::new(xdcode_model_provider::unauthenticated_auth_provider()),
         user_agent: None,
         chatgpt_account_id: None,
         chatgpt_account_is_fedramp: false,

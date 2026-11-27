@@ -52,9 +52,9 @@ fn copy_uses_osc52_when_tmux_fails_even_if_native_copy_succeeds() {
         CopyEnvironment {
             herdr_session: false,
             ssh_session: false,
+            forwarded_x11: false,
             tmux_session: true,
             wsl_session: false,
-            forwarded_x11: false,
         },
         |_| {
             calls.borrow_mut().push("tmux");

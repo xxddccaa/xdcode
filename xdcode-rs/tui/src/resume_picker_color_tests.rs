@@ -15,6 +15,8 @@ fn thread_colors_and_selection_contrast_in_both_picker_layouts() {
             .clone(),
     );
     let row = Row {
+        backend_id: None,
+        history_mode: None,
         path: None,
         thread_id: Some(ThreadId::from_u128(/*value*/ 42)),
         thread_name: Some("Named task".into()),
@@ -166,6 +168,8 @@ fn compact_picker_keeps_metadata_and_labeled_primary_actions() {
     state.relative_time_reference = timestamp;
     state.filtered_rows = (1..=6)
         .map(|id| Row {
+            backend_id: None,
+            history_mode: None,
             path: None,
             thread_id: Some(ThreadId::from_u128(id)),
             thread_name: Some(format!("Session {id}")),
@@ -243,7 +247,7 @@ fn reversed_selection_overrides_thread_color() {
     let line = session_summary_line(
         vec![],
         "Title".fg(rgb_color((150, 50, 170))),
-        true,
+        /*unread*/ true,
         row,
         /*width*/ 12,
     );

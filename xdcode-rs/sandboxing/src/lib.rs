@@ -1,7 +1,7 @@
 #[cfg(target_os = "linux")]
 mod bwrap;
 mod denial;
-pub mod landlock;
+pub mod linux;
 mod linux_pid_namespace;
 mod manager;
 pub mod policy_transforms;
@@ -12,7 +12,6 @@ mod spawn;
 mod terminal_queries;
 mod violation;
 mod windows;
-#[cfg(windows)]
 mod windows_mxc;
 
 #[cfg(target_os = "linux")]
@@ -27,19 +26,23 @@ pub use denial::is_likely_executor_managed_sandbox_denied;
 pub use denial::is_likely_sandbox_denied;
 pub use linux_pid_namespace::LinuxSandboxPidNamespace;
 pub use manager::SandboxCommand;
-pub use manager::SandboxDirectSpawnTransformRequest;
 pub use manager::SandboxExecRequest;
+pub use manager::SandboxExecutables;
 pub use manager::SandboxManager;
+pub use manager::SandboxNetwork;
+pub use manager::SandboxSelection;
 pub use manager::SandboxTransformError;
 pub use manager::SandboxTransformRequest;
 pub use manager::SandboxType;
 pub use manager::SandboxablePreference;
-pub use manager::compatibility_sandbox_policy_for_permission_profile;
 pub use manager::get_platform_sandbox;
+pub use manager::launch::WrappedSandboxCommand;
 pub use manager::with_managed_mitm_ca_readable_root;
 pub use sandbox_integrity::FileContentsChecker;
 pub use sandbox_integrity::IntegrityFinding;
 pub use sandbox_integrity::IntegrityFindingDetails;
+pub use sandbox_integrity::SandboxIntegrityRequest;
+pub use spawn::SpawnOptions;
 pub use spawn::SpawnRequest;
 pub use spawn::WindowsSandboxSpawnRequest;
 pub use spawn::spawn_process;
@@ -52,6 +55,8 @@ pub use violation::record_filesystem_sandbox_violation;
 pub use violation::record_network_sandbox_violation;
 pub use violation::record_sandbox_violation;
 pub use windows::WindowsSandboxFilesystemOverrides;
+pub use windows::executor_managed_proxy_routing;
+pub use windows::managed_proxy_routing_for_windows_sandbox;
 pub use windows::permission_profile_supports_windows_restricted_token_sandbox;
 pub use windows::resolve_windows_elevated_filesystem_overrides;
 pub use windows::resolve_windows_restricted_token_filesystem_overrides;
@@ -59,6 +64,7 @@ pub use windows::windows_sandbox_uses_elevated_backend;
 pub use xdcode_mxc_sandbox::XDCODE_WINDOWS_MXC_ARG1;
 pub use xdcode_mxc_sandbox::is_available as windows_mxc_available;
 pub use xdcode_mxc_sandbox::run_main as run_windows_mxc_main;
+pub use xdcode_protocol::permissions::compatibility_sandbox_policy_for_permission_profile;
 pub use xdcode_windows_sandbox::WindowsSandboxProxySettingsMode;
 
 use xdcode_protocol::error::XdcodeErr;
@@ -79,8 +85,11 @@ impl From<SandboxTransformError> for XdcodeErr {
             | error @ SandboxTransformError::InvalidSandboxPolicyCwd { .. } => {
                 XdcodeErr::InvalidRequest(error.to_string())
             }
+            error @ SandboxTransformError::SandboxUnavailable => {
+                XdcodeErr::UnsupportedOperation(error.to_string())
+            }
             SandboxTransformError::MissingLinuxSandboxExecutable => {
-                XdcodeErr::LandlockSandboxExecutableNotProvided
+                XdcodeErr::LinuxSandboxExecutableNotProvided
             }
             SandboxTransformError::EnvironmentNetworkProxy(message) => {
                 XdcodeErr::UnsupportedOperation(message)

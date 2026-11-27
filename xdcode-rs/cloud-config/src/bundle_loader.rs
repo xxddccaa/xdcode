@@ -1,5 +1,5 @@
-use crate::config_server::config_server_http_client_factory;
 use crate::config_source::BundleSource;
+use crate::discovery::ConfigServerDiscovery;
 use crate::service::CloudConfigBundleService;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -10,19 +10,75 @@ use xdcode_config::ConfigRequirementsToml;
 use xdcode_http_client::HttpClientFactory;
 use xdcode_login::AuthConfig;
 use xdcode_login::AuthManager;
+use xdcode_login::OAuthDeviceCodePrompt;
+use xdcode_login::OAuthSessionManager;
+use xdcode_login::XdcodeAuth;
+use xdcode_protocol::account::PlanType;
 
-pub fn managed_config_auth_manager(
+const CONFIG_SERVER_LOGIN_FAILURE: &str =
+    "Config server sign-in failed. Check config_server.oauth and the credential store.";
+
+pub async fn managed_config_auth_manager(
     auth: AuthConfig,
     requirements: &ConfigRequirementsToml,
-) -> std::io::Result<Option<xdcode_login::OAuthSessionManager>> {
+) -> std::io::Result<Option<OAuthSessionManager>> {
     let Some(service_config) = requirements.config_server.as_ref() else {
         return Ok(None);
     };
-    let factory = config_server_http_client_factory(service_config, &auth.auth_route_config);
-    crate::config_server_auth_manager(service_config, auth.xdcode_home, &factory)
+    crate::config_server_auth_manager(
+        service_config,
+        auth.xdcode_home,
+        &auth.auth_route_config,
+        ConfigServerDiscovery::Disabled,
+    )
+    .await
 }
 
-pub fn managed_config_bundle_loader(
+/// How to sign in when the config server has no saved OAuth grant.
+pub enum ConfigServerLoginMethod {
+    Browser,
+    DeviceCode { present: fn(&OAuthDeviceCodePrompt) },
+}
+
+/// Existing grants are left to the loader's normal cache and refresh handling.
+pub async fn ensure_config_server_login(
+    auth: AuthConfig,
+    requirements: &ConfigRequirementsToml,
+    method: ConfigServerLoginMethod,
+) -> std::io::Result<()> {
+    let Some(manager) = managed_config_auth_manager(auth, requirements).await? else {
+        return Ok(());
+    };
+    ensure_config_server_login_with_manager(&manager, method).await
+}
+
+pub(crate) async fn ensure_config_server_login_with_manager(
+    manager: &OAuthSessionManager,
+    method: ConfigServerLoginMethod,
+) -> std::io::Result<()> {
+    let Some(attempt) = manager.start_login_if_required().await? else {
+        return Ok(());
+    };
+    match method {
+        ConfigServerLoginMethod::Browser => attempt.login(CONFIG_SERVER_LOGIN_FAILURE).await,
+        ConfigServerLoginMethod::DeviceCode { present } => {
+            if manager.config().device_authorization_url.is_none() {
+                return Err(std::io::Error::other(
+                    "Device sign-in requires config_server.oauth.device_authorization_url",
+                ));
+            }
+            attempt
+                .login_with_device_code(
+                    std::future::pending(),
+                    present,
+                    CONFIG_SERVER_LOGIN_FAILURE,
+                )
+                .await
+        }
+    }
+}
+
+pub async fn managed_config_bundle_loader(
     auth_manager: Arc<AuthManager>,
     chatgpt_base_url: String,
     xdcode_home: PathBuf,
@@ -30,11 +86,13 @@ pub fn managed_config_bundle_loader(
     requirements: &ConfigRequirementsToml,
 ) -> CloudConfigBundleLoader {
     if let Some(service_config) = requirements.config_server.as_ref() {
-        let factory = config_server_http_client_factory(
-            service_config,
+        return crate::config_server_bundle_loader(
+            service_config.clone(),
+            xdcode_home,
             &xdcode_login::AuthRouteConfig::from_http_client_factory(factory),
-        );
-        return crate::config_server_bundle_loader(service_config.clone(), xdcode_home, factory);
+            ConfigServerDiscovery::Disabled,
+        )
+        .await;
     }
     let endpoint = xdcode_backend_client::Client::new(chatgpt_base_url.clone(), factory.clone())
         .config_bundle_url();
@@ -42,7 +100,7 @@ pub fn managed_config_bundle_loader(
         .network_policy()
         .clone()
         .restrict_to_endpoints(endpoint.parse().into_iter().collect());
-    cloud_config_bundle_loader(
+    chatgpt_config_bundle_loader(
         auth_manager,
         chatgpt_base_url,
         xdcode_home,
@@ -56,15 +114,15 @@ pub async fn managed_config_bundle_loader_for_storage(
     enable_xdcode_api_key_env: bool,
 ) -> std::io::Result<CloudConfigBundleLoader> {
     if let Some(service_config) = requirements.config_server.as_ref() {
-        let factory =
-            config_server_http_client_factory(service_config, &auth_config.auth_route_config);
         return Ok(crate::config_server_bundle_loader(
             service_config.clone(),
             auth_config.xdcode_home,
-            factory,
-        ));
+            &auth_config.auth_route_config,
+            ConfigServerDiscovery::Disabled,
+        )
+        .await);
     }
-    cloud_config_bundle_loader_for_storage(auth_config, enable_xdcode_api_key_env).await
+    chatgpt_config_bundle_loader_for_storage(auth_config, enable_xdcode_api_key_env).await
 }
 
 struct CloudConfigBundleLoaderLifetime<C: BundleSource> {
@@ -78,7 +136,7 @@ impl<C: BundleSource> Drop for CloudConfigBundleLoaderLifetime<C> {
     }
 }
 
-pub fn cloud_config_bundle_loader(
+pub fn chatgpt_config_bundle_loader(
     _auth_manager: Arc<AuthManager>,
     _chatgpt_base_url: String,
     _xdcode_home: PathBuf,
@@ -87,7 +145,7 @@ pub fn cloud_config_bundle_loader(
     CloudConfigBundleLoader::default()
 }
 
-pub(crate) fn cloud_config_bundle_loader_for_service<C>(
+pub(crate) fn managed_config_bundle_loader_for_service<C>(
     service: CloudConfigBundleService<C>,
 ) -> (CloudConfigBundleLoader, JoinHandle<()>)
 where
@@ -118,15 +176,24 @@ where
     (loader, refresh_task)
 }
 
-pub async fn cloud_config_bundle_loader_for_storage(
+pub async fn chatgpt_config_bundle_loader_for_storage(
     _auth_config: AuthConfig,
     _enable_xdcode_api_key_env: bool,
 ) -> std::io::Result<CloudConfigBundleLoader> {
     Ok(CloudConfigBundleLoader::default())
 }
 
+/// Hosted policy is unavailable in xdcode; always returns an empty local loader.
+pub async fn managed_config_bundle_loader_for_auth(
+    _config: AuthConfig,
+    _auth: &XdcodeAuth,
+    _requirements: &ConfigRequirementsToml,
+) -> std::io::Result<CloudConfigBundleLoader> {
+    Ok(CloudConfigBundleLoader::default())
+}
+
 /// Returns an empty local loader; hosted configuration is unavailable in xdcode.
-pub async fn cloud_config_bundle_loader_for_storage_without_cache(
+pub async fn chatgpt_config_bundle_loader_for_storage_without_cache(
     _auth_config: AuthConfig,
     _enable_xdcode_api_key_env: bool,
 ) -> std::io::Result<CloudConfigBundleLoader> {

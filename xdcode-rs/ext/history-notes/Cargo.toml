@@ -24,6 +24,8 @@ xdcode-protocol = { workspace = true }
 xdcode-tools = { workspace = true }
 xdcode-utils-output-truncation = { workspace = true }
 http = { workspace = true }
+schemars = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]

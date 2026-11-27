@@ -1,9 +1,11 @@
+use std::collections::HashMap;
 use std::future::Future;
 use std::time::Duration;
 
 use crate::AuthProvider;
 use bytes::Bytes;
 use futures::Stream;
+use http::HeaderMap;
 use http::Method;
 use http::StatusCode;
 use http::header::CONTENT_LENGTH;
@@ -27,6 +29,7 @@ const PROVIDER_FILE_USE_CASE: &str = "xdcode";
 
 #[derive(Debug)]
 pub struct HostedFileUploadContext {
+    pub thread_id: Option<String>,
     pub connector_id: String,
     pub action_name: String,
     pub model: String,
@@ -105,6 +108,7 @@ pub enum ProviderFileError {
 struct CreateFileResponse {
     file_id: String,
     upload_url: String,
+    upload_headers: Option<HashMap<String, String>>,
     #[serde(default)]
     pdf_c2pa_reservation: bool,
 }
@@ -154,8 +158,8 @@ where
         "file_size": file_size_bytes,
         "use_case": PROVIDER_FILE_USE_CASE,
     });
-    let request = authorized_request(client_pool, auth, Method::POST, &create_url)?;
-    let create_request = match hosted_upload {
+    let request = authorized_request(client_pool, auth, Method::POST, &create_url).await?;
+    let mut create_request = match hosted_upload {
         Some(context) => serde_json::json!({
             "file_name": file_name.as_str(),
             "file_size": file_size_bytes,
@@ -166,6 +170,9 @@ where
         }),
         None => create_request,
     };
+    if let Some(thread_id) = hosted_upload.and_then(|context| context.thread_id.as_ref()) {
+        create_request["xdcode_thread_id"] = serde_json::Value::String(thread_id.clone());
+    }
     let create_response = request
         .json(&create_request)
         .send()
@@ -237,12 +244,18 @@ where
             if remaining.is_zero() {
                 return Err(request_error(RouteAwareRequestError::Timeout));
             }
-            client_pool
+            let mut request = client_pool
                 .put(&create_payload.upload_url)
                 .timeout(remaining)
                 .header("x-ms-blob-type", "BlockBlob")
                 .header("x-ms-client-request-id", &azure_client_request_id)
-                .header(CONTENT_LENGTH, file_size_bytes)
+                .header(CONTENT_LENGTH, file_size_bytes);
+            if let Some(headers) = &create_payload.upload_headers {
+                for (name, value) in headers {
+                    request = request.header(name.as_str(), value.as_str());
+                }
+            }
+            request
                 .body_stream(contents)
                 .send()
                 .await
@@ -366,7 +379,8 @@ where
     };
     let finalize_started_at = Instant::now();
     loop {
-        let finalize_response = authorized_request(client_pool, auth, Method::POST, &finalize_url)?
+        let finalize_response = authorized_request(client_pool, auth, Method::POST, &finalize_url)
+            .await?
             .json(&finalize_request)
             .send()
             .await
@@ -433,14 +447,13 @@ where
     }
 }
 
-fn authorized_request(
+async fn authorized_request(
     client_pool: &RouteAwareClientPool,
     auth: &dyn AuthProvider,
     method: Method,
     url: &str,
 ) -> Result<RequestBuilder, ProviderFileError> {
-    let mut headers = http::HeaderMap::new();
-    auth.add_auth_headers(&mut headers)?;
+    let headers = auth.apply_auth_headers(HeaderMap::new()).await?;
 
     Ok(client_pool
         .request(method, url)
@@ -538,20 +551,36 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/backend-api/files"))
             .and(header("chatgpt-account-id", "account_id"))
+            .and(|request: &Request| !request.headers.contains_key("x-amz-tagging"))
             .and(body_json(serde_json::json!({
                 "file_name": "hello.txt",
                 "file_size": 5,
                 "use_case": "xdcode",
             })))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(serde_json::json!({"file_id": "file_123", "upload_url": format!("{}/upload/file_123", server.uri())})),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "file_id": "file_123",
+                "upload_url": format!("{}/upload/file_123", server.uri()),
+                "upload_headers": {
+                    "Content-Type": "text/plain",
+                    "Content-Disposition": "attachment; filename=hello.txt",
+                    "x-amz-tagging": "purpose=xdcode",
+                },
+            })))
             .mount(&server)
             .await;
         Mock::given(method("PUT"))
             .and(path("/upload/file_123"))
             .and(header("content-length", "5"))
+            .and(header("content-type", "text/plain"))
+            .and(header(
+                "content-disposition",
+                "attachment; filename=hello.txt",
+            ))
+            .and(header("x-amz-tagging", "purpose=xdcode"))
+            .and(|request: &Request| {
+                !request.headers.contains_key("authorization")
+                    && !request.headers.contains_key("chatgpt-account-id")
+            })
             .and(header_regex("x-ms-client-request-id", "^[0-9a-f-]{36}$"))
             .respond_with(ResponseTemplate::new(200))
             .mount(&server)
@@ -561,6 +590,7 @@ mod tests {
         let download_url = format!("{}/download/file_123", server.uri());
         Mock::given(method("POST"))
             .and(path("/backend-api/files/file_123/uploaded"))
+            .and(|request: &Request| !request.headers.contains_key("x-amz-tagging"))
             .respond_with(move |_request: &Request| {
                 if finalize_attempts_responder.fetch_add(1, Ordering::SeqCst) == 0 {
                     return ResponseTemplate::new(200).set_body_json(serde_json::json!({
@@ -611,6 +641,7 @@ mod tests {
             "file_name": "report.pdf",
             "file_size": 8,
             "use_case": "xdcode",
+            "xdcode_thread_id": "00000000-0000-0000-0000-000000000001",
             "xdcode_connector_id": "library",
             "xdcode_action_name": "create_library_file",
             "xdcode_model": "gpt-work",
@@ -622,6 +653,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "file_id": "file_pdf",
                 "upload_url": format!("{}/upload/file_pdf", server.uri()),
+                "upload_headers": null,
                 "pdf_c2pa_reservation": true,
             })))
             .expect(1)
@@ -651,6 +683,7 @@ mod tests {
             .await;
 
         let hosted_upload = HostedFileUploadContext {
+            thread_id: Some("00000000-0000-0000-0000-000000000001".to_string()),
             connector_id: "library".to_string(),
             action_name: "create_library_file".to_string(),
             model: "gpt-work".to_string(),
@@ -676,12 +709,21 @@ mod tests {
     async fn upload_hosted_app_preserves_empty_finalization_for_older_servers() {
         let server = MockServer::start().await;
         let hosted_upload = HostedFileUploadContext {
+            thread_id: None,
             connector_id: "library".to_string(),
             action_name: "create_library_file".to_string(),
             model: "gpt-work".to_string(),
         };
         Mock::given(method("POST"))
             .and(path("/backend-api/files"))
+            .and(body_json(serde_json::json!({
+                "file_name": "report.pdf",
+                "file_size": 8,
+                "use_case": "xdcode",
+                "xdcode_connector_id": "library",
+                "xdcode_action_name": "create_library_file",
+                "xdcode_model": "gpt-work",
+            })))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "file_id": "file_pdf",
                 "upload_url": format!("{}/upload/file_pdf", server.uri()),

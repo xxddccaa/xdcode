@@ -6,6 +6,7 @@ use super::*;
 use crate::history_cell::is_session_history_prefix_cell;
 
 impl TranscriptView {
+    /// Rebuild the layout of an observed revision without counting the reflow as new output.
     pub(crate) fn rebind_observed_live_revision(&mut self, observed: u64, updated: u64) {
         if let Some((_, key)) = &mut self.live_key
             && key.revision == observed
@@ -15,7 +16,6 @@ impl TranscriptView {
         }
     }
 
-    /// Rebuild the layout of an observed revision without counting the reflow as new output.
     /// Refresh unseen activity before either footer measurement or transcript painting.
     pub(crate) fn sync_history_tail(&mut self, cells: &[Arc<dyn HistoryCell>]) {
         let tail = cells.last().map(EntryKey::cell);
@@ -46,6 +46,7 @@ impl TranscriptView {
         if range.is_empty() {
             return;
         }
+        self.invalidate_turn_details_from(range.start);
         self.retain_search_origin(cells, range.clone());
         if range.end == cells.len() && self.last_tail == cells.last().map(EntryKey::cell) {
             self.last_tail = Some(EntryKey::cell(replacement));
@@ -93,6 +94,7 @@ impl TranscriptView {
         if range.is_empty() {
             return;
         }
+        self.invalidate_turn_details_from(range.start);
         self.retain_search_origin(cells, range.clone());
         // Older history may extend the final group without introducing new activity.
         if range.end == cells.len() && self.last_tail == cells.last().map(EntryKey::cell) {

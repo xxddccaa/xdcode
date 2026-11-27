@@ -14,7 +14,7 @@ use xdcode_app_server_client::AppServerEvent;
 use xdcode_app_server_protocol::CommandExecutionStatus;
 use xdcode_model_provider_info::ModelProviderInfo;
 
-const PREAMBLE: &str = "I’ll inspect the relevant streaming path first.";
+const PREAMBLE: &str = "I’ll inspect the **relevant streaming path first.**";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn command_start_before_message_completion_does_not_duplicate_preamble() -> Result<()> {
@@ -124,31 +124,39 @@ async fn command_start_before_message_completion_does_not_duplicate_preamble() -
                     let event = event.expect("embedded app-server should stay connected");
                     let turn_completed = matches!(&event.event, AppServerEvent::ServerNotification(notification)
                         if matches!(notification.as_ref(), ServerNotification::TurnCompleted(_)));
-                    let capture_preview = matches!(&event.event, AppServerEvent::ServerNotification(notification)
-                        if matches!(notification.as_ref(), ServerNotification::AgentMessageDelta(delta) if delta.delta == PREAMBLE));
+                    let mut capture_preview = false;
                     if let AppServerEvent::ServerNotification(notification) = &event.event {
                         match notification.as_ref() {
-                            ServerNotification::AgentMessageDelta(delta) if delta.delta == PREAMBLE => {
+                            ServerNotification::ItemStarted(started)
+                                if matches!(&started.item.payload, ThreadItemPayload::AgentMessage { text, .. } if text == "I’ll inspect") => {
+                                observed_order.push("agent started");
+                                capture_preview = true;
+                            }
+                            ServerNotification::AgentMessageDelta(delta) if delta.delta == " first" => {
+                                observed_order.push("resumed delta");
+                            }
+                            ServerNotification::AgentMessageDelta(delta) if delta.item_id == "message-1" => {
                                 observed_order.push("agent delta");
+                                capture_preview = true;
                             }
                             ServerNotification::ItemStarted(started)
-                                if matches!(&started.item, ThreadItem::CommandExecution { .. }) =>
+                                if matches!(&started.item.payload, ThreadItemPayload::CommandExecution { .. }) =>
                             {
                                 observed_order.push("command started");
                                 release_completion.take().expect("first command start").send(()).expect("completion gate should remain open");
                             }
                             ServerNotification::ItemCompleted(completed)
-                                if matches!(&completed.item, ThreadItem::AgentMessage { text, .. } if text == PREAMBLE) =>
+                                if matches!(&completed.item.payload, ThreadItemPayload::AgentMessage { text, .. } if text == PREAMBLE) =>
                             {
                                 observed_order.push("agent completed");
                             }
                             ServerNotification::ItemCompleted(completed) => {
-                                if let ThreadItem::CommandExecution {
+                                if let ThreadItemPayload::CommandExecution {
                                     status,
                                     aggregated_output,
                                     exit_code,
                                     ..
-                                } = &completed.item
+                                } = &completed.item.payload
                                 {
                                     completed_command = Some((
                                         status.clone(),
@@ -166,7 +174,7 @@ async fn command_start_before_message_completion_does_not_duplicate_preamble() -
                     app.handle_backend_event(&app_server, event).await;
                     app.drain_active_thread_events(&mut tui).await?;
                     if capture_preview {
-                        let lines = app.chat_widget.active_cell_transcript_lines(80)
+                        let lines = app.chat_widget.active_cell_transcript_lines(/*width*/ 80)
                             .expect("opening reply should already be visible");
                         let preview = ratatui::text::Text::from(lines).to_string();
                         if observed_order.last() == Some(&"agent started") {
@@ -219,11 +227,12 @@ async fn command_start_before_message_completion_does_not_duplicate_preamble() -
             app.active_thread_rx = Some(receiver);
             app.render_thread_snapshot(
                 &mut tui,
-                &app_server,
+                &mut app_server,
                 thread_id,
                 snapshot,
                 /*resume_restored_queue*/ false,
-            )?;
+            )
+            .await?;
             while let Ok(event) = app_events.try_recv() {
                 app.handle_event(&mut tui, &mut app_server, event).await?;
             }

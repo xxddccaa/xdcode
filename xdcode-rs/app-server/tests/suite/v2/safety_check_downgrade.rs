@@ -16,7 +16,7 @@ use xdcode_app_server_protocol::ModelRerouteReason;
 use xdcode_app_server_protocol::ModelReroutedNotification;
 use xdcode_app_server_protocol::ModelVerification;
 use xdcode_app_server_protocol::ModelVerificationNotification;
-use xdcode_app_server_protocol::ThreadItem;
+use xdcode_app_server_protocol::ThreadItemPayload;
 use xdcode_app_server_protocol::ThreadStartParams;
 use xdcode_app_server_protocol::ThreadStartResponse;
 use xdcode_app_server_protocol::TurnModerationMetadataNotification;
@@ -365,14 +365,14 @@ async fn collect_turn_notifications_and_validate_no_warning_item(
                     anyhow::anyhow!("item/started notifications must include params")
                 })?;
                 let payload: ItemStartedNotification = serde_json::from_value(params)?;
-                assert!(!is_warning_user_message_item(&payload.item));
+                assert!(!is_warning_user_message_item(&payload.item.payload));
             }
             "item/completed" => {
                 let params = notification.params.ok_or_else(|| {
                     anyhow::anyhow!("item/completed notifications must include params")
                 })?;
                 let payload: ItemCompletedNotification = serde_json::from_value(params)?;
-                assert!(!is_warning_user_message_item(&payload.item));
+                assert!(!is_warning_user_message_item(&payload.item.payload));
             }
             "turn/completed" => {
                 return rerouted.ok_or_else(|| {
@@ -413,14 +413,14 @@ async fn collect_model_verification_notifications_and_validate_no_warning_item(
                     anyhow::anyhow!("item/started notifications must include params")
                 })?;
                 let payload: ItemStartedNotification = serde_json::from_value(params)?;
-                assert!(!is_warning_user_message_item(&payload.item));
+                assert!(!is_warning_user_message_item(&payload.item.payload));
             }
             "item/completed" => {
                 let params = notification.params.ok_or_else(|| {
                     anyhow::anyhow!("item/completed notifications must include params")
                 })?;
                 let payload: ItemCompletedNotification = serde_json::from_value(params)?;
-                assert!(!is_warning_user_message_item(&payload.item));
+                assert!(!is_warning_user_message_item(&payload.item.payload));
             }
             "turn/completed" => {
                 let verification = verification.ok_or_else(|| {
@@ -468,8 +468,8 @@ async fn collect_cyber_policy_error_and_validate_no_reroute(
     }
 }
 
-fn warning_text_from_item(item: &ThreadItem) -> Option<&str> {
-    let ThreadItem::UserMessage { content, .. } = item else {
+fn warning_text_from_item(item: &ThreadItemPayload) -> Option<&str> {
+    let ThreadItemPayload::UserMessage { content, .. } = item else {
         return None;
     };
 
@@ -479,7 +479,7 @@ fn warning_text_from_item(item: &ThreadItem) -> Option<&str> {
     })
 }
 
-fn is_warning_user_message_item(item: &ThreadItem) -> bool {
+fn is_warning_user_message_item(item: &ThreadItemPayload) -> bool {
     warning_text_from_item(item).is_some()
 }
 

@@ -31,6 +31,7 @@ members = [
     "code-mode-host",
     "code-mode-protocol",
     "code-mode-runtime",
+    "plugin-host",
     "xdcode-home",
     "cloud-config",
     "cloud-tasks",
@@ -54,11 +55,13 @@ members = [
     "hooks",
     "history",
     "http-client",
+    "http-headers-helper",
     "secrets",
     "exec",
     "file-system",
     "exec-server-protocol",
     "exec-server",
+    "exec-server-cli",
     "exec-server/tests/support",
     "execpolicy",
     "ext/agent",
@@ -110,11 +113,11 @@ members = [
     "runtime-agent-instance",
     "response-debug-context",
     "sandboxing",
-    "stdio-to-uds",
     "otel",
     "otel-trace-websocket",
     "tcp-tunnel",
     "tui",
+    "user-input",
     "user-verification",
     "tools",
     "v8-poc",
@@ -132,6 +135,7 @@ members = [
     "utils/cache",
     "utils/critical-path",
     "utils/git-discovery",
+    "utils/head-tail-buffer",
     "utils/image",
     "utils/json-to-toml",
     "utils/home-dir",
@@ -144,6 +148,7 @@ members = [
     "utils/cli",
     "utils/elapsed",
     "utils/sandbox-summary",
+    "utils/model-facing-id",
     "utils/sleep-inhibitor",
     "utils/approval-presets",
     "utils/oss",
@@ -168,7 +173,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.167.0"
+version = "0.172.0"
 # Track the edition for all workspace crates in one place. Individual
 # crates can still override this value, but keeping it here means new
 # crates created with `cargo new -w ...` automatically inherit the 2024
@@ -209,13 +214,14 @@ xdcode-cloud-tasks-mock-client = { path = "cloud-tasks-mock-client" }
 xdcode-code-mode = { path = "code-mode" }
 xdcode-code-mode-protocol = { path = "code-mode-protocol" }
 xdcode-code-mode-runtime = { path = "code-mode-runtime" }
+xdcode-plugin-host = { path = "plugin-host" }
 xdcode-home = { path = "xdcode-home" }
 xdcode-http-client = { path = "http-client" }
+xdcode-http-headers-helper = { path = "http-headers-helper" }
 xdcode-websocket-auth = { path = "websocket-auth" }
 xdcode-websocket-client = { path = "websocket-client" }
 xdcode-config = { path = "config" }
 xdcode-connectors = { path = "connectors" }
-xdcode-agent-extension = { path = "ext/agent" }
 xdcode-agent-message-board-client = { path = "agent-message-board-client" }
 xdcode-agent-message-board-extension = { path = "ext/agent-message-board" }
 xdcode-agent-message-board-host = { path = "agent-message-board-host" }
@@ -228,10 +234,12 @@ xdcode-core-api = { path = "core-api" }
 xdcode-core-plugin-common = { path = "core-plugin-common" }
 xdcode-core-plugins = { path = "core-plugins" }
 xdcode-diagnostics = { path = "diagnostics" }
+xdcode-direct-tool-timing = { path = "direct-tool-timing" }
 xdcode-exec = { path = "exec" }
 xdcode-file-system = { path = "file-system" }
 xdcode-exec-server-protocol = { path = "exec-server-protocol" }
 xdcode-exec-server = { path = "exec-server" }
+xdcode-exec-server-cli = { path = "exec-server-cli" }
 xdcode-exec-server-test-support = { path = "exec-server/tests/support" }
 xdcode-execpolicy = { path = "execpolicy" }
 xdcode-extension-api = { path = "ext/extension-api" }
@@ -241,6 +249,7 @@ xdcode-goal-extension = { path = "ext/goal" }
 xdcode-git-attribution = { path = "ext/git-attribution" }
 xdcode-guardian-reviewer = { path = "ext/guardian-reviewer" }
 xdcode-guardian-v2 = { path = "ext/guardian-v2" }
+xdcode-guardian-v3 = { path = "ext/guardian-v3" }
 xdcode-history-notes-extension = { path = "ext/history-notes" }
 xdcode-image-generation-extension = { path = "ext/image-generation" }
 xdcode-external-agent-migration = { path = "external-agent-migration" }
@@ -285,13 +294,13 @@ xdcode-response-debug-context = { path = "response-debug-context" }
 xdcode-rmcp-client = { path = "rmcp-client" }
 xdcode-rollout = { path = "rollout" }
 xdcode-rollout-trace = { path = "rollout-trace" }
+xdcode-runtime-agent-instance = { path = "runtime-agent-instance" }
 xdcode-sandboxing = { path = "sandboxing" }
 xdcode-secrets = { path = "secrets" }
 xdcode-shell-command = { path = "shell-command" }
 xdcode-skills-extension = { path = "ext/skills" }
 xdcode-skills = { path = "skills" }
 xdcode-state = { path = "state" }
-xdcode-stdio-to-uds = { path = "stdio-to-uds" }
 xdcode-terminal-detection = { path = "terminal-detection" }
 xdcode-test-binary-support = { path = "test-binary-support" }
 xdcode-thread-store = { path = "thread-store" }
@@ -309,9 +318,11 @@ xdcode-utils-critical-path = { path = "utils/critical-path" }
 xdcode-utils-elapsed = { path = "utils/elapsed" }
 xdcode-utils-fuzzy-match = { path = "utils/fuzzy-match" }
 xdcode-utils-git-discovery = { path = "utils/git-discovery" }
+xdcode-utils-head-tail-buffer = { path = "utils/head-tail-buffer" }
 xdcode-utils-home-dir = { path = "utils/home-dir" }
 xdcode-utils-image = { path = "utils/image" }
 xdcode-utils-json-to-toml = { path = "utils/json-to-toml" }
+xdcode-utils-model-facing-id = { path = "utils/model-facing-id" }
 xdcode-utils-oss = { path = "utils/oss" }
 xdcode-utils-output-truncation = { path = "utils/output-truncation" }
 xdcode-utils-path = { path = "utils/path-utils" }
@@ -327,8 +338,8 @@ xdcode-utils-sleep-inhibitor = { path = "utils/sleep-inhibitor" }
 xdcode-utils-stream-parser = { path = "utils/stream-parser" }
 xdcode-utils-string = { path = "utils/string" }
 xdcode-utils-template = { path = "utils/template" }
+xdcode-user-input = { path = "user-input" }
 xdcode-user-verification = { path = "user-verification" }
-xdcode-v8-poc = { path = "v8-poc" }
 xdcode-workload-identity = { path = "workload-identity" }
 xdcode-windows-sandbox = { path = "windows-sandbox-rs" }
 xdcode-windows-sandbox-test-support = { path = "windows-sandbox-rs/tests/support" }
@@ -388,7 +399,6 @@ ed25519-dalek = { version = "2.2.0", features = ["pkcs8"] }
 encoding_rs = "0.8.35"
 eventsource-stream = "0.2.3"
 file-id = "0.2.3"
-flatbuffers = "25"
 flate2 = "1.1.8"
 futures = { version = "0.3", default-features = false }
 gethostname = "1.1.0"
@@ -399,12 +409,13 @@ globset = "0.4"
 hmac = "0.12.1"
 http = "1.3.1"
 httpdate = "1.0.3"
+hyper = { version = "1.8.1", features = ["http2", "server"] }
 hyper-util = { version = "0.1.20", features = ["tokio"] }
 iana-time-zone = "0.1.64"
 icu_decimal = "2.1"
 icu_locale_core = "2.1"
 icu_provider = { version = "2.1", features = ["sync"] }
-ignore = "0.4.23"
+ignore = "0.4.30"
 image = { version = "^0.25.9", default-features = false }
 include_dir = "0.7.4"
 indexmap = "2.12.0"
@@ -419,7 +430,8 @@ lazy_static = "1"
 libc = "0.2.182"
 # Keep SQLx's bundled SQLite on a version containing the WAL-reset corruption fix:
 # https://www.sqlite.org/wal.html#the_wal_reset_bug
-libsqlite3-sys = { version = "0.37", default-features = false }
+# SQLite 3.54 also fixes RUSTSEC-2026-0459 when opening a database with a WAL.
+libsqlite3-sys = { version = "0.39.1", default-features = false }
 linkify = "0.11"
 log = "0.4"
 lru = "0.18.2"
@@ -427,7 +439,7 @@ maplit = "1.0.2"
 memchr = "2.7.6"
 mime_guess = "2.0.5"
 multimap = "0.10.0"
-mxc-sdk = { git = "https://github.com/microsoft/mxc", rev = "b21120168d70befe12356411423266bfef168446" }
+mxc-sdk = { git = "https://github.com/microsoft/mxc", rev = "c66201839d63cae2239db5e92f1f1d6076cf5181" }
 notify = "8.2.0"
 nucleo = { git = "https://github.com/helix-editor/nucleo.git", rev = "4253de9faabb4e5c6d81d946a5e35a90f87347ee" }
 once_cell = "1.20.2"
@@ -462,7 +474,7 @@ regex-automata = { version = "0.4.13", default-features = false, features = ["st
 regex-lite = "0.1.8"
 regex-syntax = "0.8.8"
 reqwest = { version = "0.12", features = ["cookies"] }
-rmcp = { git = "https://github.com/modelcontextprotocol/rust-sdk", rev = "98a54789b80110ad210495c4ad845c89e1980471", version = "=3.5.1", default-features = false }
+rmcp = { git = "https://github.com/modelcontextprotocol/rust-sdk", rev = "b11a40d889e022087d7f2b8cd23aa28e19ceaf5b", version = "=3.6.0", default-features = false }
 runfiles = { git = "https://github.com/dzbarsky/rules_rust", rev = "b56cbaa8465e74127f1ea216f813cd377295ad81" }
 rustix = { version = "1.1.4", features = ["net"] }
 rustls = { version = "0.23.46", default-features = false, features = [
@@ -474,7 +486,6 @@ rustls-pki-types = "1.14.0"
 schemars = "0.8.22"
 seccompiler = "0.5.0"
 semver = "1.0"
-sentry = "0.46.0"
 serde = { version = "1", features = ["rc"] }
 serde_ignored = "0.1.14"
 serde_json = "1"
@@ -488,6 +499,7 @@ sha2 = "0.10"
 shlex = "1.3.0"
 signal-hook = "0.3.18"
 similar = "2.7.0"
+spiffe = { version = "0.18.0", default-features = false, features = ["transport-grpc"] }
 symphonia = { version = "0.6.0", default-features = false, features = [
     "isomp4",
     "mkv",
@@ -514,7 +526,6 @@ starlark = { version = "0.14.2", default-features = false }
 strum = "0.27.2"
 strum_macros = "0.28.0"
 supports-color = "3.0.2"
-syntect = "5"
 sys-locale = "0.3.2"
 system-configuration = "0.7"
 tar = { version = "=0.4.45", default-features = false }
@@ -549,6 +560,9 @@ tree-sitter-powershell = "=0.26.4"
 ts-rs = "11"
 tungstenite = { version = "0.27.0", features = ["deflate", "proxy"] }
 uds_windows = "1.1.0"
+unicode-bidi = "0.3.18"
+unicode-linebreak = "0.1.5"
+unicode-normalization = "0.1.25"
 unicode-segmentation = "1.12.0"
 unicode-width = "0.2"
 url = "2"
@@ -556,6 +570,7 @@ urlencoding = "2.1"
 uuid = "1"
 v8 = "=152.2.0"
 vt100 = "0.16.2"
+vtparse = "0.6.2"
 walkdir = "2.5.0"
 webbrowser = "1.2.2"
 which = "8"
@@ -581,8 +596,8 @@ zstd = "0.13"
 wiremock = "0.6"
 zeroize = "1.8.2"
 
-[workspace.lints]
-rust = {}
+[workspace.lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(xdcode_bazel)'] }
 
 [workspace.lints.clippy]
 await_holding_invalid_type = "deny"
@@ -628,7 +643,6 @@ unwrap_used = "deny"
 ignored = [
     "icu_provider",
     "openssl-sys",
-    "xdcode-v8-poc",
 ]
 
 [profile.dev]
@@ -667,12 +681,17 @@ opt-level = 0
 [patch.crates-io]
 # Uncomment to debug local changes.
 # ratatui = { path = "../../ratatui" }
-crossterm = { git = "https://github.com/openai-oss-forks/crossterm", rev = "ed1cdab335221515706178d68495bba2aed1924f" }
-tokio-tungstenite = { git = "https://github.com/openai-oss-forks/tokio-tungstenite", rev = "0e5b2d73aa18dd9f0a50ee9ff199d5aef7594186" }
-tungstenite = { git = "https://github.com/openai-oss-forks/tungstenite-rs", rev = "4fffad30fe373adbdcffab9545e9e9bf4f2fc19f" }
+crossterm = { git = "https://github.com/openai-oss-forks/crossterm", rev = "37ca4a27a9424ec5dbe6451f48c339d7b45f8d63" }
+# SQLx 0.9.0 excludes libsqlite3-sys 0.39. Keep its driver and Core traits on
+# the same reviewed source until a release includes transact-rs/sqlx#4502.
+sqlx-core = { git = "https://github.com/transact-rs/sqlx", rev = "10462fa4414c6c7f1ed1d39bb31678e3b726878c" }
+sqlx-sqlite = { git = "https://github.com/transact-rs/sqlx", rev = "10462fa4414c6c7f1ed1d39bb31678e3b726878c" }
+tokio-tungstenite = { git = "https://github.com/openai-oss-forks/tokio-tungstenite", rev = "7a920470d62138955446b64220c7609e46ad770e" }
+tungstenite = { git = "https://github.com/openai-oss-forks/tungstenite-rs", rev = "e19950ef7828cb311e6d51a6bedcebf0192e055c" }
+v8 = { git = "https://github.com/openai-oss-forks/rusty_v8.git", rev = "90a65f887a0c0f048f3784afbcb320b373c8a2e0" }
 
 # Uncomment to debug local changes.
 # rmcp = { path = "../../rust-sdk/crates/rmcp" }
 
 [patch."ssh://git@github.com/openai-oss-forks/tungstenite-rs.git"]
-tungstenite = { git = "https://github.com/openai-oss-forks/tungstenite-rs", rev = "4fffad30fe373adbdcffab9545e9e9bf4f2fc19f" }
+tungstenite = { git = "https://github.com/openai-oss-forks/tungstenite-rs", rev = "e19950ef7828cb311e6d51a6bedcebf0192e055c" }

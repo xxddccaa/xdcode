@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use crate::auth::McpAuthProvider;
 use anyhow::Result;
 use anyhow::bail;
 use rmcp::model::ElicitationAction;
@@ -9,7 +10,6 @@ use rmcp::model::ElicitationCapability;
 use serde_json::Map;
 use serde_json::Value;
 use tokio::sync::watch;
-use xdcode_api::SharedAuthProvider;
 use xdcode_config::types::AuthKeyringBackendKind;
 use xdcode_config::types::OAuthCredentialsStoreMode;
 use xdcode_exec_server::Environment;
@@ -35,7 +35,7 @@ pub(crate) struct EventStreamConnectionSettings {
     pub oauth_refresh_mode: McpOAuthRefreshMode,
     pub runtime_context: McpRuntimeContext,
     pub resolved_environment: std::result::Result<Option<Arc<Environment>>, String>,
-    pub auth_provider: Option<SharedAuthProvider>,
+    pub auth_provider: Option<McpAuthProvider>,
     pub auth_manager: Option<Arc<AuthManager>>,
     pub auth: Option<XdcodeAuth>,
     pub protocol_mode: McpProtocolMode,
@@ -80,7 +80,7 @@ impl McpEventStreamOpener {
                     .unwrap_or(DEFAULT_STARTUP_TIMEOUT);
                 let client = Arc::new(tokio::time::timeout(startup_timeout, make_rmcp_client(
                     /*ema_auth*/ None,
-                    XDCODE_APPS_MCP_SERVER_NAME,
+                    &crate::McpServerKey::unscoped(XDCODE_APPS_MCP_SERVER_NAME),
                     connection.server.clone(),
                     connection.store_mode,
                     connection.keyring_backend_kind,

@@ -11,14 +11,8 @@ use super::*;
 use crate::app_event::SideStartMode;
 use crate::app_server_session::SideChatStorage;
 use crate::chatwidget::InterruptedTurnNoticeMode;
-use xdcode_app_server_protocol::ThreadUnsubscribeParams;
-use xdcode_app_server_protocol::ThreadUnsubscribeResponse;
-use xdcode_app_server_protocol::TurnInterruptParams;
-use xdcode_app_server_protocol::TurnInterruptResponse;
-use xdcode_context_fragments::SideConversationPolicy;
-use xdcode_protocol::models::ResponseItem;
 
-const SIDE_RENAME_BLOCK_MESSAGE: &str = "Side conversations are ephemeral and cannot be renamed.";
+const SIDE_RENAME_BLOCK_MESSAGE: &str = "Side conversations cannot be renamed.";
 const SIDE_MAIN_THREAD_UNAVAILABLE_MESSAGE: &str =
     "'/side' is unavailable until the main thread is ready.";
 const SIDE_NO_STARTED_CONVERSATION_MESSAGE: &str = concat!(
@@ -73,39 +67,8 @@ impl SideParentStatus {
             | ServerRequest::ExecCommandApproval { .. } => Some(SideParentStatus::NeedsApproval),
             ServerRequest::DynamicToolCall { .. }
             | ServerRequest::AttestationGenerate { .. }
-            | ServerRequest::CurrentTimeRead { .. }
             | ServerRequest::ChatgptAuthTokensRefresh { .. } => None,
         }
-    }
-}
-
-/// A cached turn can finish or be replaced before the server handles an interrupt.
-pub(super) async fn interrupt_for_close(
-    server: &mut AppServerSession,
-    thread: ThreadId,
-    turn: Option<String>,
-    attachment: Option<ThreadEventAttachment>,
-) -> std::result::Result<(), TypedRequestError> {
-    let mut result = match turn {
-        Some(turn) => server.turn_interrupt(thread, turn).await,
-        None => server.startup_interrupt(thread).await,
-    };
-    if let Err(error) = &result
-        && let Some(current) = active_turn_interrupt_race(error)
-    {
-        result = server.turn_interrupt(thread, current).await;
-    }
-    match result {
-        Err(TypedRequestError::Server { method, source })
-            if method == "turn/interrupt"
-                && source.code == -32600
-                && (source.message == "no active turn to interrupt"
-                    || (attachment == Some(ThreadEventAttachment::ReplayOnly)
-                        && source.message == format!("thread not found: {thread}"))) =>
-        {
-            Ok(())
-        }
-        result => result,
     }
 }
 
@@ -219,7 +182,7 @@ pub(super) struct SideThreadState {
     pub(super) parent_status: Option<SideParentStatus>,
     pub(super) opening_message: Option<crate::chatwidget::UserMessage>,
     pub(super) close_request: Option<uuid::Uuid>,
-    pub(super) storage: crate::app_server_session::SideChatStorage,
+    pub(super) storage: SideChatStorage,
 }
 
 impl SideThreadState {
@@ -229,7 +192,7 @@ impl SideThreadState {
             parent_status: None,
             opening_message: None,
             close_request: None,
-            storage: crate::app_server_session::SideChatStorage::Temporary,
+            storage: SideChatStorage::Temporary,
         }
     }
 }
@@ -338,7 +301,9 @@ impl App {
         self.side_retention_enabled(tui)
             && self.overlay.is_none()
             && (self.chat_widget.no_modal_or_popup_active()
-                || (self.chooser_focus() == Some(sidebar::PaneFocus::Sidebar)
+                // Replaying the parent may reopen a completion for its parked draft.
+                // The focused chooser hides it and owns the keystrokes.
+                || (self.panel_focus() == Some(sidebar::PaneFocus::Sidebar)
                     && self.sidebar_chooser_available()
                     && self.chat_widget.completion_can_yield_focus()))
     }
@@ -350,9 +315,18 @@ impl App {
     /// Zoom follows the displayed conversation even when its peer cannot be selected offline.
     pub(super) fn open_pane_focus(&self) -> Option<ThreadId> {
         let focused = self.current_displayed_thread_id()?;
+        if self.panel_focus() == Some(sidebar::PaneFocus::Sidebar)
+            && matches!(
+                self.sidebar()?.visible_content(),
+                Some(sidebar::SidebarContent::Document(_))
+            )
+        {
+            return Some(focused);
+        }
         let child = self.side_pair_key(focused)?;
-        (self.sidebar()?.visible_content() == Some(sidebar::SidebarContent::Chat(child)))
-            .then_some(focused)
+        (self.docked_agent().is_some()
+            || self.sidebar()?.visible_content() == Some(sidebar::SidebarContent::Chat(child)))
+        .then_some(focused)
     }
 
     pub(super) fn switchable_side_child(&self) -> Option<ThreadId> {
@@ -363,7 +337,11 @@ impl App {
     }
 
     pub(super) fn side_pair_key(&self, thread_id: ThreadId) -> Option<ThreadId> {
-        if self.side_threads.contains_key(&thread_id) {
+        if let Some((owner, agent)) = self.docked_agent()
+            && (thread_id == owner || thread_id == agent)
+        {
+            Some(agent)
+        } else if self.side_threads.contains_key(&thread_id) {
             Some(thread_id)
         } else {
             self.side_thread_for_parent(thread_id)
@@ -501,7 +479,13 @@ impl App {
         let Some(active_thread_id) = self.current_displayed_thread_id() else {
             return Ok(());
         };
-        let target_thread_id = if let Some(state) = self.side_threads.get(&active_thread_id) {
+        let target_thread_id = if let Some((owner, agent)) = self.docked_agent() {
+            if active_thread_id == agent {
+                owner
+            } else {
+                agent
+            }
+        } else if let Some(state) = self.side_threads.get(&active_thread_id) {
             state.parent_thread_id
         } else if let Some(side_thread_id) = self.side_thread_for_parent(active_thread_id) {
             side_thread_id
@@ -528,10 +512,18 @@ impl App {
         let Some(child) = self.current_displayed_thread_id() else {
             return Ok(());
         };
-        let Some(side) = self.side_threads.get(&child) else {
+        let parent = self
+            .side_threads
+            .get(&child)
+            .map(|side| side.parent_thread_id)
+            .or_else(|| {
+                self.docked_agent()
+                    .filter(|(_, agent)| *agent == child)
+                    .map(|(parent, _)| parent)
+            });
+        let Some(parent) = parent else {
             return Ok(());
         };
-        let parent = side.parent_thread_id;
         self.select_agent_thread(tui, app_server, parent).await?;
         if self.current_displayed_thread_id() == Some(parent) {
             self.sidebar_mut().hide();
@@ -619,6 +611,7 @@ impl App {
                         response: crate::dynamic_tools::failure_response(
                             "Source task was closed while handling a dynamic tool call",
                         ),
+                        reply: None,
                     });
                     task.abort();
                     false
@@ -628,6 +621,9 @@ impl App {
             });
         self.abort_thread_event_listener(thread_id);
         self.thread_event_channels.remove(&thread_id);
+        self.agents_overview
+            .draft_cloud_environments
+            .remove(&thread_id);
         self.pending_server_profiles.remove(&thread_id);
         self.agents_overview.activity.remove(&thread_id);
         self.sidebars.remove(&Some(thread_id));
@@ -692,14 +688,6 @@ impl App {
                 .await;
             false
         }
-    }
-
-    fn side_developer_instructions(existing_instructions: Option<&str>) -> String {
-        SideConversationPolicy::Temporary.instructions(existing_instructions)
-    }
-
-    pub(super) fn side_boundary_prompt_item() -> ResponseItem {
-        xdcode_context_fragments::side_conversation_boundary()
     }
 
     pub(super) fn side_fork_config(&self) -> Config {
@@ -791,6 +779,7 @@ impl App {
         if let Some(pane) = self.sidebars.get_mut(&Some(parent_thread_id))
             && pane.creation.is_some()
         {
+            // Retry and Back consume the saved attempt. A new /side must not overwrite its prompt.
             pane.show(
                 sidebar::SidebarContent::Chooser,
                 sidebar::PaneFocus::Sidebar,
@@ -799,6 +788,7 @@ impl App {
             self.restore_side_user_message(user_message);
             return Ok(AppRunControl::Continue);
         }
+
         if let Some(message) = self.side_start_block_message() {
             self.restore_side_user_message(user_message.take());
             self.sync_side_thread_ui();
@@ -857,9 +847,10 @@ impl App {
         let fork = app_server.sidebar_fork(
             self.local_settings.clone(),
             self.side_fork_config(),
+            Some(self.chat_widget.session_workspace_roots().to_vec()),
             parent_thread_id,
             self.selected_server_profile(parent_thread_id),
-            if workspace {
+            if workspace && app_server.can_list_saved_side_chats(parent_thread_id) {
                 SideChatStorage::Attached
             } else {
                 SideChatStorage::Temporary
@@ -887,7 +878,7 @@ impl App {
                 app_server,
                 parent_thread_id,
                 user_message,
-                true,
+                /*enter*/ true,
                 create.await,
             )
             .await;
@@ -924,6 +915,7 @@ impl App {
         };
         tui.frame_requester().schedule_frame();
         if let Err(message) = result {
+            pending.message = None;
             pending.state = sidebar::CreationState::Failed {
                 message,
                 cleanup: None,
@@ -992,14 +984,16 @@ impl App {
                 if !enter {
                     self.side_companions
                         .entry(child_thread_id)
-                        .or_insert_with(|| SideCompanion::empty(forked.session.cwd.clone()));
+                        .or_insert_with(|| SideCompanion::empty(forked.session.cwd.to_path_buf()));
                 }
                 let channel = self.ensure_thread_channel(child_thread_id);
+                channel.backend_id = Some(app_server.backend_id());
                 {
                     let mut store = channel.store.lock().await;
                     Self::install_side_thread_snapshot(&mut store, forked.session, forked.turns);
                 }
                 let mut child = SideThreadState::new(parent_thread_id);
+                child.storage = fork.storage;
                 child.parent_status = self
                     .side_thread_for_parent(parent_thread_id)
                     .and_then(|id| self.side_threads.get(&id))
@@ -1016,17 +1010,20 @@ impl App {
                     /*agent_role*/ None,
                     /*is_closed*/ false,
                 );
-                if let Err(err) = app_server
-                    .thread_inject_items(child_thread_id, vec![Self::side_boundary_prompt_item()])
-                    .await
-                {
-                    self.discard_side_thread_or_keep_visible(tui, app_server, child_thread_id)
-                        .await;
-                    self.restore_side_user_message(user_message.take());
-                    self.chat_widget.add_error_message(format!(
-                        "Failed to prepare side conversation {child_thread_id}: {err}"
-                    ));
+                self.sync_agent_picker_thread(child_thread_id);
+                self.sidebars
+                    .entry(Some(parent_thread_id))
+                    .or_default()
+                    .chat_ready(child_thread_id);
+                if !enter {
+                    self.sync_side_thread_ui();
                     return;
+                }
+                if already_selected {
+                    // Selection normally skips the live thread. Replay the initialized snapshot
+                    // even if the picker exposed this child before the boundary RPC completed.
+                    self.store_active_thread_receiver().await;
+                    self.active_thread_id = None;
                 }
                 if let Err(err) = self
                     .select_agent_thread(tui, app_server, child_thread_id)
@@ -1067,11 +1064,40 @@ impl App {
                 }
             }
             Err(err) => {
-                self.restore_side_user_message(user_message.take());
                 self.chat_widget
                     .set_side_conversation_context_label(/*label*/ None);
                 self.chat_widget.add_error_message(err);
             }
         }
+    }
+}
+
+/// A cached turn can finish or be replaced before the server handles an interrupt.
+pub(super) async fn interrupt_for_close(
+    server: &mut AppServerSession,
+    thread: ThreadId,
+    turn: Option<String>,
+    attachment: Option<ThreadEventAttachment>,
+) -> std::result::Result<(), TypedRequestError> {
+    let mut result = match turn {
+        Some(turn) => server.turn_interrupt(thread, turn).await,
+        None => server.startup_interrupt(thread).await,
+    };
+    if let Err(error) = &result
+        && let Some(current) = active_turn_interrupt_race(error)
+    {
+        result = server.turn_interrupt(thread, current).await;
+    }
+    match result {
+        Err(TypedRequestError::Server { method, source })
+            if method == "turn/interrupt"
+                && source.code == -32600
+                && (source.message == "no active turn to interrupt"
+                    || (attachment == Some(ThreadEventAttachment::ReplayOnly)
+                        && source.message == format!("thread not found: {thread}"))) =>
+        {
+            Ok(())
+        }
+        result => result,
     }
 }

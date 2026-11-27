@@ -38,6 +38,7 @@ use xdcode_config::ConfigLayerStack;
 use xdcode_plugin::ExecutorPluginHookSource;
 use xdcode_plugin::PluginHookSource;
 use xdcode_protocol::ThreadId;
+use xdcode_protocol::protocol::HookCompletedEvent;
 use xdcode_protocol::protocol::HookEventName;
 use xdcode_protocol::protocol::HookExecutionMode;
 use xdcode_protocol::shell_environment::scrub_non_inheritable_env_vars;
@@ -383,8 +384,12 @@ impl Hooks {
     pub async fn run_model_request(
         &self,
         request: crate::ModelRequestHookInput,
-    ) -> Vec<xdcode_protocol::protocol::HookCompletedEvent> {
-        crate::events::model_request::run(&self.engine, request).await
+        on_completed: impl FnMut(&HookCompletedEvent) + Send,
+    ) -> (
+        Vec<xdcode_protocol::protocol::HookCompletedEvent>,
+        crate::ModelRequestHookOutcome,
+    ) {
+        crate::events::model_request::run(&self.engine, request, on_completed).await
     }
 }
 

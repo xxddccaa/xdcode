@@ -15,12 +15,15 @@ workspace = true
 [dependencies]
 xdcode-utils-process = { workspace = true }
 anyhow = { workspace = true }
+chrono = { workspace = true }
 xdcode-analytics = { workspace = true }
+xdcode-api = { workspace = true }
 xdcode-app-server-protocol = { workspace = true }
 xdcode-config = { workspace = true }
 xdcode-connectors = { workspace = true }
 xdcode-core-plugin-common = { workspace = true }
 xdcode-exec-server = { workspace = true }
+xdcode-features = { workspace = true }
 xdcode-git-utils = { workspace = true }
 xdcode-hooks = { workspace = true }
 xdcode-http-client = { workspace = true }
@@ -30,14 +33,14 @@ xdcode-model-provider = { workspace = true }
 xdcode-otel = { workspace = true }
 xdcode-plugin = { workspace = true }
 xdcode-protocol = { workspace = true }
-xdcode-skills = { workspace = true }
+xdcode-runtime-agent-instance = { workspace = true }
 xdcode-shell-command = { workspace = true }
+xdcode-skills = { workspace = true }
 xdcode-tools = { workspace = true }
 xdcode-utils-absolute-path = { workspace = true }
 xdcode-utils-path = { workspace = true }
 xdcode-utils-path-uri = { workspace = true }
 xdcode-utils-plugins = { workspace = true }
-chrono = { workspace = true }
 dirs = { workspace = true }
 flate2 = { workspace = true }
 futures = { workspace = true }
@@ -59,6 +62,7 @@ uuid = { workspace = true, features = ["v4"] }
 zip = { workspace = true }
 
 [dev-dependencies]
+base64 = { workspace = true }
 xdcode-exec-server-test-support = { workspace = true }
 xdcode-utils-cargo-bin = { workspace = true }
 libc = { workspace = true }

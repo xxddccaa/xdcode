@@ -35,12 +35,14 @@ pub(super) struct KeymapActionDescriptor {
 #[derive(Clone, Copy, Debug)]
 enum KeymapActionFeature {
     FastMode,
+    MultiBackend,
     Workspace,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct KeymapActionFilter {
     pub(crate) fast_mode_enabled: bool,
+    pub(crate) multi_backend_enabled: bool,
     pub(crate) workspace_enabled: bool,
 }
 
@@ -49,6 +51,7 @@ impl KeymapActionDescriptor {
         match self.required_feature {
             None => true,
             Some(KeymapActionFeature::FastMode) => filter.fast_mode_enabled,
+            Some(KeymapActionFeature::MultiBackend) => filter.multi_backend_enabled,
             Some(KeymapActionFeature::Workspace) => filter.workspace_enabled,
         }
     }
@@ -114,6 +117,7 @@ macro_rules! define_keymap_actions {
 
 define_keymap_actions! {
     global "Global" {
+        change_host [MultiBackend] => "Change where a new conversation runs.",
         focus_main_composer [Workspace] => "Focus the main conversation composer.",
         focus_sidebar_tabs [Workspace] => "Open the sidebar tab chooser.",
         focus_sidebar_content [Workspace] => "Focus the side conversation, or hide it when already focused.",
@@ -164,6 +168,8 @@ define_keymap_actions! {
         toggle_shortcuts => "Show or hide the composer shortcut overlay.",
         history_search_previous => "Open history search or move to the previous match.",
         history_search_next => "Move to the next history search match.",
+        undo => "Undo the last composer edit.",
+        redo => "Redo the last composer edit.",
     }
     editor "Editor" {
         insert_newline => "Insert a newline in the editor.",
@@ -273,6 +279,7 @@ define_keymap_actions! {
         close => "Close the pager overlay.",
         close_transcript => "Close the transcript overlay.",
         find => "Find text in a transcript pager.",
+        mark_markdown => "Mark table cells in transcript selection mode.",
     }
     list "List" {
         move_up => "Move list selection up.",
@@ -287,6 +294,8 @@ define_keymap_actions! {
         cancel => "Cancel and close selection views.",
     }
     agents "Agents" {
+        next_group => "Select the first task in the next group.",
+        previous_group => "Select the first task in the previous group.",
         resume => "Open the session resume picker.",
         search => "Search the available agent tasks.",
         new_task => "Open a new session in the selected checkout.",
@@ -316,7 +325,10 @@ define_keymap_actions! {
 /// This is intentionally presentation-only: the returned string must never be
 /// parsed back into an action name, because underscores and casing are part of
 /// the stable config contract.
-pub(super) fn action_label(action: &str) -> String {
+pub(crate) fn action_label(action: &str) -> String {
+    if action == "change_host" {
+        return "Change Where to Run".to_string();
+    }
     action
         .split('_')
         .map(|word| {

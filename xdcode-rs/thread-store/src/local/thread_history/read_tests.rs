@@ -32,6 +32,184 @@ use crate::StoredTurnStatus;
 use crate::local::test_support::test_config;
 
 #[tokio::test]
+async fn newest_indexed_pages_do_not_read_unused_ancestors() {
+    let (home, store, child_id) = store_with_mode(ThreadHistoryMode::Paginated).await;
+    let parent_id = ThreadId::default();
+    let parent_path = rollout_path(home.path(), parent_id);
+    write_rollout_with_end(
+        &parent_path,
+        parent_id,
+        /*history_base*/ None,
+        /*next_ordinal*/ 5,
+    );
+    write_rollout_with_end(
+        &rollout_path(home.path(), child_id),
+        child_id,
+        Some(history_position(
+            &parent_path,
+            parent_id,
+            /*end_ordinal_exclusive*/ 4,
+        )),
+        /*next_ordinal*/ 8,
+    );
+    let db = history_db(&store).await;
+    for (turn_id, item_id, ordinal) in [("one", "a", 5), ("two", "b", 7), ("three", "c", 9)] {
+        insert_turn(
+            db,
+            child_id,
+            turn_id,
+            ordinal,
+            "completed",
+            /*error_json*/ None,
+            Some(item_id),
+            /*final_agent_item_id*/ None,
+        )
+        .await;
+        insert_item(db, child_id, turn_id, item_id, ordinal + 1).await;
+    }
+    let turns = turn_params(
+        child_id,
+        /*cursor*/ None,
+        /*page_size*/ 2,
+        SortDirection::Desc,
+        StoredTurnItemsView::Summary,
+    );
+    let items = item_params(
+        child_id,
+        /*turn_id*/ None,
+        /*cursor*/ None,
+        /*page_size*/ 2,
+        SortDirection::Desc,
+    );
+    let expected_turns = store.list_turns(turns.clone()).await.unwrap();
+    let expected_items = store.list_items(items.clone()).await.unwrap();
+    fs::remove_file(parent_path).unwrap();
+    assert_eq!(
+        serde_json::to_value(store.list_turns(turns).await.unwrap()).unwrap(),
+        serde_json::to_value(expected_turns).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_value(store.list_items(items).await.unwrap()).unwrap(),
+        serde_json::to_value(expected_items).unwrap()
+    );
+    // At exactly the local row count the reader must still discover whether an ancestor
+    // contributes another row, rather than incorrectly returning a terminal cursor.
+    assert!(
+        store
+            .list_turns(turn_params(
+                child_id,
+                /*cursor*/ None,
+                /*page_size*/ 3,
+                SortDirection::Desc,
+                StoredTurnItemsView::NotLoaded
+            ))
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn descending_pages_stop_in_the_parent_even_when_resuming_there() {
+    let (home, store, child) = store_with_mode(ThreadHistoryMode::Paginated).await;
+    let root = ThreadId::default();
+    let parent = ThreadId::default();
+    let root_path = rollout_path(home.path(), root);
+    let parent_path = rollout_path(home.path(), parent);
+    write_rollout_with_end(
+        &root_path, root, /*history_base*/ None, /*next_ordinal*/ 4,
+    );
+    write_rollout_with_end(
+        &parent_path,
+        parent,
+        Some(history_position(
+            &root_path, root, /*end_ordinal_exclusive*/ 3,
+        )),
+        /*next_ordinal*/ 12,
+    );
+    write_rollout_with_end(
+        &rollout_path(home.path(), child),
+        child,
+        Some(history_position(
+            &parent_path,
+            parent,
+            /*end_ordinal_exclusive*/ 13,
+        )),
+        /*next_ordinal*/ 4,
+    );
+    let db = history_db(&store).await;
+    for (id, turn_id, ordinal) in [
+        (root, "child", 1),
+        (parent, "oldest", 4),
+        (parent, "older", 5),
+        (parent, "child", 7),
+        (parent, "middle", 9),
+        (parent, "newest", 11),
+        (child, "child", 14),
+    ] {
+        insert_turn(
+            db,
+            id,
+            turn_id,
+            ordinal,
+            if id == child {
+                "interrupted"
+            } else {
+                "completed"
+            },
+            /*error_json*/ None,
+            (id == root).then_some("item-1"),
+            /*final_agent_item_id*/ None,
+        )
+        .await;
+        insert_item(db, id, turn_id, &format!("item-{ordinal}"), ordinal + 1).await;
+    }
+
+    let mut turns = turn_params(
+        child,
+        /*cursor*/ None,
+        /*page_size*/ 2,
+        SortDirection::Desc,
+        StoredTurnItemsView::NotLoaded,
+    );
+    // The leaf and parent fill the page, but only the grandparent has the original summary.
+    let summary = store
+        .list_turns(ListTurnsParams {
+            items_view: StoredTurnItemsView::Summary,
+            page_size: 1,
+            ..turns.clone()
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        summary.turns[0].items,
+        [expected_item("child", "item-1", /*rollout_ordinal*/ 2)]
+    );
+
+    fs::remove_file(root_path).unwrap();
+    let first = store.list_turns(turns.clone()).await.unwrap();
+    assert_eq!(turn_ids(&first), ["child", "newest"]);
+    turns.cursor = Some(first.next_cursor.unwrap());
+    let second = store.list_turns(turns).await.unwrap();
+    // The cursor skipped the leaf, but its copy of "child" must still shadow the parent's.
+    assert_eq!(turn_ids(&second), ["middle", "older"]);
+    assert!(second.next_cursor.is_some());
+
+    let mut items = item_params(
+        child,
+        /*turn_id*/ None,
+        /*cursor*/ None,
+        /*page_size*/ 2,
+        SortDirection::Desc,
+    );
+    let first = store.list_items(items.clone()).await.unwrap();
+    assert_eq!(item_ids(&first), ["item-14", "item-11"]);
+    items.position = Some(ListItemsPosition::Cursor(first.next_cursor.unwrap()));
+    let second = store.list_items(items).await.unwrap();
+    assert_eq!(item_ids(&second), ["item-9", "item-7"]);
+    assert!(second.next_cursor.is_some());
+}
+
+#[tokio::test]
 async fn list_turns_pages_projected_rows_and_applies_item_views() {
     let (_home, store, thread_id) = store_with_mode(ThreadHistoryMode::Paginated).await;
     let db = history_db(&store).await;
@@ -430,6 +608,7 @@ async fn timeline_interleaves_items_and_restores_page_boundary_session_state() {
             RealtimeItem {
                 id: "voice-1:started".to_string(),
                 realtime_session_id: "voice-1".to_string(),
+                observed_at_ms: None,
                 content: RealtimeItemContent::RealtimeSessionStarted,
             },
         ),
@@ -438,6 +617,7 @@ async fn timeline_interleaves_items_and_restores_page_boundary_session_state() {
             RealtimeItem {
                 id: "voice-1:source:0".to_string(),
                 realtime_session_id: "voice-1".to_string(),
+                observed_at_ms: None,
                 content: RealtimeItemContent::TranscriptSegment {
                     role: RealtimeTranscriptRole::Assistant,
                     text: "Before the artifact".to_string(),
@@ -449,6 +629,7 @@ async fn timeline_interleaves_items_and_restores_page_boundary_session_state() {
             RealtimeItem {
                 id: "artifact".to_string(),
                 realtime_session_id: "voice-1".to_string(),
+                observed_at_ms: None,
                 content: RealtimeItemContent::BemItemPromoted {
                     turn_id: "turn-1".to_string(),
                     item_id: "middle".to_string(),
@@ -461,7 +642,9 @@ async fn timeline_interleaves_items_and_restores_page_boundary_session_state() {
             RealtimeItem {
                 id: "voice-1:closed".to_string(),
                 realtime_session_id: "voice-1".to_string(),
+                observed_at_ms: None,
                 content: RealtimeItemContent::RealtimeSessionClosed {
+                    final_frame_sequence: None,
                     outcome: RealtimeSessionOutcome::Ended,
                 },
             },
@@ -727,6 +910,7 @@ async fn timeline_page_state_excludes_realtime_events_after_fork_cutoff() {
             RealtimeItem {
                 id: "voice:started".to_string(),
                 realtime_session_id: "voice".to_string(),
+                observed_at_ms: None,
                 content: RealtimeItemContent::RealtimeSessionStarted,
             },
         ),
@@ -735,7 +919,9 @@ async fn timeline_page_state_excludes_realtime_events_after_fork_cutoff() {
             RealtimeItem {
                 id: "voice:closed".to_string(),
                 realtime_session_id: "voice".to_string(),
+                observed_at_ms: None,
                 content: RealtimeItemContent::RealtimeSessionClosed {
+                    final_frame_sequence: None,
                     outcome: RealtimeSessionOutcome::Ended,
                 },
             },
@@ -853,7 +1039,13 @@ async fn list_items_filters_exclusive_update_ordinals_across_pages_and_turns() {
         let page = store
             .list_items(ListItemsParams {
                 before_updated_at_ordinal: Some(4),
-                ..item_params(thread_id, None, None, 2, sort_direction)
+                ..item_params(
+                    thread_id,
+                    /*turn_id*/ None,
+                    /*cursor*/ None,
+                    /*page_size*/ 2,
+                    sort_direction,
+                )
             })
             .await
             .expect("creation-ordered before-filtered item page");
@@ -930,7 +1122,7 @@ async fn list_items_filters_exclusive_update_ordinals_across_pages_and_turns() {
             before_updated_at_ordinal: Some(4),
             page_size: 1,
             sort_direction: SortDirection::Desc,
-            ..updated_item_params(thread_id, 0)
+            ..updated_item_params(thread_id, /*after_updated_at_ordinal*/ 0)
         })
         .await
         .expect("descending before-filtered item page");
@@ -944,7 +1136,7 @@ async fn list_items_filters_exclusive_update_ordinals_across_pages_and_turns() {
                 .map(ListItemsPosition::Cursor),
             page_size: 1,
             sort_direction: SortDirection::Desc,
-            ..updated_item_params(thread_id, 0)
+            ..updated_item_params(thread_id, /*after_updated_at_ordinal*/ 0)
         })
         .await
         .expect("next descending before-filtered item page");
@@ -954,7 +1146,7 @@ async fn list_items_filters_exclusive_update_ordinals_across_pages_and_turns() {
     let error = store
         .list_items(ListItemsParams {
             before_updated_at_ordinal: Some(4),
-            ..updated_item_params(thread_id, 0)
+            ..updated_item_params(thread_id, /*after_updated_at_ordinal*/ 0)
         })
         .await
         .expect_err("after and before update ordinals should be mutually exclusive");
@@ -989,7 +1181,13 @@ async fn list_items_rejects_update_ordinals_outside_sqlite_integer_range() {
                     sort_key,
                     after_updated_at_ordinal,
                     before_updated_at_ordinal,
-                    ..item_params(thread_id, None, None, 2, SortDirection::Asc)
+                    ..item_params(
+                        thread_id,
+                        /*turn_id*/ None,
+                        /*cursor*/ None,
+                        /*page_size*/ 2,
+                        SortDirection::Asc,
+                    )
                 })
                 .await
                 .expect_err("out-of-range SQLite update ordinal should fail");
@@ -1044,6 +1242,17 @@ async fn list_items_update_ordinals_use_selected_rollout_id() {
             "turn-1", "item-1", /*rollout_ordinal*/ 1
         )]
     );
+    let descending_page = store
+        .list_items(item_params(
+            thread_id,
+            /*turn_id*/ None,
+            /*cursor*/ None,
+            /*page_size*/ 1,
+            SortDirection::Desc,
+        ))
+        .await
+        .expect("creation-ordered selected rollout page");
+    assert_eq!(descending_page.items, page.items);
 }
 
 #[tokio::test]
@@ -1268,7 +1477,8 @@ async fn lineage_reads_page_across_parent_and_child_segments() {
             .is_empty()
     );
 
-    let mut creation_order_params = updated_item_params(child_id, 0);
+    let mut creation_order_params =
+        updated_item_params(child_id, /*after_updated_at_ordinal*/ 0);
     creation_order_params.page_size = 10;
     creation_order_params.sort_key = ItemSortKey::CreatedAtOrdinal;
     let creation_order_update_filter = store
@@ -1281,14 +1491,17 @@ async fn lineage_reads_page_across_parent_and_child_segments() {
     );
 
     let first_updated_page = store
-        .list_items(updated_item_params(child_id, 0))
+        .list_items(updated_item_params(
+            child_id, /*after_updated_at_ordinal*/ 0,
+        ))
         .await
         .expect("first update-ordered lineage page");
     assert_eq!(
         item_ids(&first_updated_page),
         vec!["root-user", "root-agent"]
     );
-    let mut second_updated_params = updated_item_params(child_id, 0);
+    let mut second_updated_params =
+        updated_item_params(child_id, /*after_updated_at_ordinal*/ 0);
     second_updated_params.position = Some(ListItemsPosition::Cursor(
         first_updated_page
             .next_cursor
@@ -1304,7 +1517,8 @@ async fn lineage_reads_page_across_parent_and_child_segments() {
     );
     assert!(second_updated_page.next_cursor.is_none());
 
-    let mut backward_updated_params = updated_item_params(child_id, 0);
+    let mut backward_updated_params =
+        updated_item_params(child_id, /*after_updated_at_ordinal*/ 0);
     backward_updated_params.after_updated_at_ordinal = None;
     backward_updated_params.before_updated_at_ordinal = Some(9);
     backward_updated_params.sort_direction = SortDirection::Desc;
@@ -1644,13 +1858,13 @@ async fn store_with_mode(history_mode: ThreadHistoryMode) -> (TempDir, LocalThre
     )
     .await
     .expect("state runtime");
-    let mut builder = xdcode_state::ThreadMetadataBuilder::new(
+    let builder = xdcode_state::ThreadMetadataBuilder::new(
         thread_id,
         rollout_path,
         Utc::now(),
         SessionSource::Cli,
-    );
-    builder.history_mode = history_mode;
+    )
+    .with_history_mode(history_mode);
     runtime
         .upsert_thread(&builder.build(config.default_model_provider_id.as_str()))
         .await

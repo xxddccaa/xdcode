@@ -12,7 +12,7 @@ use pretty_assertions::assert_eq;
 fn skill_completion_attaches_typed_punctuation_snapshot() {
     snapshot_composer_state(
         "skill_completion_attaches_typed_punctuation",
-        false,
+        /*enhanced_keys_supported*/ false,
         |composer| {
             composer.set_skill_mentions(Some(vec![test_skill_metadata("rustdoc")]));
             composer.insert_str("请用 $ru");
@@ -61,7 +61,7 @@ fn unified_skill_completion_keeps_draft_spacing_after_punctuation() {
         ("", '\\', KeyModifiers::NONE, "$rustdoc \\"),
     ] {
         let (mut composer, _rx) = new_test_composer();
-        composer.set_mentions_v2_enabled(true);
+        composer.set_mentions_v2_enabled(/*enabled*/ true);
         composer.set_skill_mentions(Some(vec![test_skill_metadata("rustdoc")]));
         composer.set_text_content(format!("@ru{suffix}"), Vec::new(), Vec::new());
         composer.set_current_cursor("@ru".len());
@@ -83,7 +83,7 @@ fn unified_skill_completion_keeps_draft_spacing_after_punctuation() {
 #[test]
 fn skill_completion_keeps_space_after_cursor_navigation() {
     let (mut composer, _rx) = new_test_composer();
-    composer.set_disable_paste_burst(true);
+    composer.set_disable_paste_burst(/*disabled*/ true);
     composer.set_skill_mentions(Some(vec![test_skill_metadata("rustdoc")]));
     composer.insert_str("$ru");
     for key in [
@@ -122,39 +122,44 @@ async fn skill_completion_keeps_space_before_a_punctuation_paste_burst() {
 
 #[test]
 fn default_unified_mention_popup_snapshot() {
-    snapshot_composer_state("default_unified_mention_popup", false, |composer| {
-        let features = xdcode_features::Features::with_defaults();
-        composer.set_mentions_v2_enabled(features.enabled(xdcode_features::Feature::MentionsV2));
-        composer.set_skill_mentions(Some(vec![
-            SkillMetadata {
-                name: "sample-tools:search".to_string(),
-                plugin_id: Some("sample@test".to_string()),
-                ..test_skill_metadata("sample-search")
-            },
-            SkillMetadata {
-                name: "sample:summarize".to_string(),
-                plugin_id: Some("sample@test".to_string()),
-                ..test_skill_metadata("sample-summarize")
-            },
-            SkillMetadata {
-                name: "sample:notes".to_string(),
-                ..test_skill_metadata("sample-notes")
-            },
-            SkillMetadata {
-                name: "sample:other".to_string(),
-                plugin_id: Some("sample@other-marketplace".to_string()),
-                ..test_skill_metadata("sample-other")
-            },
-        ]));
-        composer.set_text_content("@sa".to_string(), Vec::new(), Vec::new());
-        composer.set_plugin_mentions(Some(vec![PluginCapabilitySummary {
-            config_name: "sample@test".to_string(),
-            display_name: "Sample Plugin".to_string(),
-            plugin_namespace: Some("sample".to_string()),
-            description: Some("Plugin with skills and an MCP server".to_string()),
-            has_skills: true,
-            mcp_server_names: vec!["sample".to_string()],
-            app_connector_ids: Vec::new(),
-        }]));
-    });
+    snapshot_composer_state(
+        "default_unified_mention_popup",
+        /*enhanced_keys_supported*/ false,
+        |composer| {
+            let features = xdcode_features::Features::with_defaults();
+            composer
+                .set_mentions_v2_enabled(features.enabled(xdcode_features::Feature::MentionsV2));
+            composer.set_skill_mentions(Some(vec![
+                SkillMetadata {
+                    name: "sample-tools:search".to_string(),
+                    plugin_id: Some("sample@test".to_string()),
+                    ..test_skill_metadata("sample-search")
+                },
+                SkillMetadata {
+                    name: "sample:summarize".to_string(),
+                    plugin_id: Some("sample@test".to_string()),
+                    ..test_skill_metadata("sample-summarize")
+                },
+                SkillMetadata {
+                    name: "sample:notes".to_string(),
+                    ..test_skill_metadata("sample-notes")
+                },
+                SkillMetadata {
+                    name: "sample:other".to_string(),
+                    plugin_id: Some("sample@other-marketplace".to_string()),
+                    ..test_skill_metadata("sample-other")
+                },
+            ]));
+            composer.set_text_content("@sa".to_string(), Vec::new(), Vec::new());
+            composer.set_plugin_mentions(Some(vec![PluginCapabilitySummary {
+                config_name: "sample@test".to_string(),
+                display_name: "Sample Plugin".to_string(),
+                plugin_namespace: Some("sample".to_string()),
+                description: Some("Plugin with skills and an MCP server".to_string()),
+                has_skills: true,
+                mcp_server_names: vec!["sample".to_string()],
+                app_connector_ids: Vec::new(),
+            }]));
+        },
+    );
 }

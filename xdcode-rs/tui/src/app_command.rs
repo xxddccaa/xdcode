@@ -23,31 +23,32 @@ use xdcode_protocol::model_types::ReasoningEffort as ReasoningEffortConfig;
 use xdcode_protocol::models::ActivePermissionProfile;
 use xdcode_protocol::models::PermissionProfile;
 use xdcode_protocol::request_permissions::RequestPermissionsResponse;
+use xdcode_utils_path_uri::PathUri;
 
 /// Keeps ICE credentials out of command diagnostics and session recordings.
-/// Convert back to a string only when sending the offer to app-server signaling.
+/// Convert back to a string only at the media signaling boundary.
 #[derive(Clone, PartialEq, Eq)]
-pub(crate) struct RealtimeOfferSdp(String);
+pub(crate) struct RealtimeSdp(String);
 
-impl From<String> for RealtimeOfferSdp {
+impl From<String> for RealtimeSdp {
     fn from(value: String) -> Self {
         Self(value)
     }
 }
 
-impl From<RealtimeOfferSdp> for String {
-    fn from(value: RealtimeOfferSdp) -> Self {
+impl From<RealtimeSdp> for String {
+    fn from(value: RealtimeSdp) -> Self {
         value.0
     }
 }
 
-impl fmt::Debug for RealtimeOfferSdp {
+impl fmt::Debug for RealtimeSdp {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("<redacted>")
     }
 }
 
-impl Serialize for RealtimeOfferSdp {
+impl Serialize for RealtimeSdp {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -95,13 +96,15 @@ impl Serialize for RealtimeSpeechText {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-pub(crate) enum UserSubmissionIntent {
+pub(crate) enum CloudSubmissionIntent {
     /// Use the TUI's known turn for explicit operations such as safety retries.
     UseKnownTurn,
     /// Enter lets the server choose whether to start or steer the current turn.
     StartOrSteer,
     /// A message leaving the local queue starts a fresh turn.
     StartIfIdle,
+    /// Use Cloud admission for answers, with steering enabled during a running turn.
+    QuestionAnswer { during_turn: bool },
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -111,7 +114,8 @@ pub(crate) enum AppCommand {
     CleanBackgroundTerminals,
     RealtimeConversationStart {
         thread_id: ThreadId,
-        offer_sdp: RealtimeOfferSdp,
+        attempt_id: u64,
+        offer_sdp: RealtimeSdp,
     },
     RealtimeConversationStop {
         thread_id: ThreadId,
@@ -128,7 +132,7 @@ pub(crate) enum AppCommand {
     },
     UserTurn {
         turn_trigger: &'static str,
-        submission_intent: UserSubmissionIntent,
+        cloud_submission: CloudSubmissionIntent,
         client_user_message_id: String,
         items: Vec<UserInput>,
         cwd: PathBuf,
@@ -185,7 +189,7 @@ pub(crate) enum AppCommand {
     },
     ReloadUserConfig,
     ListSkills {
-        cwds: Vec<PathBuf>,
+        cwd: PathUri,
         force_reload: bool,
     },
     Compact,
@@ -237,7 +241,7 @@ impl AppCommand {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn user_turn(
         turn_trigger: &'static str,
-        submission_intent: UserSubmissionIntent,
+        cloud_submission: CloudSubmissionIntent,
         client_user_message_id: String,
         items: Vec<UserInput>,
         cwd: PathBuf,
@@ -252,7 +256,7 @@ impl AppCommand {
     ) -> Self {
         Self::UserTurn {
             turn_trigger,
-            submission_intent,
+            cloud_submission,
             client_user_message_id,
             items,
             cwd,
@@ -354,8 +358,8 @@ impl AppCommand {
         Self::ReloadUserConfig
     }
 
-    pub(crate) fn list_skills(cwds: Vec<PathBuf>, force_reload: bool) -> Self {
-        Self::ListSkills { cwds, force_reload }
+    pub(crate) fn list_skills(cwd: PathUri, force_reload: bool) -> Self {
+        Self::ListSkills { cwd, force_reload }
     }
 
     pub(crate) fn compact() -> Self {

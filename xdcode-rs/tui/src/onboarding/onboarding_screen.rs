@@ -39,7 +39,7 @@ use crate::onboarding::trust_directory::TrustDirectoryWidget;
 use crate::onboarding::welcome::WelcomeWidget;
 use crate::startup_draft::StartupCancelled;
 use crate::tui::FrameRequester;
-use crate::tui::OverlayInput;
+use crate::tui::MouseCapture;
 use crate::tui::Tui;
 use crate::tui::TuiEvent;
 use color_eyre::eyre::Result;
@@ -86,6 +86,8 @@ pub(crate) struct OnboardingScreenArgs {
     pub remote_project_trust: Option<RemoteProjectTrust>,
     pub show_login_screen: bool,
     pub bedrock_setup_enabled: bool,
+    pub gcp_setup_enabled: bool,
+    pub gateway_setup_enabled: bool,
     pub login_status: LoginStatus,
     pub app_server_target: crate::AppServerTarget,
     pub app_server_request_handle: Option<AppServerRequestHandle>,
@@ -95,6 +97,7 @@ pub(crate) struct OnboardingScreenArgs {
 #[derive(Default)]
 pub(crate) struct OnboardingResult {
     pub directory_trust_persisted: bool,
+    pub selected_gateway: Option<String>,
     pub should_exit: bool,
 }
 
@@ -113,6 +116,8 @@ impl OnboardingScreen {
             remote_project_trust,
             show_login_screen: _,
             bedrock_setup_enabled: _,
+            gcp_setup_enabled: _,
+            gateway_setup_enabled: _,
             login_status,
             app_server_target: _,
             app_server_request_handle,
@@ -248,7 +253,7 @@ impl KeyboardHandler for OnboardingScreen {
     ///
     /// Directory trust remains explicit; quit cancels the trust prompt.
     fn handle_key_event(&mut self, key_event: KeyEvent) {
-        if !matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+        if key_event.kind == KeyEventKind::Release {
             return;
         }
         let text_entry_context = self.text_entry_context();
@@ -437,15 +442,15 @@ pub(crate) async fn run_onboarding_app(
     run_onboarding_screen(screen, request_handle, app_server, tui).await
 }
 
-async fn run_onboarding_screen(
+pub(super) async fn run_onboarding_screen(
     onboarding_screen: OnboardingScreen,
     app_server_request_handle: Option<AppServerRequestHandle>,
     app_server: Option<&mut AppServerSession>,
     tui: &mut Tui,
 ) -> Result<OnboardingResult> {
     // Let the terminal select and copy login URLs and device codes, even in fullscreen mode.
-    let previous_input = tui.overlay_input;
-    let result = match tui.set_overlay_input(OverlayInput::Onboarding) {
+    let previous_mouse_capture = tui.mouse_capture;
+    let result = match tui.set_mouse_capture(MouseCapture::Disabled) {
         Ok(()) => {
             run_onboarding_screen_inner(
                 onboarding_screen,
@@ -457,7 +462,7 @@ async fn run_onboarding_screen(
         }
         Err(error) => Err(error.into()),
     };
-    let restore = tui.set_overlay_input(previous_input);
+    let restore = tui.set_mouse_capture(previous_mouse_capture);
     result.and_then(|result| restore.map(|()| result).map_err(Into::into))
 }
 
@@ -527,17 +532,20 @@ async fn run_onboarding_screen_inner(
                     None => None,
                 }
             }, if app_server.is_some() => {
-                if let Some(event) = event {
-                    match event.event {
-                        AppServerEvent::ServerNotification(notification) => {
-                            onboarding_screen.handle_app_server_notification(*notification);
-                        }
-                        AppServerEvent::Disconnected { message } => {
-                            return Err(color_eyre::eyre::eyre!(message));
-                        }
-                        AppServerEvent::Lagged { .. }
-                        | AppServerEvent::ServerRequest(_) => {}
+                let Some(event) = event else {
+                    return Err(color_eyre::eyre::eyre!(super::SETUP_CONNECTION_LOST));
+                };
+                match event.event {
+                    AppServerEvent::ServerNotification(notification) => {
+                        onboarding_screen.handle_app_server_notification(*notification);
                     }
+                    AppServerEvent::Disconnected { message } => {
+                        return Err(color_eyre::eyre::eyre!(message));
+                    }
+                    AppServerEvent::ThreadStreamReconnected(_)
+                    | AppServerEvent::ThreadStreamDisconnected(_)
+                    | AppServerEvent::Lagged { .. }
+                    | AppServerEvent::ServerRequest(_) => {}
                 }
             }
         }
@@ -556,6 +564,7 @@ async fn run_onboarding_screen_inner(
     }
     Ok(OnboardingResult {
         directory_trust_persisted,
+        selected_gateway: None,
         should_exit: onboarding_screen.should_exit(),
     })
 }

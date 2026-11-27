@@ -97,6 +97,7 @@ fn hooks_to_info(hooks: &[xdcode_hooks::HookListEntry]) -> Vec<HookMetadata> {
                 source_path: hook.source_path.clone(),
                 source: hook.source.into(),
                 plugin_id: hook.plugin_id.clone(),
+                environment_id: hook.environment_id.clone(),
                 display_order: hook.display_order,
                 enabled: hook.enabled,
                 is_managed: hook.is_managed,
@@ -203,9 +204,10 @@ impl CatalogRequestProcessor {
                 {
                     (active_config, active_models_manager)
                 } else {
-                    let manager = xdcode_core::build_models_manager(
+                    // Temporary catalogs must not replace the active provider's disk cache.
+                    let manager = self.thread_manager.temporary_models_manager_for_config(
                         &config,
-                        self.thread_manager.auth_manager(),
+                        &xdcode_models_manager::manager::ModelCatalogSettings::default(),
                     );
                     (Arc::new(config), manager)
                 }
@@ -225,23 +227,23 @@ impl CatalogRequestProcessor {
                 .check_thread_model_provider(&config)
                 .await
                 .map_err(|err| config_load_error(&err))?;
-            if gateway.resolve_access_token().await.is_err() {
+            if let Err(error) = gateway.resolve_access_token().await {
                 let current = self
                     .config_manager
                     .load_latest_config(/*fallback_cwd*/ None)
                     .await
                     .map_err(|err| config_load_error(&err))?;
-                // Configuration edits without an account transition still require a restart to refresh the model catalog.
-                if current.model_provider_id != config.model_provider_id
-                    || current.model_provider != config.model_provider
+                // An explicit selection need not match the current default.
+                if current.model_providers.get(&config.model_provider_id)
+                    != Some(&config.model_provider)
+                    || (params.model_provider.is_none()
+                        && current.model_provider_id != config.model_provider_id)
                 {
                     return Err(invalid_request(
                         "Model provider settings changed. Restart Xdcode to apply them, then retry fetching the model list",
                     ));
                 }
-                return Err(invalid_request(
-                    "Gateway sign-in required or unavailable. Complete gateway sign-in and retry fetching the model list",
-                ));
+                return Err(invalid_request(error.to_string()));
             }
         }
         self.list_models(params, config, models_manager)
@@ -658,12 +660,35 @@ impl CatalogRequestProcessor {
         Ok(SkillsExtraRootsSetResponse {})
     }
 
-    /// Handle `hooks/list` by resolving hooks for each requested cwd.
+    /// Resolve a loaded thread's hook inventory, or inspect configuration for each requested cwd.
     async fn hooks_list_response(
         &self,
         params: HooksListParams,
     ) -> Result<HooksListResponse, JSONRPCErrorError> {
-        let HooksListParams { cwds } = params;
+        let HooksListParams { cwds, thread_id } = params;
+        if let Some(thread_id) = thread_id {
+            if !cwds.is_empty() {
+                return Err(invalid_request("specify either threadId or cwds"));
+            }
+            let thread_id = ThreadId::from_string(&thread_id)
+                .map_err(|err| invalid_request(format!("invalid thread id: {err}")))?;
+            let thread = self
+                .thread_manager
+                .get_thread(thread_id)
+                .await
+                .map_err(|_| invalid_request(format!("thread not found: {thread_id}")))?;
+            let cwd = thread.config_snapshot().await.cwd().to_path_buf();
+            let hooks = thread.list_hooks();
+            return Ok(HooksListResponse {
+                data: vec![xdcode_app_server_protocol::HooksListEntry {
+                    cwd,
+                    hooks: hooks_to_info(&hooks.hooks),
+                    warnings: hooks.warnings,
+                    errors: Vec::new(),
+                }],
+            });
+        }
+
         let cwds = if cwds.is_empty() {
             vec![self.config.cwd.to_path_buf()]
         } else {

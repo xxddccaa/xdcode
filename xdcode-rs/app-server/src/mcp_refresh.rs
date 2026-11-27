@@ -184,14 +184,15 @@ mod tests {
     use xdcode_config::ThreadConfigSource;
     use xdcode_config::types::AuthKeyringBackendKind;
     use xdcode_config::types::McpServerConfig;
+    use xdcode_core::ThreadStoreBuilder;
     use xdcode_core::config::ConfigOverrides;
     use xdcode_core::init_state_db;
-    use xdcode_core::thread_store_from_config;
     use xdcode_exec_server::EnvironmentManager;
     use xdcode_extension_api::NoopExtensionEventSink;
     use xdcode_home::XdcodeHomeUserInstructionsProvider;
     use xdcode_login::AuthManager;
     use xdcode_login::XdcodeAuth;
+    use xdcode_models_manager::manager::ModelCatalogSettings;
     use xdcode_protocol::protocol::SessionSource;
     use xdcode_utils_absolute_path::AbsolutePathBuf;
 
@@ -524,19 +525,25 @@ enabled = false
         let state_db = init_state_db(&good_config)
             .await
             .expect("refresh tests require state db");
-        let thread_store = thread_store_from_config(&good_config, Some(state_db.clone()));
+        let thread_store =
+            ThreadStoreBuilder::from_config(&good_config, Some(state_db.clone())).build();
         let environment_manager = Arc::new(EnvironmentManager::default_for_tests());
         let executor_skill_provider: Arc<dyn xdcode_skills_extension::SkillProvider> = Arc::new(
             xdcode_skills_extension::ExecutorSkillProvider::new_with_restriction_product(
-                Arc::clone(&environment_manager),
                 SessionSource::Exec.restriction_product(),
             ),
         );
         let thread_manager = Arc::new_cyclic(|thread_manager| {
             ThreadManager::new(
                 &good_config,
-                auth_manager.clone(),
-                xdcode_core::build_models_manager(&good_config, auth_manager.clone()),
+                xdcode_core::build_startup_models(
+                    &good_config,
+                    auth_manager.clone(),
+                    "11111111-1111-4111-8111-111111111111".to_string(),
+                    Arc::new(ModelCatalogSettings::disk(
+                        good_config.xdcode_home.to_path_buf(),
+                    )),
+                ),
                 xdcode_core::XdcodeAppsToolsCache::default(),
                 SessionSource::Exec,
                 Arc::clone(&environment_manager),
@@ -569,7 +576,6 @@ enabled = false
                 xdcode_core::passthrough_image_store(),
                 Arc::clone(&thread_store),
                 xdcode_core::local_agent_graph_store_from_state_db(Some(&state_db)),
-                "11111111-1111-4111-8111-111111111111".to_string(),
                 /*attestation_provider*/ None,
                 /*external_time_provider*/ None,
             )

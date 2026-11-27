@@ -10,10 +10,12 @@ use std::sync::RwLock;
 use tempfile::TempDir;
 use xdcode_config::CloudConfigBundleLoader;
 use xdcode_config::LoaderOverrides;
+use xdcode_config::loader::load_guardian_policy_snapshot;
 use xdcode_config::test_support::CloudConfigBundleFixture;
 use xdcode_config::types::WindowsSandboxModeToml;
 use xdcode_core::XdcodeThreadSettingsOverrides;
 use xdcode_core::config::ConfigBuilder;
+use xdcode_exec_server::LOCAL_FS;
 use xdcode_features::Feature;
 use xdcode_protocol::models::PermissionProfile;
 use xdcode_protocol::permissions::NetworkSandboxPolicy;
@@ -91,6 +93,69 @@ async fn session_requires_managed_configuration_from_configured_service() -> Res
             }
         }
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn guardian_refresh_reports_live_thread_rejection() -> Result<()> {
+    struct TestPolicyLoader {
+        home: Arc<TempDir>,
+        bundle: RwLock<CloudConfigBundleLoader>,
+    }
+    impl xdcode_core::GuardianPolicyLoader for TestPolicyLoader {
+        fn load_guardian_policy_snapshot(
+            &self,
+            revision: u64,
+        ) -> futures::future::BoxFuture<'_, std::io::Result<xdcode_config::GuardianPolicySnapshot>>
+        {
+            let bundle = self.bundle.read().unwrap().clone();
+            Box::pin(async move {
+                load_guardian_policy_snapshot(
+                    LOCAL_FS.as_ref(),
+                    self.home.path(),
+                    &LoaderOverrides::without_managed_config_for_tests(),
+                    &bundle,
+                    revision,
+                )
+                .await
+            })
+        }
+    }
+
+    let server = start_mock_server().await;
+    let home = Arc::new(TempDir::new()?);
+    let loader = Arc::new(TestPolicyLoader {
+        home: Arc::clone(&home),
+        bundle: RwLock::new(
+            CloudConfigBundleFixture::loader_with_enterprise_requirement(
+                "guardian_policy_config = 'startup policy'",
+            ),
+        ),
+    });
+    let test = test_xdcode()
+        .with_home(home)
+        .with_thread_manager({
+            let loader = Arc::clone(&loader);
+            move |manager| manager.with_guardian_policy_loader(loader)
+        })
+        .build_with_auto_env(&server)
+        .await?;
+    let startup = test.xdcode.config().await;
+    assert!(startup.guardian_policy_revision > 0);
+    let policy = startup.guardian_policy_config.as_deref();
+    assert_eq!(policy, Some("startup policy"));
+    *loader.bundle.write().unwrap() =
+        CloudConfigBundleFixture::loader_with_enterprise_config("auto_review = false");
+
+    let error = test
+        .thread_manager
+        .refresh_guardian_policy()
+        .await
+        .expect_err("the live thread cannot apply the invalid Guardian fallback");
+    assert_eq!(
+        error.to_string(),
+        "Guardian policy refresh rejected by one or more live threads"
+    );
     Ok(())
 }
 

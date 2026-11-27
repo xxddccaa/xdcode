@@ -59,6 +59,7 @@ def package(build_dir: Path, output_dir: Path) -> Path:
         inputs = PackageInputs(
             entrypoint_bin=build_dir / "bin/xdcode",
             code_mode_host_bin=build_dir / "bin/xdcode-code-mode-host",
+            exec_server_bin=None,
             rg_bin=build_dir / "xdcode-path/rg", bwrap_bin=build_dir / "xdcode-resources/bwrap",
             xdcode_command_runner_bin=None, xdcode_windows_sandbox_setup_bin=None,
         )

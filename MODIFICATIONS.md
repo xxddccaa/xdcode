@@ -86,6 +86,22 @@ cancellation, including foreground compaction. Server retry deadlines are retain
 authentication, exhausted quota and invalid-model errors remain terminal. See
 UPSTREAM_0.165.0.md and the build receipt for verification and delivery details.
 
+## 2026-11-27: xdcode 0.172.0 baseline upgrade
+
+The baseline moves to OpenAI Codex stable tag `rust-v0.172.0` at
+`3d86e43b075adeba2193ec5c22ac92f55afd82e6` through one three-way merge of the
+renamed 0.165.0 and 0.172.0 trees with xdcode 0.167.0; the earlier selective
+backports are absorbed. Personal model management, project/mode memory,
+shared provider history, retry behavior and identity isolation are retained.
+
+Removed or disabled in this release: the `xdcode-delegate` skill and the
+`spawn_agent` catalog-ID provider routing (the native tool follows upstream
+again); `xdcode exec --remote`; the `/rc` remote-control command; hosted voice
+(`/voice`, TUI start paths and core realtime start/attach); the `tcp-tunnel`
+Cloud gateway subcommand; and the multi-backend TUI that registers the hosted
+Cloud backend. `tui_workspace` and `mcp_lazy_stdio_startup` follow upstream and
+are enabled by default. See [UPSTREAM_0.172.0.md](UPSTREAM_0.172.0.md).
+
 ## 2026-11-08: xdcode 0.167.0 selective maintenance
 
 The product version advances to 0.167.0 while the actual upstream baseline stays

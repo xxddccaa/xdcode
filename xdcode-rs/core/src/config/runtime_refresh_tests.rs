@@ -4,9 +4,15 @@ use super::*;
 use crate::config::ConfigBuilder;
 use pretty_assertions::assert_eq;
 use xdcode_config::CONFIG_TOML_FILE;
+use xdcode_config::CloudConfigBundleLoader;
+use xdcode_config::CloudConfigBundlePolicy;
+use xdcode_config::CloudConfigBundleSnapshot;
 use xdcode_config::ConfigLayerSource;
+use xdcode_config::LoaderOverrides;
+use xdcode_config::loader::load_guardian_policy_snapshot;
 use xdcode_config::test_support::CloudConfigBundleFixture;
 use xdcode_core_plugins::PluginLoadOutcome;
+use xdcode_exec_server::LOCAL_FS;
 
 const RESPONSES_CONFIG: &str = "model = 'test-model'\nmodel_provider = 'test-responses'\n[model_providers.test-responses]\nname = 'Local Responses fixture'\nbase_url = 'http://127.0.0.1:9/v1'\nwire_api = 'responses'\n";
 
@@ -202,7 +208,7 @@ async fn ordinary_transport_transitions_use_the_resolved_incoming_map() {
 #[tokio::test]
 async fn mcp_refresh_preserves_current_user_and_session_layers_without_reopening_ema() {
     let (_home, base) = base_config().await;
-    let current = layered_config(
+    let mut current = layered_config(
         &base,
         &enterprise_config("https://current-idp.example", "current-resource"),
         "",
@@ -210,14 +216,44 @@ async fn mcp_refresh_preserves_current_user_and_session_layers_without_reopening
         "[mcp_servers.enterprise]\nenabled = false",
     )
     .await;
+    let bundle = CloudConfigBundleFixture::enterprise_config("auto_review.policy = 'published'")
+        .add_enterprise_requirement(
+            "allowed_approvals_reviewers = ['auto_review']\nauto_review.required_on_models = ['protected']",
+        )
+        .into_bundle();
+    let mut cloud = CloudConfigBundleSnapshot {
+        bundle: Ok(Some(bundle)),
+        config_server: None,
+        binding: None,
+    };
+    CloudConfigBundlePolicy::default().publish_snapshot(&mut cloud);
+    let snapshot = load_guardian_policy_snapshot(
+        LOCAL_FS.as_ref(),
+        base.xdcode_home.as_path(),
+        &LoaderOverrides::without_managed_config_for_tests(),
+        &CloudConfigBundleLoader::from_snapshot(cloud),
+        /*revision*/ 1,
+    )
+    .await
+    .unwrap();
     let next = layered_config(
         &base,
         &enterprise_config("https://old-idp.example", "old-resource"),
         "",
-        "",
+        "mcp_shared_repl_cwd = true\n[auto_review]\nrequired_on_models = ['incoming']",
         "",
     )
     .await;
+    let before_publication = current
+        .resolve_runtime_refresh(&next, RuntimeConfigRefresh::Mcp)
+        .unwrap();
+    assert_eq!(
+        before_publication.config_layer_stack.requirements(),
+        next.config_layer_stack.requirements()
+    );
+
+    current.config_layer_stack.apply_guardian_policy(&snapshot);
+    current.guardian_policy_revision = snapshot.revision;
     let refreshed = current
         .resolve_runtime_refresh(&next, RuntimeConfigRefresh::Mcp)
         .unwrap();
@@ -235,6 +271,50 @@ async fn mcp_refresh_preserves_current_user_and_session_layers_without_reopening
             .collect::<Vec<_>>()
     };
     assert_eq!(preserved_layers(&refreshed), preserved_layers(&current));
+    let layers = &refreshed.config_layer_stack;
+    let reviewer = &layers.requirements().approvals_reviewer;
+    assert!(
+        reviewer
+            .can_set(&xdcode_config::types::ApprovalsReviewer::User)
+            .is_err()
+    );
+    assert!(
+        reviewer
+            .can_set(&xdcode_config::types::ApprovalsReviewer::AutoReview)
+            .is_ok()
+    );
+    assert_eq!(
+        layers
+            .requirements_toml()
+            .allowed_approvals_reviewers
+            .as_deref(),
+        Some([xdcode_config::types::ApprovalsReviewer::AutoReview].as_slice())
+    );
+    assert!(
+        layers
+            .requirements()
+            .auto_review_required_for_model("protected")
+    );
+    assert!(
+        !layers
+            .requirements()
+            .auto_review_required_for_model("incoming")
+    );
+    assert_eq!(
+        layers
+            .requirements_toml()
+            .auto_review
+            .as_ref()
+            .and_then(|review| review.required_on_models.as_deref())
+            .unwrap(),
+        ["protected"]
+    );
+    assert!(refreshed.features.enabled(Feature::McpSharedReplCwd));
+    assert_eq!(
+        layers.guardian_config().unwrap().policy.as_deref(),
+        Some("published")
+    );
+    assert!(layers.guardian_policy_binding().is_some());
     let server = &runtime_servers(&refreshed)["enterprise"];
     assert!(!server.enabled);
     assert_eq!(
@@ -321,4 +401,69 @@ async fn mcp_refresh_preserves_apps_until_new_session() {
         .unwrap();
     assert!(reloaded.features.enabled(Feature::Apps));
     assert!(!next.features.enabled(Feature::Apps));
+}
+
+const BROWSER_AND_CALENDAR_DISABLED: &str =
+    "plugins.browser.enabled = false\napps.calendar.enabled = false";
+const BROWSER_AND_CALENDAR_ENABLED: &str =
+    "plugins.browser.enabled = true\napps.calendar.enabled = true";
+
+#[test_case::test_case(
+    "plugins.browser.enabled = true\napps.calendar.enabled = false",
+    "apps.calendar.enabled = true",
+    BROWSER_AND_CALENDAR_ENABLED;
+    "apps update preserves omitted plugins"
+)]
+#[test_case::test_case(
+    BROWSER_AND_CALENDAR_ENABLED,
+    "plugins.browser.enabled = false",
+    "apps.calendar.enabled = true";
+    "plugin update preserves omitted apps"
+)]
+#[test_case::test_case(
+    "apps.calendar.enabled = true",
+    "apps = {}\nplugins.browser.enabled = true",
+    "plugins.browser.enabled = true";
+    "clearing apps restores inheritance alongside a plugin update"
+)]
+#[test_case::test_case(
+    BROWSER_AND_CALENDAR_ENABLED,
+    "plugins = {}",
+    "apps.calendar.enabled = true";
+    "clearing plugins restores inheritance and preserves apps"
+)]
+#[test_case::test_case(
+    BROWSER_AND_CALENDAR_DISABLED,
+    BROWSER_AND_CALENDAR_ENABLED,
+    BROWSER_AND_CALENDAR_ENABLED;
+    "both nonempty overrides change together"
+)]
+#[tokio::test]
+async fn mcp_refresh_updates_session_plugins_and_apps(
+    initial_session: &str,
+    incoming_session: &str,
+    expected_session: &str,
+) {
+    let (_home, base) = base_config().await;
+    let user = BROWSER_AND_CALENDAR_DISABLED;
+    let current = layered_config(&base, user, "", "", initial_session).await;
+    let incoming = layered_config(&base, user, "", "", incoming_session).await;
+    let expected = layered_config(&base, user, "", "", expected_session).await;
+    let initial_layer_count = current.config_layer_stack.all_layers_low_to_high().count();
+
+    let refreshed = current
+        .resolve_runtime_refresh(&incoming, RuntimeConfigRefresh::Mcp)
+        .unwrap();
+    assert_eq!(refreshed.plugins, expected.plugins);
+    assert_eq!(
+        refreshed.config_layer_stack.effective_config()["apps"],
+        expected.config_layer_stack.effective_config()["apps"]
+    );
+    assert_eq!(
+        refreshed
+            .config_layer_stack
+            .all_layers_low_to_high()
+            .count(),
+        initial_layer_count
+    );
 }

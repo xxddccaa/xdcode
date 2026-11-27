@@ -1,11 +1,11 @@
 //! Seatbelt keeps deny globs as native patterns; no snapshot scan is needed.
 
 use super::dependencies::Dependency;
+use super::dependencies::IntegrityCommand;
 use super::dependencies::xdcode_executable;
 use std::io;
 use std::path::PathBuf;
 use xdcode_protocol::permissions::FileSystemSandboxPolicy;
-use xdcode_sandboxing::SandboxExecRequest;
 use xdcode_sandboxing::SandboxType;
 use xdcode_utils_absolute_path::AbsolutePathBuf;
 
@@ -13,7 +13,7 @@ pub(super) const SANDBOX_TYPE: SandboxType = SandboxType::MacosSeatbelt;
 pub(super) const NAME: &str = "seatbelt";
 
 pub(super) fn critical_dependencies(
-    _request: &SandboxExecRequest,
+    _request: &IntegrityCommand,
     _policy: &FileSystemSandboxPolicy,
     _cwd: &AbsolutePathBuf,
 ) -> io::Result<Vec<Dependency>> {
@@ -29,7 +29,7 @@ pub(super) fn critical_dependencies(
 }
 
 pub(super) fn prepare_policy(
-    _request: &SandboxExecRequest,
+    _request: &IntegrityCommand,
     policy: FileSystemSandboxPolicy,
     _cwd: &AbsolutePathBuf,
 ) -> io::Result<FileSystemSandboxPolicy> {

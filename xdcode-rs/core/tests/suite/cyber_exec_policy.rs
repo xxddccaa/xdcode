@@ -24,6 +24,9 @@ use xdcode_core::config::Constrained;
 use xdcode_core::sandboxing::SandboxPermissions;
 use xdcode_protocol::config_types::ApprovalsReviewer;
 use xdcode_protocol::model_types::MODEL_SPECIALTY_CYBER;
+use xdcode_protocol::model_types::ModelMessages;
+use xdcode_protocol::model_types::PermissionMessages;
+use xdcode_protocol::models::PermissionProfile;
 use xdcode_protocol::protocol::AskForApproval;
 use xdcode_protocol::protocol::EventMsg;
 use xdcode_protocol::protocol::Op;
@@ -52,14 +55,28 @@ fn configure_saved_prefix_and_guardian(config: &mut Config) {
     .expect("write saved command prefix rule");
     config.permissions.approval_policy = Constrained::allow_any(AskForApproval::OnRequest);
     config.approvals_reviewer = ApprovalsReviewer::AutoReview;
-    config
-        .set_legacy_sandbox_policy(SandboxPolicy::WorkspaceWrite {
+    config.workspace_roots_explicit = false;
+    let permission_profile = PermissionProfile::from_legacy_sandbox_policy_for_cwd(
+        &SandboxPolicy::WorkspaceWrite {
             writable_roots: vec![],
             network_access: false,
             exclude_tmpdir_env_var: true,
             exclude_slash_tmp: true,
-        })
-        .expect("set workspace sandbox policy");
+        },
+        config.cwd.as_path(),
+    );
+    config
+        .permissions
+        .can_set_permission_profile(&permission_profile)
+        .expect("set permission profile");
+    config
+        .permissions
+        .set_workspace_roots(vec![config.cwd.clone()]);
+    config
+        .permissions
+        .set_permission_profile(permission_profile)
+        .expect("set permission profile");
+    config.workspace_roots = config.permissions.workspace_roots().to_vec();
 }
 
 fn command_response(response_id: &str, call_id: &str) -> Result<String> {
@@ -251,11 +268,21 @@ async fn switching_models_suppresses_and_restores_saved_prefix_approvals() -> Re
     skip_if_wine_exec!(Ok(()), "Guardian command reviews require host-native paths");
 
     let server = start_mock_server().await;
+    let messages = |heading: &str| ModelMessages {
+        permissions: Some(PermissionMessages {
+            approved_command_prefix_saved: Some(heading.to_string()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
     let mut builder = test_xdcode()
-        .with_model_info_override("gpt-5.4", |model| {
+        .with_model_info_override("gpt-5.4", move |model| {
             model.model_specialty = Some(MODEL_SPECIALTY_CYBER.to_string());
+            model.model_messages = Some(messages("Cyber model saved rule"));
         })
-        .with_model("gpt-5.2")
+        .with_model_info_override("gpt-5.2", move |model| {
+            model.model_messages = Some(messages("General model saved rule"));
+        })
         .with_config(configure_saved_prefix_and_guardian);
     let test = builder.build_with_auto_env(&server).await?;
 
@@ -298,6 +325,7 @@ async fn switching_models_suppresses_and_restores_saved_prefix_approvals() -> Re
         .find(|message| message.contains("<permissions instructions>"))
         .expect("refreshed cyber-model permissions instructions");
     assert!(!cyber_permissions.contains(SAVED_PREFIX));
+    assert!(!cyber_request.body_contains_text("Cyber model saved rule"));
 
     let final_parent_request = requests
         .iter()
@@ -307,10 +335,9 @@ async fn switching_models_suppresses_and_restores_saved_prefix_approvals() -> Re
     assert!(
         final_parent_request
             .message_input_texts("developer")
-            .iter()
-            .any(|message| {
-                message.contains("Approved command prefix saved:") && message.contains(SAVED_PREFIX)
-            }),
+            .contains(&format!(
+                "Approved command prefix saved:\nGeneral model saved rule\n- {SAVED_PREFIX}"
+            )),
         "switching back should restore the original saved-prefix context",
     );
 

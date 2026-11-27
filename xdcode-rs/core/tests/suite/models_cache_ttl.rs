@@ -1,6 +1,7 @@
 use core_test_support::test_xdcode::local_requests;
 use std::path::Path;
 use std::sync::Arc;
+use xdcode_core::StartThreadOptions;
 use xdcode_core::TurnInputRequest;
 
 use anyhow::Result;
@@ -23,10 +24,15 @@ use pretty_assertions::assert_eq;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::json;
+use wiremock::Mock;
 use wiremock::MockServer;
+use wiremock::ResponseTemplate;
+use wiremock::matchers::method;
+use wiremock::matchers::path_regex;
 use xdcode_core::config::Constrained;
 use xdcode_login::XdcodeAuth;
 use xdcode_models_manager::client_version_to_whole;
+use xdcode_models_manager::manager::ModelCatalogSettings;
 use xdcode_models_manager::manager::RefreshStrategy;
 use xdcode_protocol::config_types::ApprovalsReviewer;
 use xdcode_protocol::config_types::CollaborationMode;
@@ -45,6 +51,8 @@ use xdcode_protocol::model_types::default_input_modalities;
 use xdcode_protocol::models::PermissionProfile;
 use xdcode_protocol::protocol::AskForApproval;
 use xdcode_protocol::protocol::EventMsg;
+use xdcode_protocol::protocol::InternalSessionSource;
+use xdcode_protocol::protocol::SessionSource;
 use xdcode_protocol::protocol::ThreadSettingsOverrides;
 use xdcode_protocol::user_input::UserInput;
 
@@ -55,11 +63,19 @@ const VERSIONED_MODEL: &str = "xdcode-test-versioned";
 const MISSING_VERSION_MODEL: &str = "xdcode-test-missing-version";
 const DIFFERENT_VERSION_MODEL: &str = "xdcode-test-different-version";
 
+#[test_case::test_case(true; "expired_cache")]
+#[test_case::test_case(false; "disabled_cache")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn guardian_reused_reviewer_avoids_stale_catalog_lookup() -> Result<()> {
+async fn guardian_reused_reviewer_avoids_stale_catalog_lookup(with_cache: bool) -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = MockServer::start().await;
+    let websocket_fallback = Mock::given(method("GET"))
+        .and(path_regex(".*/responses$"))
+        .respond_with(ResponseTemplate::new(426))
+        .expect(1)
+        .mount_as_scoped(&server)
+        .await;
     let bundled = xdcode_models_manager::bundled_models_response()?;
     let catalog = ModelsResponse {
         models: bundled
@@ -77,23 +93,30 @@ async fn guardian_reused_reviewer_avoids_stale_catalog_lookup() -> Result<()> {
         .with_model("gpt-5.5");
     builder = builder.with_config(|config| {
         config.permissions.approval_policy = Constrained::allow_any(AskForApproval::OnRequest);
-        config.approvals_reviewer = ApprovalsReviewer::AutoReview;
+        config.approvals_reviewer = ApprovalsReviewer::User;
         config.model_provider.request_max_retries = Some(0);
+        config.model_provider.supports_websockets = true;
     });
+    if !with_cache {
+        builder = builder.with_model_catalog_settings(ModelCatalogSettings::default());
+    }
     let test = builder.build_with_auto_env(&server).await?;
-    test.thread_manager
-        .get_models_manager()
-        .list_models(
-            RefreshStrategy::OnlineIfUncached,
-            xdcode_core::test_support::default_http_client_factory(),
-        )
-        .await;
     assert_eq!(initial_models.requests().len(), 1);
-    rewrite_cache_timestamp(
-        &test.config.xdcode_home.join(CACHE_FILE),
-        Utc::now() - chrono::Duration::hours(1),
+    // Complete the parent's fallback before Guardian can prewarm its own session.
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        websocket_fallback.wait_until_satisfied(),
     )
     .await?;
+    if with_cache {
+        rewrite_cache_timestamp(
+            &test.config.xdcode_home.join(CACHE_FILE),
+            Utc::now() - chrono::Duration::hours(1),
+        )
+        .await?;
+    } else {
+        assert!(!test.config.xdcode_home.join(CACHE_FILE).exists());
+    }
     let repeat_models = responses::mount_models_once_with_etag(&server, catalog, ETAG).await;
     let deny = r#"{"risk_level":"high","user_authorization":"low","outcome":"deny"}"#;
     let mut sequence = Vec::new();
@@ -121,7 +144,22 @@ async fn guardian_reused_reviewer_avoids_stale_catalog_lookup() -> Result<()> {
         ev_completed("parent-done"),
     ]));
     let response_mock = mount_sse_sequence(&server, sequence).await;
-    test.submit_text_turn("Review both shell requests.").await?;
+    test.xdcode
+        .start_or_steer_turn(
+            TurnInputRequest::user_input(vec![UserInput::Text {
+                text: "Review both shell requests.".into(),
+                text_elements: Vec::new(),
+            }])
+            .with_thread_settings(ThreadSettingsOverrides {
+                approvals_reviewer: Some(ApprovalsReviewer::AutoReview),
+                ..Default::default()
+            }),
+        )
+        .await?;
+    wait_for_event(&test.xdcode, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
 
     let requests = response_mock.requests();
     assert_eq!(
@@ -151,6 +189,26 @@ async fn guardian_reused_reviewer_avoids_stale_catalog_lookup() -> Result<()> {
         Some(guardian_thread.as_str()),
         "the second approval must reuse the Guardian reviewer"
     );
+
+    // Parallel reviewers inherit HTTP fallback as well as Guardian's retry overrides.
+    let fork_reviewer = || async {
+        let mut config = test.config.clone();
+        config.model_provider.request_max_retries = Some(1);
+        config.model_provider.stream_max_retries = Some(1);
+        config.model_provider.supports_websockets = false;
+        test.thread_manager
+            .fork_internal_session(
+                test.session_configured.session_id.into(),
+                StartThreadOptions {
+                    session_source: Some(SessionSource::Internal(InternalSessionSource::Guardian)),
+                    ..StartThreadOptions::new(config)
+                },
+                Vec::new(),
+            )
+            .await
+    };
+    let (first, second) = tokio::try_join!(fork_reviewer(), fork_reviewer())?;
+    assert_ne!(first.thread_id, second.thread_id);
     assert_eq!(repeat_models.requests().len(), 0);
     Ok(())
 }
@@ -643,6 +701,8 @@ fn test_remote_model(slug: &str, priority: i32) -> ModelInfo {
         available_access_programs: None,
         upgrade: None,
         model_messages: Some(ModelMessages {
+            apps: None,
+            plugins: None,
             content_filter_guidance: None,
             persistent_instructions: None,
             tools: None,
@@ -666,6 +726,7 @@ fn test_remote_model(slug: &str, priority: i32) -> ModelInfo {
         availability_nux: None,
         apply_patch_tool_type: None,
         web_search_tool_type: Default::default(),
+        web_search_provider: None,
         truncation_policy: TruncationPolicyConfig::bytes(/*limit*/ 10_000),
         supports_image_detail_original: false,
         context_window: Some(272_000),
@@ -675,7 +736,6 @@ fn test_remote_model(slug: &str, priority: i32) -> ModelInfo {
         effective_context_window_percent: 95,
         experimental_supported_tools: Vec::new(),
         input_modalities: default_input_modalities(),
-        used_fallback_model_metadata: false,
         supports_search_tool: false,
         supports_experimental_context: false,
         use_responses_lite: false,
@@ -688,5 +748,6 @@ fn test_remote_model(slug: &str, priority: i32) -> ModelInfo {
         tool_mode: None,
         multi_agent_version: None,
         multi_agent_reasoning_effort: None,
+        multi_agent_tools_in_code_mode: None,
     }
 }

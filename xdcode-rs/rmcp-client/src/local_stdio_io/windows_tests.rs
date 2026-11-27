@@ -18,6 +18,7 @@ fn child_can_read_output_pipe_mode() -> io::Result<()> {
     let _guard = runtime.enter();
     let (_server, child) = connected_pipe(Direction::ChildWrites, &PipeSecurity::new()?)?;
     let mut mode = 0;
+    // SAFETY: the file owns a live pipe handle and mode is writable for the call.
     if unsafe {
         GetNamedPipeHandleStateW(
             child.as_raw_handle(),
@@ -26,7 +27,7 @@ fn child_can_read_output_pipe_mode() -> io::Result<()> {
             ptr::null_mut(),
             ptr::null_mut(),
             ptr::null_mut(),
-            0,
+            /*nmaxusernamesize*/ 0,
         )
     } == 0
     {

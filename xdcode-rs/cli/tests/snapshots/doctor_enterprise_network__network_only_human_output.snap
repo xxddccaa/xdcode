@@ -1,9 +1,8 @@
 ---
 source: cli/tests/doctor_enterprise_network.rs
-assertion_line: 223
 expression: stdout
 ---
-Xdcode Doctor v0.165.0
+Xdcode Doctor v0.0.0
 
 Configuration
   [ok] config       loaded

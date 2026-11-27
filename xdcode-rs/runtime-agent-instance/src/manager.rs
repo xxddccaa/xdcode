@@ -1,250 +1,195 @@
-//! Share one runtime for the current credential source, including bootstrap retries and refreshes.
+//! Bind credential sources to shared runtime registrations.
 
 use crate::AgentHostAuthorization;
-use crate::AuthenticatedActorAuthorization;
+use crate::PlatformResourceSelection;
 use crate::RegistrationError;
-use crate::RuntimeAgentInstance;
 use crate::RuntimeAuth;
-use crate::RuntimeRegistration;
-use crate::RuntimeRegistrationClient;
+use crate::RuntimeAuthBinding;
+use crate::RuntimeAuthError;
 use crate::RuntimeRegistrationMetadata;
-use http::StatusCode;
+use crate::binding::RegistrationTarget;
 use std::sync::Arc;
-use tokio::sync::Mutex;
 use url::Url;
-use xdcode_http_client::HttpClientFactory;
-use xdcode_http_client::NetworkPolicyDenied;
-use xdcode_login::AuthChangeState;
 use xdcode_login::AuthManager;
-use xdcode_login::RefreshTokenError;
+use xdcode_login::AuthRuntimeConfig;
 use xdcode_login::XdcodeAuth;
 
-/// Owned alongside an AuthManager, not created for every thread or request.
+/// Shares registration state across requests using the same credential source and context.
 pub struct RuntimeAuthManager {
-    credentials: Arc<AuthManager>,
-    host: AgentHostAuthorization,
-    metadata: RuntimeRegistrationMetadata,
-    registration_url: Url,
-    state: Mutex<Option<RuntimeState>>,
+    login: Arc<RuntimeAuthBinding>,
+    registrations: std::sync::Mutex<Vec<CredentialRegistration>>,
 }
 
-enum RuntimeState {
-    Pending {
-        source_generation: u64,
-        registration: RuntimeRegistration,
-    },
-    Ready {
-        source_generation: u64,
-        runtime: Arc<RuntimeAgentInstance>,
-    },
-    Denied {
-        source_generation: u64,
-        error: RegistrationError,
-    },
+enum CredentialRegistration {
+    Provider(Arc<RuntimeAuthBinding>),
+    ApiKey(Arc<RuntimeAuthBinding>),
+}
+
+impl std::fmt::Debug for RuntimeAuthManager {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RuntimeAuthManager").finish_non_exhaustive()
+    }
 }
 
 impl RuntimeAuthManager {
+    pub fn uses_credentials(&self, credentials: &Arc<AuthManager>) -> bool {
+        self.login.uses_credentials(credentials)
+    }
+
     pub fn new(
         credentials: Arc<AuthManager>,
         host: AgentHostAuthorization,
         metadata: RuntimeRegistrationMetadata,
         registration_url: Url,
     ) -> Self {
-        Self {
+        Self::from_registration(
             credentials,
-            host,
+            RegistrationTarget::Explicit {
+                host,
+                url: registration_url,
+            },
             metadata,
-            registration_url,
-            state: Mutex::new(None),
+        )
+    }
+
+    /// Resolve the ChatGPT registration origin only when a first-party request needs a runtime.
+    pub fn for_chatgpt(
+        credentials: Arc<AuthManager>,
+        installation_id: String,
+        base_url: String,
+        metadata: RuntimeRegistrationMetadata,
+    ) -> Self {
+        Self::from_registration(
+            credentials,
+            RegistrationTarget::ChatGpt {
+                installation_id,
+                base_url,
+            },
+            metadata,
+        )
+    }
+
+    fn from_registration(
+        credentials: Arc<AuthManager>,
+        registration: RegistrationTarget,
+        metadata: RuntimeRegistrationMetadata,
+    ) -> Self {
+        Self {
+            login: Arc::new(RuntimeAuthBinding::new(credentials, registration, metadata)),
+            registrations: std::sync::Mutex::new(Vec::new()),
         }
     }
 
-    #[expect(
-        clippy::await_holding_invalid_type,
-        reason = "runtime initialization serializes registration and refresh for one credential source"
-    )]
+    /// Construct a Xdcode runtime owner without registering it or generating its key.
+    pub fn for_xdcode(
+        credentials: Arc<AuthManager>,
+        chatgpt_base_url: &str,
+        installation_id: &str,
+    ) -> Self {
+        Self::for_chatgpt(
+            credentials,
+            installation_id.to_owned(),
+            chatgpt_base_url.to_owned(),
+            RuntimeRegistrationMetadata {
+                harness: Some("xdcode".to_string()),
+                harness_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+                role: crate::RuntimeRole::Orchestrator,
+            },
+        )
+    }
+
+    pub fn registration_url(&self) -> Result<Url, RegistrationError> {
+        self.login.registration_url()
+    }
+
     pub async fn auth(&self) -> Result<RuntimeAuth, RuntimeAuthError> {
-        // This initializer's lock can span IO. No AuthManager lock is held across registration.
-        let mut state = self.state.lock().await;
-        let (auth, http_client_factory) = self
-            .credentials
-            .auth_with_http_client_factory()
-            .await
-            .ok_or(RuntimeAuthError::Unavailable)?;
-        let mut recovery = self.credentials.unauthorized_recovery();
-        let mut result = self.auth_once(&mut state, auth, http_client_factory).await;
-        while matches!(
-            &result,
-            Err(RuntimeAuthError::Registration(
-                RegistrationError::Rejected {
-                    status: StatusCode::UNAUTHORIZED,
-                    ..
-                }
-            ))
-        ) && recovery.has_next()
-        {
-            recovery.next().await.map_err(|error| match error {
-                RefreshTokenError::Policy(denied) => RuntimeAuthError::Policy(denied),
-                RefreshTokenError::Permanent(_) | RefreshTokenError::Transient(_) => {
-                    RuntimeAuthError::RefreshFailed
-                }
-            })?;
-            let (auth, http_client_factory) = self
-                .credentials
-                .auth_with_http_client_factory()
-                .await
-                .ok_or(RuntimeAuthError::Unavailable)?;
-            result = self.auth_once(&mut state, auth, http_client_factory).await;
-        }
-        result
+        self.login.auth().await
     }
 
-    async fn auth_once(
+    pub async fn auth_with_selection(
         &self,
-        state: &mut Option<RuntimeState>,
-        auth: XdcodeAuth,
-        http_client_factory: HttpClientFactory,
+        selection: &PlatformResourceSelection,
     ) -> Result<RuntimeAuth, RuntimeAuthError> {
-        let actor_auth = actor_authorization(&auth)?;
-        let change_state = self.auth_state(&auth)?;
-        let same_source = match state.as_ref() {
-            Some(
-                RuntimeState::Pending {
-                    source_generation, ..
-                }
-                | RuntimeState::Ready {
-                    source_generation, ..
-                }
-                | RuntimeState::Denied {
-                    source_generation, ..
-                },
-            ) => *source_generation == change_state.source_generation,
-            None => false,
-        };
-        if !same_source {
-            *state = Some(RuntimeState::Pending {
-                registration: RuntimeRegistration::new(
-                    actor_auth.clone(),
-                    self.host.clone(),
-                    self.metadata.clone(),
-                )
-                .map_err(|_| RuntimeAuthError::KeyGeneration)?,
-                source_generation: change_state.source_generation,
-            });
-        }
-        let registration = match state.as_mut().ok_or(RuntimeAuthError::Unavailable)? {
-            RuntimeState::Ready { runtime, .. } => {
-                return Ok(RuntimeAuth {
-                    runtime: runtime.clone(),
-                    auth,
-                    http_client_factory,
-                    change_state,
-                });
-            }
-            RuntimeState::Denied { error, .. } => return Err(error.clone().into()),
-            RuntimeState::Pending { registration, .. } => {
-                registration.request.actor_auth = actor_auth;
-                registration
-            }
-        };
-        let client = RuntimeRegistrationClient::new(
-            http_client_factory.clone(),
-            self.registration_url.clone(),
-        )?;
-        let result = client.register(registration).await;
-        if self.auth_state(&auth)?.source_generation != change_state.source_generation {
-            // A late response must not publish an old identity after a credential switch.
-            *state = None;
-            return Err(RuntimeAuthError::Changed);
-        }
-        match result {
-            Ok(info) => {
-                let runtime = Arc::new(registration.finish(info));
-                *state = Some(RuntimeState::Ready {
-                    runtime: runtime.clone(),
-                    source_generation: change_state.source_generation,
-                });
-                Ok(RuntimeAuth {
-                    runtime,
-                    auth,
-                    http_client_factory,
-                    change_state,
-                })
-            }
-            Err(
-                error @ RegistrationError::Rejected {
-                    status: StatusCode::FORBIDDEN,
-                    ..
-                },
-            ) => {
-                *state = Some(RuntimeState::Denied {
-                    source_generation: change_state.source_generation,
-                    error: error.clone(),
-                });
-                Err(error.into())
-            }
-            Err(error) => Err(error.into()),
-        }
+        self.login.auth_with_selection(selection).await
     }
 
-    fn auth_state(&self, auth: &XdcodeAuth) -> Result<AuthChangeState, RuntimeAuthError> {
-        let state = self
-            .credentials
-            .auth_change_state_for(auth)
-            .ok_or(RuntimeAuthError::Changed)?;
-        if self.credentials.refresh_failure_for_auth(auth).is_some() {
-            return Err(RuntimeAuthError::RefreshFailed);
-        }
-        Ok(state)
+    pub async fn auth_for(
+        &self,
+        expected: &XdcodeAuth,
+        selection: &PlatformResourceSelection,
+    ) -> Result<RuntimeAuth, RuntimeAuthError> {
+        self.login.auth_for(expected, selection).await
     }
-}
 
-fn actor_authorization(
-    auth: &XdcodeAuth,
-) -> Result<AuthenticatedActorAuthorization, RuntimeAuthError> {
-    let credential = auth
-        .get_token()
-        .map_err(|_| RuntimeAuthError::Unsupported)?
-        .into();
-    Ok(match auth {
-        XdcodeAuth::ApiKey(_) => AuthenticatedActorAuthorization::PlatformApiKey { credential },
-        XdcodeAuth::Chatgpt(_) | XdcodeAuth::ChatgptAuthTokens(_) => {
-            AuthenticatedActorAuthorization::Oauth { credential }
-        }
-        XdcodeAuth::PersonalAccessToken(_) => {
-            AuthenticatedActorAuthorization::PersonalAccessToken { credential }
-        }
-        XdcodeAuth::Headers(_)
-        | XdcodeAuth::AgentIdentity(_)
-        | XdcodeAuth::BedrockApiKey(_)
-        | XdcodeAuth::BedrockAccessKeys(_) => return Err(RuntimeAuthError::Unsupported),
-    })
-}
+    pub async fn auth_for_source(
+        &self,
+        source_generation: u64,
+        selection: &PlatformResourceSelection,
+    ) -> Result<RuntimeAuth, RuntimeAuthError> {
+        self.login
+            .auth_for_source(source_generation, selection)
+            .await
+    }
 
-#[derive(Debug, thiserror::Error)]
-pub enum RuntimeAuthError {
-    #[error("runtime registration requires an actor credential")]
-    Unavailable,
-    #[error("this credential cannot register a runtime; use a supported Provider sign-in")]
-    Unsupported,
-    #[error("credentials changed during runtime registration; try again")]
-    Changed,
-    #[error("runtime registration could not refresh actor credentials")]
-    RefreshFailed,
-    #[error("failed to generate runtime signing key")]
-    KeyGeneration,
-    #[error(transparent)]
-    Policy(#[from] NetworkPolicyDenied),
-    #[error(transparent)]
-    Registration(RegistrationError),
-}
-
-impl From<RegistrationError> for RuntimeAuthError {
-    fn from(error: RegistrationError) -> Self {
-        match error {
-            RegistrationError::Policy(denied) => Self::Policy(denied),
-            error => Self::Registration(error),
+    /// Bind a login or command-backed credential without changing its refresh lifecycle.
+    pub fn bind(&self, credentials: Arc<AuthManager>) -> Arc<RuntimeAuthBinding> {
+        if self.login.uses_credentials(&credentials) {
+            return Arc::clone(&self.login);
         }
+        let mut registrations = self
+            .registrations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(binding) = registrations.iter().find_map(|entry| match entry {
+            CredentialRegistration::Provider(binding) if binding.uses_credentials(&credentials) => {
+                Some(binding)
+            }
+            _ => None,
+        }) {
+            return Arc::clone(binding);
+        }
+        let binding = Arc::new(RuntimeAuthBinding::new(
+            credentials,
+            self.login.registration.clone(),
+            self.login.metadata.clone(),
+        ));
+        registrations.push(CredentialRegistration::Provider(Arc::clone(&binding)));
+        binding
+    }
+
+    /// An explicit key is independent of login storage and command output, even when bytes match.
+    pub fn bind_api_key(
+        &self,
+        api_key: &str,
+        runtime: &AuthRuntimeConfig,
+    ) -> Arc<RuntimeAuthBinding> {
+        let mut registrations = self
+            .registrations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(binding) = registrations.iter().find_map(|entry| match entry {
+            CredentialRegistration::ApiKey(binding)
+                if binding
+                    .credentials
+                    .auth_cached()
+                    .as_ref()
+                    .and_then(XdcodeAuth::api_key)
+                    == Some(api_key)
+                    && binding.credentials.runtime_config() == *runtime =>
+            {
+                Some(binding)
+            }
+            _ => None,
+        }) {
+            return Arc::clone(binding);
+        }
+        let binding = Arc::new(RuntimeAuthBinding::new(
+            AuthManager::from_api_key(api_key, runtime.clone()),
+            self.login.registration.clone(),
+            self.login.metadata.clone(),
+        ));
+        registrations.push(CredentialRegistration::ApiKey(Arc::clone(&binding)));
+        binding
     }
 }
 

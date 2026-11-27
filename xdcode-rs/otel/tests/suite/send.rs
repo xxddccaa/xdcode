@@ -5,6 +5,8 @@ use crate::harness::histogram_data;
 use crate::harness::latest_metrics;
 use pretty_assertions::assert_eq;
 use std::collections::BTreeMap;
+use xdcode_otel::ADDITIONAL_CONTEXT_VALUE_BYTES_BUCKETS;
+use xdcode_otel::ADDITIONAL_CONTEXT_VALUE_BYTES_METRIC;
 use xdcode_otel::Result;
 use xdcode_otel::THREAD_SKILLS_COUNT_METRIC_BUCKETS;
 use xdcode_otel::THREAD_SKILLS_DESCRIPTION_TRUNCATED_CHARS_BUCKETS;
@@ -131,6 +133,37 @@ fn histogram_uses_explicit_bucket_boundaries() -> Result<()> {
         histogram_data(&latest_metrics(&exporter), "xdcode.payload_bytes"),
         (vec![256.0, 1024.0, 4096.0], vec![0, 1, 0, 0], 1024.0, 1)
     );
+
+    Ok(())
+}
+
+#[test]
+fn additional_context_histogram_bounds_truncated_observations() -> Result<()> {
+    let (metrics, exporter) = build_metrics_with_defaults(&[])?;
+    let samples = [4_024, 4_027, 4_043];
+    for value in samples {
+        metrics.histogram_with_boundaries(
+            ADDITIONAL_CONTEXT_VALUE_BYTES_METRIC,
+            value,
+            ADDITIONAL_CONTEXT_VALUE_BYTES_BUCKETS.as_slice(),
+            &[("stage", "after"), ("truncated", "true")],
+        )?;
+    }
+    metrics.shutdown()?;
+
+    let (bounds, counts, sum, count) = histogram_data(
+        &latest_metrics(&exporter),
+        ADDITIONAL_CONTEXT_VALUE_BYTES_METRIC,
+    );
+    assert_eq!((sum, count), (12_094.0, 3));
+    assert_eq!(counts.iter().sum::<u64>(), count);
+    assert_eq!(counts.last(), Some(&0));
+    for (upper_bound, bucket_count) in bounds.iter().zip(&counts) {
+        assert!(
+            *bucket_count == 0 || *upper_bound <= 4_096.0,
+            "post-truncation observations landed in a bucket ending at {upper_bound} bytes"
+        );
+    }
 
     Ok(())
 }

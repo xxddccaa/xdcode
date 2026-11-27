@@ -21,6 +21,7 @@ use xdcode_config::RequirementSource;
 use xdcode_config::TomlValue;
 use xdcode_config::version_for_toml;
 use xdcode_plugin::PluginHookSource;
+use xdcode_plugin::bundled_hook_app_connector_id;
 use xdcode_plugin::is_allowlisted_bundled_cleanup_hook;
 use xdcode_protocol::protocol::HookEventName;
 use xdcode_utils_absolute_path::AbsolutePathBuf;
@@ -589,7 +590,7 @@ fn append_environment_hooks(
         handler.source_path = super::HandlerSourcePath::Environment {
             environment_id: source.environment_id.clone(),
             cwd: source.cwd.clone(),
-            source_path: path.clone(),
+            source_path: path.clone().into(),
         };
     }
 }
@@ -648,6 +649,14 @@ fn append_matcher_groups(
             }
         };
         for (handler_index, handler) in group.hooks.iter().cloned().enumerate() {
+            let expected_app_connector_id = source.plugin_id.as_deref().and_then(|plugin_id| {
+                bundled_hook_app_connector_id(
+                    plugin_id,
+                    event_name,
+                    group.matcher.as_deref(),
+                    &handler,
+                )
+            });
             let normalized = match handler {
                 HookHandlerConfig::Command {
                     command,
@@ -770,6 +779,7 @@ fn append_matcher_groups(
                     NormalizedHandler {
                         config,
                         kind: ConfiguredHandlerKind::McpTool {
+                            expected_app_connector_id,
                             server,
                             tool,
                             input,
@@ -819,6 +829,7 @@ fn append_matcher_groups(
                     /*app_connector_id*/ None,
                 )
             });
+            let builtin = builtin || expected_app_connector_id.is_some();
             let plugin_content_hash = match source.plugin_content_hash {
                 Some(Ok(hash)) => Some(hash.as_str()),
                 Some(Err(err)) if !builtin && !source.bypass_hook_trust => {

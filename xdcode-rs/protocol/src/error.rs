@@ -75,17 +75,35 @@ pub enum SandboxErr {
     LandlockRestrict,
 }
 
+/// Which customer-configured spend limit prevented inference.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpendLimitScope {
+    ApiKey,
+    Project,
+    Organization,
+}
+
 pub struct XdcodeErr {
     details: XdcodeErrorDetails,
     retry_after: Option<RetryAfter>,
     agent_context: Option<AgentErrorContext>,
 }
 
+enum RetryPolicy {
+    Never,
+    ServerDirected,
+    Backoff,
+    FallBackToHttp,
+}
+
 /// A terminal response that stopped before the model finished, with any reported usage.
 /// Content-filter retries and explicit interruptions have separate handling.
-#[derive(Debug, Error, PartialEq, Eq)]
+#[derive(derive_more::Debug, Error, PartialEq, Eq)]
 #[error("Incomplete response returned, reason: {reason}")]
 pub struct ResponseIncompleteError {
+    /// Provider output items explicitly marked incomplete, retained for failed inference traces.
+    #[debug(skip)]
+    pub partial_output: Vec<serde_json::Value>,
     pub reason: String,
     pub response_id: Option<String>,
     pub token_usage: Option<TokenUsage>,
@@ -111,6 +129,9 @@ pub enum XdcodeErrorDetails {
     /// The Session loop treats this as a transient error and will automatically retry the turn.
     #[error("stream disconnected before completion: {0}")]
     Stream(String),
+    /// The peer's WebSocket message size limit requires sending this request over HTTP.
+    #[error("websocket request exceeds the peer's message size limit")]
+    WebsocketMessageTooLarge,
     /// A response stopped by the content filter. Sampling retries need developer guidance.
     #[error(
         "stream disconnected before completion: Incomplete response returned, reason: content_filter"
@@ -145,6 +166,12 @@ pub enum XdcodeErrorDetails {
     /// surface a polite FunctionCallOutput back to the model instead of crashing the CLI.
     #[error("interrupted (Ctrl-C). Something went wrong? Hit `/feedback` to report the issue.")]
     Interrupted,
+    /// The account cannot use Xdcode in the selected workspace.
+    #[error("{0}")]
+    WorkspaceAccessDenied(UnexpectedResponseError),
+    /// The provider denied the access program required for this request.
+    #[error("{0}")]
+    AccessProgramNotEnabled(ProviderRejection),
     /// Unexpected HTTP status code.
     #[error("{0}")]
     UnexpectedStatus(UnexpectedResponseError),
@@ -152,12 +179,27 @@ pub enum XdcodeErrorDetails {
     #[error("{0}")]
     InvalidRequest(String),
     #[error("{message}")]
+    InvalidAudioInput {
+        message: String,
+        /// True when the provider rejected an individual clip, independent of request size.
+        per_recording: bool,
+    },
+    #[error("{message}")]
     ModelNotFound {
         message: String,
         status: Option<StatusCode>,
     },
     #[error("{message}")]
     InvalidPrompt { message: String },
+    /// The workspace's inference hook explicitly denied this request.
+    #[error("{message}")]
+    InferenceHookDenied { message: String },
+    /// The provider rejected the input under its content policy.
+    #[error("{message}")]
+    ContentPolicyViolation {
+        message: String,
+        status: Option<StatusCode>,
+    },
     /// Multiple registered tools share the same effective name.
     #[error("duplicate tool: {0}")]
     ToolCollision(String),
@@ -168,6 +210,9 @@ pub enum XdcodeErrorDetails {
     UsageLimitReached(UsageLimitReachedError),
     #[error("Selected model is at capacity. Please try a different model.")]
     ServerOverloaded,
+    /// Policy-restricted capacity follows the same retry advice as ordinary overloads.
+    #[error("Policy-restricted capacity is unavailable. Please try again later.")]
+    PolicyCapacityUnavailable,
     #[error("Flex capacity unavailable.")]
     FlexUnavailable,
     #[error("{message}")]
@@ -185,6 +230,12 @@ pub enum XdcodeErrorDetails {
     ConnectionFailed(ConnectionFailedError),
     #[error("Quota exceeded. Check your plan and billing details.")]
     QuotaExceeded,
+    #[error("Your API {} has reached its spend limit.", match .0 {
+        SpendLimitScope::ApiKey => "key",
+        SpendLimitScope::Project => "project",
+        SpendLimitScope::Organization => "organization",
+    })]
+    APISpendLimitExceeded(SpendLimitScope),
     #[error(
         "To use Xdcode with your ChatGPT plan, upgrade to Plus: https://chatgpt.com/explore/plus."
     )]
@@ -200,8 +251,11 @@ pub enum XdcodeErrorDetails {
     /// Sandbox error
     #[error("sandbox error: {0}")]
     Sandbox(#[from] SandboxErr),
+    // Keep the published analytics category stable across the Rust variant rename.
+    #[strum_discriminants(serde(rename = "landlock_sandbox_executable_not_provided"))]
+    #[strum_discriminants(strum(serialize = "landlock_sandbox_executable_not_provided"))]
     #[error("xdcode-linux-sandbox was required but not provided")]
-    LandlockSandboxExecutableNotProvided,
+    LinuxSandboxExecutableNotProvided,
     #[error("unsupported operation: {0}")]
     UnsupportedOperation(String),
     #[error("{0}")]
@@ -211,6 +265,9 @@ pub enum XdcodeErrorDetails {
     GatewayLoginRequired(String),
     #[error("Fatal error: {0}")]
     Fatal(String),
+    /// The provider attempt ended. Retrying inference cannot settle its bill.
+    #[error("{0}")]
+    UsageAccountingFailed(String),
     // -----------------------------------------------------------------
     // Automatic conversions for common external error types
     // -----------------------------------------------------------------
@@ -367,7 +424,7 @@ impl XdcodeErr {
         UsageNotIncluded,
         InternalServerError,
         InternalAgentDied,
-        LandlockSandboxExecutableNotProvided,
+        LinuxSandboxExecutableNotProvided,
     );
 
     xdcode_err_tuple_constructors!(
@@ -383,6 +440,7 @@ impl XdcodeErr {
         UnsupportedOperation(message: String),
         RefreshTokenFailed(error: RefreshTokenFailedError),
         Fatal(message: String),
+        UsageAccountingFailed(message: String),
         Io(error: io::Error),
         Json(error: serde_json::Error),
         #[cfg(target_os = "linux")]
@@ -411,30 +469,60 @@ impl XdcodeErr {
         &self.details
     }
 
+    /// Whether retrying this request requires switching from WebSocket to HTTP.
+    pub fn requires_http_fallback(&self) -> bool {
+        matches!(self.retry_policy(), RetryPolicy::FallBackToHttp)
+    }
+
     /// Returns the delay before the given retry attempt, or `None` for a terminal error.
     ///
     /// The first retry is attempt one. Retryable errors use server advice when available and
     /// otherwise use exponential backoff with jitter. Callers enforce their own retry budgets.
     pub fn retry_delay(&self, retry_count: u64) -> Option<Duration> {
+        match self.retry_policy() {
+            RetryPolicy::Never => None,
+            RetryPolicy::ServerDirected => self.server_retry_delay(),
+            RetryPolicy::Backoff | RetryPolicy::FallBackToHttp => Some(
+                self.server_retry_delay()
+                    .unwrap_or_else(|| backoff(retry_count)),
+            ),
+        }
+    }
+
+    fn retry_policy(&self) -> RetryPolicy {
         match self.details() {
+            XdcodeErrorDetails::UnexpectedStatus(error)
+                if is_runtime_auth_denial(
+                    error.status,
+                    &error.body,
+                    error.identity_error_code.as_deref(),
+                ) =>
+            {
+                RetryPolicy::Never
+            }
             XdcodeErrorDetails::TurnAborted
             | XdcodeErrorDetails::SessionBudgetExceeded
             | XdcodeErrorDetails::Interrupted
             | XdcodeErrorDetails::EnvVar(_)
             | XdcodeErrorDetails::Fatal(_)
+            | XdcodeErrorDetails::UsageAccountingFailed(_)
             | XdcodeErrorDetails::UsageNotIncluded
             | XdcodeErrorDetails::QuotaExceeded
+            | XdcodeErrorDetails::APISpendLimitExceeded(_)
             | XdcodeErrorDetails::InvalidImageRequest()
             | XdcodeErrorDetails::InvalidRequest(_)
+            | XdcodeErrorDetails::InvalidAudioInput { .. }
             | XdcodeErrorDetails::ResponseIncomplete(_)
             | XdcodeErrorDetails::ModelNotFound { .. }
             | XdcodeErrorDetails::InvalidPrompt { .. }
+            | XdcodeErrorDetails::InferenceHookDenied { .. }
+            | XdcodeErrorDetails::ContentPolicyViolation { .. }
             | XdcodeErrorDetails::ToolCollision(_)
             | XdcodeErrorDetails::RefreshTokenFailed(_)
             | XdcodeErrorDetails::GatewayLoginRequired(_)
             | XdcodeErrorDetails::UnsupportedOperation(_)
             | XdcodeErrorDetails::Sandbox(_)
-            | XdcodeErrorDetails::LandlockSandboxExecutableNotProvided
+            | XdcodeErrorDetails::LinuxSandboxExecutableNotProvided
             | XdcodeErrorDetails::ContextWindowExceeded
             | XdcodeErrorDetails::ThreadNotFound(_)
             | XdcodeErrorDetails::AgentLimitReached { .. }
@@ -444,10 +532,13 @@ impl XdcodeErr {
             | XdcodeErrorDetails::FlexUnavailable
             | XdcodeErrorDetails::CyberPolicy { .. }
             | XdcodeErrorDetails::BioPolicy { .. }
-            | XdcodeErrorDetails::MisalignmentPolicyViolation { .. } => None,
-            XdcodeErrorDetails::ServerOverloaded | XdcodeErrorDetails::RetryLimit(_) => {
-                self.server_retry_delay()
-            }
+            | XdcodeErrorDetails::WorkspaceAccessDenied(_)
+            | XdcodeErrorDetails::AccessProgramNotEnabled(_)
+            | XdcodeErrorDetails::MisalignmentPolicyViolation { .. } => RetryPolicy::Never,
+            XdcodeErrorDetails::ServerOverloaded
+            | XdcodeErrorDetails::PolicyCapacityUnavailable
+            | XdcodeErrorDetails::RetryLimit(_) => RetryPolicy::ServerDirected,
+            XdcodeErrorDetails::WebsocketMessageTooLarge => RetryPolicy::FallBackToHttp,
             XdcodeErrorDetails::Stream(..)
             | XdcodeErrorDetails::ContentFilter
             | XdcodeErrorDetails::RateLimitExceeded(_)
@@ -460,12 +551,11 @@ impl XdcodeErr {
             | XdcodeErrorDetails::InternalAgentDied
             | XdcodeErrorDetails::Io(_)
             | XdcodeErrorDetails::Json(_)
-            | XdcodeErrorDetails::TokioJoin(_) => Some(
-                self.server_retry_delay()
-                    .unwrap_or_else(|| backoff(retry_count)),
-            ),
+            | XdcodeErrorDetails::TokioJoin(_) => RetryPolicy::Backoff,
             #[cfg(target_os = "linux")]
-            XdcodeErrorDetails::LandlockRuleset(_) | XdcodeErrorDetails::LandlockPathFd(_) => None,
+            XdcodeErrorDetails::LandlockRuleset(_) | XdcodeErrorDetails::LandlockPathFd(_) => {
+                RetryPolicy::Never
+            }
         }
     }
 
@@ -498,27 +588,42 @@ impl XdcodeErr {
         match &self.details {
             XdcodeErrorDetails::ContextWindowExceeded => XdcodeErrorInfo::ContextWindowExceeded,
             XdcodeErrorDetails::SessionBudgetExceeded => XdcodeErrorInfo::SessionBudgetExceeded,
+            XdcodeErrorDetails::APISpendLimitExceeded(SpendLimitScope::ApiKey) => {
+                XdcodeErrorInfo::ApiKeySpendLimitExceeded
+            }
+            XdcodeErrorDetails::APISpendLimitExceeded(SpendLimitScope::Project) => {
+                XdcodeErrorInfo::ProjectSpendLimitExceeded
+            }
+            XdcodeErrorDetails::APISpendLimitExceeded(SpendLimitScope::Organization) => {
+                XdcodeErrorInfo::OrganizationSpendLimitExceeded
+            }
             XdcodeErrorDetails::RateLimitExceeded(_) => XdcodeErrorInfo::RateLimitExceeded,
             XdcodeErrorDetails::UsageLimitReached(_)
             | XdcodeErrorDetails::QuotaExceeded
             | XdcodeErrorDetails::UsageNotIncluded => XdcodeErrorInfo::UsageLimitExceeded,
             XdcodeErrorDetails::ServerOverloaded => XdcodeErrorInfo::ServerOverloaded,
+            XdcodeErrorDetails::PolicyCapacityUnavailable => {
+                XdcodeErrorInfo::PolicyCapacityUnavailable
+            }
             XdcodeErrorDetails::FlexUnavailable => XdcodeErrorInfo::FlexUnavailable,
+            XdcodeErrorDetails::InferenceHookDenied { .. } => XdcodeErrorInfo::InferenceHookDenied,
             XdcodeErrorDetails::CyberPolicy { .. } => XdcodeErrorInfo::CyberPolicy,
             XdcodeErrorDetails::BioPolicy { .. } => XdcodeErrorInfo::BioPolicy,
             XdcodeErrorDetails::ModelNotFound { .. } => XdcodeErrorInfo::ModelNotFound,
-            XdcodeErrorDetails::InvalidPrompt { .. } => XdcodeErrorInfo::InvalidPrompt,
+            XdcodeErrorDetails::InvalidPrompt { .. }
+            | XdcodeErrorDetails::ContentPolicyViolation { .. } => XdcodeErrorInfo::InvalidPrompt,
             XdcodeErrorDetails::MisalignmentPolicyViolation { .. } => {
                 XdcodeErrorInfo::MisalignmentPolicyViolation
             }
             XdcodeErrorDetails::RetryLimit(_) => XdcodeErrorInfo::ResponseTooManyFailedAttempts {
                 http_status_code: self.http_status_code_value(),
             },
-            XdcodeErrorDetails::ConnectionFailed(_) | XdcodeErrorDetails::UnexpectedStatus(_) => {
-                XdcodeErrorInfo::HttpConnectionFailed {
-                    http_status_code: self.http_status_code_value(),
-                }
-            }
+            XdcodeErrorDetails::ConnectionFailed(_)
+            | XdcodeErrorDetails::WorkspaceAccessDenied(_)
+            | XdcodeErrorDetails::AccessProgramNotEnabled(_)
+            | XdcodeErrorDetails::UnexpectedStatus(_) => XdcodeErrorInfo::HttpConnectionFailed {
+                http_status_code: self.http_status_code_value(),
+            },
             XdcodeErrorDetails::ResponseStreamFailed(_) => {
                 XdcodeErrorInfo::ResponseStreamConnectionFailed {
                     http_status_code: self.http_status_code_value(),
@@ -528,7 +633,8 @@ impl XdcodeErr {
             XdcodeErrorDetails::SessionConfiguredNotFirstEvent
             | XdcodeErrorDetails::InternalServerError
             | XdcodeErrorDetails::InternalAgentDied => XdcodeErrorInfo::InternalServerError,
-            XdcodeErrorDetails::UnsupportedOperation(_)
+            XdcodeErrorDetails::InvalidAudioInput { .. }
+            | XdcodeErrorDetails::UnsupportedOperation(_)
             | XdcodeErrorDetails::ThreadNotFound(_)
             | XdcodeErrorDetails::AgentLimitReached { .. } => XdcodeErrorInfo::BadRequest,
             XdcodeErrorDetails::Sandbox(_) => XdcodeErrorInfo::SandboxError,
@@ -545,6 +651,7 @@ impl XdcodeErr {
         ErrorEvent {
             message,
             xdcode_error_info: Some(self.to_xdcode_protocol_error()),
+            rejected_audio_file_ids: Vec::new(),
             misalignment: match &self.details {
                 XdcodeErrorDetails::MisalignmentPolicyViolation { misalignment, .. } => {
                     misalignment.clone()
@@ -557,9 +664,12 @@ impl XdcodeErr {
     pub fn http_status_code_value(&self) -> Option<u16> {
         let http_status_code = match &self.details {
             XdcodeErrorDetails::FlexUnavailable => Some(StatusCode::TOO_MANY_REQUESTS),
-            XdcodeErrorDetails::ModelNotFound { status, .. } => *status,
+            XdcodeErrorDetails::ModelNotFound { status, .. }
+            | XdcodeErrorDetails::ContentPolicyViolation { status, .. } => *status,
             XdcodeErrorDetails::RetryLimit(err) => Some(err.status),
-            XdcodeErrorDetails::UnexpectedStatus(err) => Some(err.status),
+            XdcodeErrorDetails::WorkspaceAccessDenied(err)
+            | XdcodeErrorDetails::AccessProgramNotEnabled(ProviderRejection::Http(err))
+            | XdcodeErrorDetails::UnexpectedStatus(err) => Some(err.status),
             XdcodeErrorDetails::ConnectionFailed(err) => err.source.status(),
             XdcodeErrorDetails::ResponseStreamFailed(err) => err.source.status(),
             _ => None,
@@ -599,6 +709,15 @@ impl std::fmt::Display for ResponseStreamFailed {
     }
 }
 
+/// A provider can reject a request before or after opening the response stream.
+#[derive(Debug, Error)]
+pub enum ProviderRejection {
+    #[error(transparent)]
+    Http(UnexpectedResponseError),
+    #[error("{0}")]
+    Stream(String),
+}
+
 #[derive(Clone, Debug)]
 pub struct UnexpectedResponseError {
     pub status: StatusCode,
@@ -609,6 +728,39 @@ pub struct UnexpectedResponseError {
     pub request_id: Option<String>,
     pub identity_authorization_error: Option<String>,
     pub identity_error_code: Option<String>,
+}
+
+/// Runtime denial cannot be repaired by retrying the request or refreshing its original credential.
+/// Keep unavailable verification state and ordinary credential errors on their existing paths.
+pub fn is_runtime_auth_denial(
+    status: StatusCode,
+    body: &str,
+    identity_error_code: Option<&str>,
+) -> bool {
+    if !matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
+        return false;
+    }
+    let is_terminal = |code| {
+        matches!(
+            code,
+            Some(
+                "runtime_assertion_invalid"
+                    | "runtime_instance_paused"
+                    | "runtime_instance_revoked"
+                    | "invalid_agent_instance_assertion"
+            )
+        )
+    };
+    if is_terminal(identity_error_code) {
+        return true;
+    }
+    let Ok(body) = serde_json::from_str::<serde_json::Value>(body) else {
+        return false;
+    };
+    is_terminal(
+        body.pointer("/error/code")
+            .and_then(serde_json::Value::as_str),
+    )
 }
 
 const UNEXPECTED_RESPONSE_BODY_MAX_BYTES: usize = 1000;
@@ -627,7 +779,8 @@ impl UnexpectedResponseError {
         truncate_with_ellipsis(trimmed_body, UNEXPECTED_RESPONSE_BODY_MAX_BYTES)
     }
 
-    fn extract_error_message(&self) -> Option<String> {
+    /// Returns the provider message from a structured HTTP error body.
+    pub fn extract_error_message(&self) -> Option<String> {
         let json = serde_json::from_str::<serde_json::Value>(&self.body).ok()?;
         let message = json
             .get("error")

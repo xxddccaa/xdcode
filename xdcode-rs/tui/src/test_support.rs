@@ -1,7 +1,5 @@
 //! Test-only helpers shared across the TUI crate.
 
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::LazyLock;
 
 use serde::Serialize;

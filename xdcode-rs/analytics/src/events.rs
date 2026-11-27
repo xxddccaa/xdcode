@@ -20,6 +20,7 @@ use crate::facts::PluginState;
 use crate::facts::SubAgentThreadStartedInput;
 use crate::facts::ThreadInitializationMode;
 use crate::facts::TrackEventsContext;
+use crate::facts::TurnAnalyticsMetadata;
 use crate::facts::TurnStatus;
 use crate::facts::TurnSteerRejectionReason;
 use crate::facts::TurnSteerResult;
@@ -85,6 +86,7 @@ pub(crate) enum TrackEventRequest {
     CommandExecution(XdcodeCommandExecutionEventRequest),
     PluginMeasurement(XdcodePluginMeasurementEventRequest),
     FileChange(XdcodeFileChangeEventRequest),
+    CuaToolCallStarted(XdcodeCuaToolCallStartedEventRequest),
     McpToolCall(XdcodeMcpToolCallEventRequest),
     DynamicToolCall(XdcodeDynamicToolCallEventRequest),
     ControlToolCall(XdcodeControlToolCallEventRequest),
@@ -107,6 +109,8 @@ pub(crate) enum TrackEventRequest {
 
 #[derive(Serialize)]
 pub(crate) struct XdcodeArtifactOperationEventParams {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) turn_trigger: Option<String>,
     pub(crate) thread_id: String,
     pub(crate) turn_id: String,
     pub(crate) item_id: String,
@@ -135,9 +139,11 @@ pub(crate) fn xdcode_artifact_operation_event_request(
     tracking: TrackEventsContext,
     operation: ArtifactOperation,
 ) -> XdcodeArtifactOperationEventRequest {
+    let turn = tracking.turn_metadata.as_deref();
     XdcodeArtifactOperationEventRequest {
         event_type: "xdcode_artifact_operation",
         event_params: XdcodeArtifactOperationEventParams {
+            turn_trigger: turn.and_then(TurnAnalyticsMetadata::turn_trigger),
             thread_id: tracking.thread_id,
             turn_id: tracking.turn_id,
             item_id: operation.item_id,
@@ -167,6 +173,7 @@ impl TrackEventRequest {
         match self {
             Self::PluginUsed(event) => event.event_params.plugin.plugin_id.is_some(),
             Self::SkillInvocation(event) => event.event_params.plugin_id.is_some(),
+            Self::CuaToolCallStarted(event) => event.event_params.plugin_id.is_some(),
             Self::McpToolCall(event) => event.event_params.plugin_id.is_some(),
             Self::ArtifactOperation(event) => !event.event_params.plugin_id.is_empty(),
             Self::PluginMeasurement(event) => !event.event_params.plugin_id.is_empty(),
@@ -207,6 +214,8 @@ pub(crate) struct SkillInvocationEventRequest {
 
 #[derive(Serialize)]
 pub(crate) struct SkillInvocationEventParams {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) turn_trigger: Option<String>,
     pub(crate) product_client_id: Option<String>,
     pub(crate) skill_scope: Option<String>,
     pub(crate) plugin_id: Option<String>,
@@ -367,6 +376,7 @@ impl From<&AdditionalPermissionProfile> for GuardianAdditionalPermissions {
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum GuardianReviewedAction {
+    NativeToolCall {},
     Shell {
         sandbox_permissions: SandboxPermissions,
         additional_permissions: Option<GuardianAdditionalPermissions>,
@@ -679,6 +689,8 @@ pub(crate) enum ToolEventType {
 
 #[derive(Serialize)]
 pub(crate) struct XdcodeToolItemEventBase {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) turn_trigger: Option<String>,
     pub(crate) thread_id: String,
     pub(crate) session_id: String,
     pub(crate) turn_id: String,
@@ -712,6 +724,37 @@ pub(crate) struct XdcodeToolItemEventBase {
     pub(crate) failure_kind: Option<ToolItemFailureKind>,
     pub(crate) requested_additional_permissions: bool,
     pub(crate) requested_network_access: bool,
+}
+
+#[derive(Serialize)]
+pub(crate) struct XdcodeCuaToolCallStartedEventParams {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) turn_trigger: Option<String>,
+    pub(crate) thread_id: String,
+    pub(crate) session_id: String,
+    pub(crate) turn_id: String,
+    pub(crate) root_turn_id: Option<String>,
+    pub(crate) item_id: String,
+    pub(crate) cell_id: Option<String>,
+    pub(crate) parent_call_id: Option<String>,
+    pub(crate) originating_response_id: Option<String>,
+    pub(crate) app_server_client: XdcodeAppServerClientMetadata,
+    pub(crate) runtime: XdcodeRuntimeMetadata,
+    pub(crate) thread_source: Option<ThreadSource>,
+    pub(crate) subagent_source: Option<String>,
+    pub(crate) parent_thread_id: Option<String>,
+    pub(crate) tool_event_type: Option<ToolEventType>,
+    pub(crate) started_at_ms: u64,
+    pub(crate) mcp_server_name: String,
+    pub(crate) mcp_tool_name: String,
+    pub(crate) plugin_id: Option<String>,
+    pub(crate) connector_id: Option<String>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct XdcodeCuaToolCallStartedEventRequest {
+    pub(crate) event_type: &'static str,
+    pub(crate) event_params: XdcodeCuaToolCallStartedEventParams,
 }
 
 #[allow(dead_code)]
@@ -968,6 +1011,8 @@ pub(crate) struct XdcodeImageGenerationEventRequest {
 
 #[derive(Serialize)]
 pub(crate) struct XdcodeAppMetadata {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) turn_trigger: Option<String>,
     pub(crate) connector_id: Option<String>,
     pub(crate) thread_id: Option<String>,
     pub(crate) turn_id: Option<String>,
@@ -999,6 +1044,8 @@ pub(crate) struct XdcodeAppUsedEventRequest {
 
 #[derive(Serialize)]
 pub(crate) struct XdcodeHookRunMetadata {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) turn_trigger: Option<String>,
     pub(crate) thread_id: Option<String>,
     pub(crate) turn_id: Option<String>,
     pub(crate) product_client_id: Option<String>,
@@ -1079,6 +1126,8 @@ pub(crate) struct XdcodeGoalEventRequest {
 
 #[derive(Serialize)]
 pub(crate) struct XdcodeTurnEventParams {
+    #[serde(flatten)]
+    pub(crate) critical_path: crate::turn_critical_path::CriticalPathEventParams,
     pub(crate) thread_id: String,
     pub(crate) session_id: String,
     pub(crate) turn_id: String,
@@ -1125,6 +1174,9 @@ pub(crate) struct XdcodeTurnEventParams {
     /// The server-selected window responsible for a usage limit, when known.
     pub(crate) usage_limit_window_minutes: Option<u16>,
     pub(crate) steer_count: Option<usize>,
+    /// True when any accepted input used dictation. False requires known attribution for every input.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) used_dictation: Option<bool>,
     pub(crate) total_tool_call_count: Option<usize>,
     pub(crate) shell_command_count: Option<usize>,
     pub(crate) file_change_count: Option<usize>,
@@ -1196,6 +1248,8 @@ pub(crate) struct XdcodePluginMetadata {
 
 #[derive(Serialize)]
 pub(crate) struct XdcodePluginUsedMetadata {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) turn_trigger: Option<String>,
     #[serde(flatten)]
     pub(crate) plugin: XdcodePluginMetadata,
     pub(crate) mcp_server_names: Option<Vec<String>>,
@@ -1306,7 +1360,9 @@ pub(crate) fn xdcode_app_metadata(
     tracking: &TrackEventsContext,
     app: AppInvocation,
 ) -> XdcodeAppMetadata {
+    let turn = tracking.turn_metadata.as_deref();
     XdcodeAppMetadata {
+        turn_trigger: turn.and_then(TurnAnalyticsMetadata::turn_trigger),
         connector_id: app.connector_id,
         thread_id: Some(tracking.thread_id.clone()),
         turn_id: Some(tracking.turn_id.clone()),
@@ -1453,7 +1509,9 @@ pub(crate) fn xdcode_plugin_used_metadata(
         .capability_summary
         .as_ref()
         .map(|summary| summary.mcp_server_names.clone());
+    let turn = tracking.turn_metadata.as_deref();
     XdcodePluginUsedMetadata {
+        turn_trigger: turn.and_then(TurnAnalyticsMetadata::turn_trigger),
         plugin: xdcode_plugin_metadata_with_product_client_id(
             plugin,
             tracking.product_client_id.clone(),
@@ -1469,7 +1527,9 @@ pub(crate) fn xdcode_hook_run_metadata(
     tracking: &TrackEventsContext,
     hook: HookRunFact,
 ) -> XdcodeHookRunMetadata {
+    let turn = tracking.turn_metadata.as_deref();
     XdcodeHookRunMetadata {
+        turn_trigger: turn.and_then(TurnAnalyticsMetadata::turn_trigger),
         thread_id: Some(tracking.thread_id.clone()),
         turn_id: Some(tracking.turn_id.clone()),
         product_client_id: Some(tracking.product_client_id.clone()),

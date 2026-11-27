@@ -72,12 +72,13 @@ use tracing::warn;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::prelude::*;
 use uuid::Uuid;
+use xdcode_app_server_client::AppServerClient;
+use xdcode_app_server_client::AppServerEvent;
 use xdcode_app_server_client::DEFAULT_IN_PROCESS_CHANNEL_CAPACITY;
 use xdcode_app_server_client::EnvironmentManager;
 use xdcode_app_server_client::ExecServerRuntimeOptions;
 use xdcode_app_server_client::InProcessAppServerClient;
 use xdcode_app_server_client::InProcessClientStartArgs;
-use xdcode_app_server_client::InProcessServerEvent;
 use xdcode_app_server_client::TypedRequestError;
 use xdcode_app_server_protocol::ClientRequest;
 use xdcode_app_server_protocol::ConfigWarningNotification;
@@ -96,7 +97,6 @@ use xdcode_app_server_protocol::ThreadForkParams;
 use xdcode_app_server_protocol::ThreadForkResponse;
 use xdcode_app_server_protocol::ThreadHistoryMode;
 use xdcode_app_server_protocol::ThreadItem;
-use xdcode_app_server_protocol::ThreadItem as AppServerThreadItem;
 use xdcode_app_server_protocol::ThreadItemsListCursor;
 use xdcode_app_server_protocol::ThreadItemsListParams;
 use xdcode_app_server_protocol::ThreadItemsListResponse;
@@ -119,8 +119,9 @@ use xdcode_app_server_protocol::TurnStartParams;
 use xdcode_app_server_protocol::TurnStartResponse;
 use xdcode_app_server_protocol::TurnStartedNotification;
 use xdcode_arg0::Arg0DispatchPaths;
-use xdcode_cloud_config::cloud_config_bundle_loader_for_storage;
+use xdcode_cloud_config::managed_config_bundle_loader_for_storage;
 use xdcode_config::CloudConfigBundleLoader;
+use xdcode_config::ConfigLayerSource;
 use xdcode_config::ConfigLoadError;
 use xdcode_config::ConfigLoadOptions;
 use xdcode_config::LoaderOverrides;
@@ -176,6 +177,7 @@ use xdcode_utils_absolute_path::canonicalize_existing_preserving_symlinks;
 use xdcode_utils_cli::SharedCliOptions;
 use xdcode_utils_oss::ensure_oss_provider_ready;
 use xdcode_utils_oss::get_default_model_for_oss_provider;
+use xdcode_utils_path_uri::LegacyAppPathString;
 use xdcode_worktree::CreateWorktree;
 use xdcode_worktree::WorktreeManager;
 use xdcode_worktree::WorktreeSettings;
@@ -230,6 +232,7 @@ struct ExecRunArgs {
     state_db: Option<StateDbHandle>,
     command: Option<ExecCommand>,
     config: Config,
+    overrides: ConfigOverrides,
     resume_approvals_reviewer_override: Option<xdcode_app_server_protocol::ApprovalsReviewer>,
     daybreak_override: Option<bool>,
     dangerously_bypass_approvals_and_sandbox: bool,
@@ -424,9 +427,10 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
             CloudConfigBundleLoader::default(),
         )
         .await;
-        let gate_cloud_config = cloud_config_bundle_loader_for_storage(
+        let gate_cloud_config = managed_config_bundle_loader_for_storage(
             embedded_network_policy
                 .bind_bootstrap_auth(bootstrap_auth_config(&xdcode_home, &gate_bootstrap)?),
+            gate_bootstrap.config_layer_stack.requirements_toml(),
             /*enable_xdcode_api_key_env*/ false,
         )
         .await?;
@@ -524,8 +528,9 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
     // API keys cannot fetch workspace-managed configuration. Preserve the
     // existing ChatGPT bootstrap identity even when model requests allow
     // XDCODE_API_KEY.
-    let cloud_config_bundle = cloud_config_bundle_loader_for_storage(
+    let cloud_config_bundle = managed_config_bundle_loader_for_storage(
         bootstrap_auth_config,
+        bootstrap_config.config_layer_stack.requirements_toml(),
         /*enable_xdcode_api_key_env*/ false,
     )
     .await?;
@@ -551,6 +556,7 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         }
     }
     if trust {
+        // Honor the caller's project discovery settings while checking saved trust.
         let mut discovery_overrides = cli_kv_overrides.clone();
         discovery_overrides.retain(|(key, _)| key != "projects" && !key.starts_with("projects."));
         let saved_config = load_bootstrap_config_or_exit(
@@ -666,7 +672,7 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
             .build()
     };
     let mut config = build_exec_config(
-        overrides,
+        overrides.clone(),
         dangerously_bypass_approvals_and_sandbox,
         build_config,
     )
@@ -787,13 +793,17 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         .await?
     };
     if let Some(provider) = &model_provider {
+        // Keep app-server config reloads aligned with the explicit --oss selection.
         cli_kv_overrides.push(("model_provider".to_string(), provider.clone().into()));
     }
 
     let in_process_start_args = InProcessClientStartArgs {
+        required_human_approval: false,
         arg0_paths,
         config: std::sync::Arc::new(config.clone()),
         cli_overrides: cli_kv_overrides,
+        // An explicit thread/start cwd can grant trust when the sandbox is writable.
+        // Give the embedded server its working directory as a default instead.
         loader_overrides: LoaderOverrides {
             default_cwd: Some(config.cwd.clone()),
             ..loader_overrides
@@ -820,6 +830,7 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         state_db,
         command,
         config,
+        overrides,
         resume_approvals_reviewer_override,
         daybreak_override,
         dangerously_bypass_approvals_and_sandbox,
@@ -922,6 +933,7 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
         state_db,
         command,
         config,
+        overrides,
         resume_approvals_reviewer_override,
         daybreak_override,
         dangerously_bypass_approvals_and_sandbox,
@@ -957,7 +969,7 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
         true => Box::new(EventProcessorWithJsonOutput::new(last_message_file.clone())),
         _ => Box::new(EventProcessorWithHumanOutput::create_with_ansi(
             stderr_with_ansi,
-            &config,
+            Some(&config),
             last_message_file.clone(),
         )),
     };
@@ -1083,14 +1095,29 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
         std::process::exit(1);
     }
 
+    // Bind before starting the agent. Sandbox activity cannot redirect the final write.
+    let bound_output = last_message_file
+        .as_deref()
+        .map(|path| {
+            xdcode_exec_server::BoundOutput::open(path).map_err(|error| {
+                anyhow::anyhow!("Failed to open last message file {path:?}: {error}")
+            })
+        })
+        .transpose()?;
+
     let mut request_ids = RequestIdSequencer::new();
-    let mut client = InProcessAppServerClient::start(in_process_start_args)
-        .await
-        .map_err(|err| {
-            anyhow::anyhow!("failed to initialize in-process app-server client: {err}")
-        })?;
+    let client = AppServerClient::InProcess(
+        InProcessAppServerClient::start(in_process_start_args)
+            .await
+            .map_err(|err| {
+                anyhow::anyhow!("failed to initialize in-process app-server client: {err}")
+            })?,
+    );
 
     let mut daybreak_enabled = config.daybreak_enabled;
+    let mut resumed_workspace_roots = None;
+    let mut first_turn_cwd = Some(default_cwd);
+    let mut first_turn_workspace_roots = None;
     // Resolve resume and fork through existing app-server thread lifecycle APIs.
     let (history_mode, fallback_session_configured) = if let Some(ExecCommand::Resume(args)) =
         command.as_ref()
@@ -1105,6 +1132,7 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                     params: thread_resume_params_from_config(
                         &config,
                         thread_id,
+                        &overrides,
                         resume_approvals_reviewer_override,
                     ),
                 },
@@ -1112,9 +1140,29 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
             )
             .await
             .map_err(anyhow::Error::msg)?;
+            let AppServerClient::InProcess(embedded_client) = &client else {
+                unreachable!("local exec uses an embedded app-server");
+            };
+            let thread_id = ThreadId::from_string(&response.thread.id)
+                .map_err(|err| anyhow::anyhow!("invalid resumed thread id: {err}"))?;
+            let permissions = embedded_client.thread_permissions(thread_id).await?;
             let session_configured =
-                session_configured_from_thread_resume_response(&response, &config)
+                session_configured_from_thread_resume_response(&response, permissions.profile)
                     .map_err(anyhow::Error::msg)?;
+            // Resume already chose the cwd and environments, including any explicit -C.
+            first_turn_cwd = None;
+            resumed_workspace_roots = Some(permissions.workspace_roots);
+            if !overrides.additional_writable_roots.is_empty() {
+                let mut roots = response
+                    .runtime_workspace_roots
+                    .into_iter()
+                    .map(AbsolutePathBuf::try_from)
+                    .collect::<Result<Vec<_>, _>>()?;
+                roots.extend(overrides.additional_writable_roots.into_iter().map(|path| {
+                    AbsolutePathBuf::resolve_path_against_base(path, config.cwd.as_path())
+                }));
+                first_turn_workspace_roots = Some(roots);
+            }
             daybreak_enabled = daybreak_override
                 .or(response.thread.daybreak_enabled)
                 .unwrap_or(false);
@@ -1174,7 +1222,9 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                     model: config.model.clone(),
                     model_provider: Some(config.model_provider_id.clone()),
                     cwd: Some(config.cwd.to_string_lossy().to_string()),
-                    runtime_workspace_roots: Some(config.workspace_roots.clone()),
+                    runtime_workspace_roots: Some(LegacyAppPathString::from_abs_paths(
+                        &config.workspace_roots,
+                    )),
                     approval_policy: Some(config.permissions.approval_policy.value().into()),
                     approvals_reviewer: resume_approvals_reviewer_override,
                     sandbox: sandbox.flatten(),
@@ -1235,17 +1285,28 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
     // Use the start/resume response as the authoritative bootstrap payload.
     // Waiting for a later streamed `SessionConfigured` event adds up to 10s of
     // avoidable startup latency on the in-process path.
-    let session_configured = fallback_session_configured;
+    let mut session_configured = fallback_session_configured;
 
     exec_span.record("thread.id", primary_thread_id_for_span.as_str());
 
     // Print the effective configuration and initial request so users can see what Xdcode
     // is using.
-    event_processor.print_config_summary(&config, &prompt_summary, &session_configured);
+    // With --add-dir, report the host's effective grant after turn/start applies the additions.
+    let summary_after_turn_start = !json_mode && first_turn_workspace_roots.is_some();
+    if !summary_after_turn_start {
+        let workspace_roots =
+            resumed_workspace_roots.unwrap_or_else(|| config.effective_workspace_roots());
+        event_processor.print_config_summary(
+            &config,
+            &prompt_summary,
+            &session_configured,
+            &workspace_roots,
+        );
+    }
     if !json_mode
         && let Some(message) = xdcode_core::config::system_bwrap_warning(
-            &config.permissions.effective_permission_profile(),
-            &config.cwd,
+            &session_configured.permission_profile,
+            &session_configured.cwd,
         )
     {
         event_processor.process_warning(message);
@@ -1253,7 +1314,7 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
 
     info!("Xdcode initialized with event: {session_configured:?}");
 
-    let (interrupt_tx, mut interrupt_rx) = mpsc::unbounded_channel::<()>();
+    let (interrupt_tx, interrupt_rx) = mpsc::unbounded_channel::<()>();
     tokio::spawn(async move {
         if tokio::signal::ctrl_c().await.is_ok() {
             tracing::debug!("Keyboard interrupt");
@@ -1270,7 +1331,7 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                 .shutdown()
                 .await
                 .map_err(|err| anyhow::anyhow!("in-process app-server shutdown failed: {err}"))?;
-            event_processor.print_final_output();
+            event_processor.print_final_output(bound_output)?;
             return Ok(());
         }
         InitialOperation::UserTurn {
@@ -1286,6 +1347,9 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                         &mut request_ids,
                         &session_configured.model,
                         &session_configured.model_provider_id,
+                        config
+                            .model_providers
+                            .get(&session_configured.model_provider_id),
                         daybreak_enabled,
                     )
                     .await?
@@ -1309,8 +1373,8 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                         responsesapi_client_metadata_patch: None,
                         additional_context: None,
                         environments: None,
-                        cwd: Some(default_cwd),
-                        runtime_workspace_roots: None,
+                        cwd: first_turn_cwd,
+                        runtime_workspace_roots: first_turn_workspace_roots,
                         approval_policy: Some(default_approval_policy.into()),
                         approvals_reviewer: None,
                         sandbox_policy: None,
@@ -1331,6 +1395,21 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
             )
             .await
             .map_err(anyhow::Error::msg)?;
+            if summary_after_turn_start {
+                let AppServerClient::InProcess(embedded_client) = &client else {
+                    unreachable!("local exec uses an embedded app-server");
+                };
+                let permissions = embedded_client
+                    .thread_permissions(primary_thread_id)
+                    .await?;
+                session_configured.permission_profile = permissions.profile;
+                event_processor.print_config_summary(
+                    &config,
+                    &prompt_summary,
+                    &session_configured,
+                    &permissions.workspace_roots,
+                );
+            }
             let task_id = response.turn.id;
             info!("Sent prompt with event ID: {task_id}");
             task_id
@@ -1363,12 +1442,49 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
     };
     exec_span.record("turn.id", task_id.as_str());
 
+    finish_turn(
+        client,
+        request_ids,
+        ExecTurn {
+            thread_id: primary_thread_id.to_string(),
+            turn_id: task_id,
+            ephemeral: config.ephemeral,
+            history_mode,
+        },
+        event_processor,
+        bound_output,
+        interrupt_rx,
+    )
+    .await
+}
+
+struct ExecTurn {
+    thread_id: String,
+    turn_id: String,
+    ephemeral: bool,
+    history_mode: ThreadHistoryMode,
+}
+
+async fn finish_turn(
+    mut client: AppServerClient,
+    mut request_ids: RequestIdSequencer,
+    turn: ExecTurn,
+    mut event_processor: Box<dyn EventProcessor>,
+    bound_output: Option<xdcode_exec_server::BoundOutput>,
+    mut interrupt_rx: mpsc::UnboundedReceiver<()>,
+) -> anyhow::Result<()> {
+    let ExecTurn {
+        thread_id,
+        turn_id: task_id,
+        ephemeral: thread_ephemeral,
+        history_mode,
+    } = turn;
     // Run the loop until the task is complete.
     // Track whether a fatal error was reported by the server so we can
     // exit with a non-zero status for automation-friendly signaling.
     let mut error_seen = false;
     let mut interrupt_channel_open = true;
-    let primary_thread_id_for_requests = primary_thread_id.to_string();
+    let primary_thread_id_for_requests = thread_id;
     loop {
         let server_event = tokio::select! {
             maybe_interrupt = interrupt_rx.recv(), if interrupt_channel_open => {
@@ -1401,10 +1517,10 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
         };
 
         match server_event {
-            InProcessServerEvent::ServerRequest(request) => {
+            AppServerEvent::ServerRequest(request) => {
                 handle_server_request(&client, *request, &mut error_seen).await;
             }
-            InProcessServerEvent::ServerNotification(notification) => {
+            AppServerEvent::ServerNotification(notification) => {
                 let mut notification = *notification;
                 if let ServerNotification::Error(payload) = &notification {
                     if payload.thread_id == primary_thread_id_for_requests
@@ -1431,7 +1547,7 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                     &task_id,
                 ) {
                     maybe_backfill_turn_completed_items(
-                        config.ephemeral,
+                        thread_ephemeral,
                         history_mode,
                         &client,
                         &mut request_ids,
@@ -1456,7 +1572,14 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                     }
                 }
             }
-            InProcessServerEvent::Lagged { skipped } => {
+            AppServerEvent::Disconnected { message } => {
+                anyhow::bail!("app-server disconnected: {message}")
+            }
+            AppServerEvent::ThreadStreamDisconnected(error) => {
+                anyhow::bail!("app-server stream disconnected: {}", error.error.message)
+            }
+            AppServerEvent::ThreadStreamReconnected(_) => {}
+            AppServerEvent::Lagged { skipped } => {
                 let message = lagged_event_warning_message(skipped);
                 warn!("{message}");
                 event_processor.process_warning(message);
@@ -1467,7 +1590,7 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
     if let Err(err) = client.shutdown().await {
         warn!("in-process app-server shutdown failed: {err}");
     }
-    event_processor.print_final_output();
+    event_processor.print_final_output(bound_output)?;
     if error_seen {
         std::process::exit(1);
     }
@@ -1476,7 +1599,7 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
 }
 
 async fn start_thread(
-    client: &InProcessAppServerClient,
+    client: &AppServerClient,
     request_ids: &mut RequestIdSequencer,
     config: &Config,
     thread_source: &ThreadSource,
@@ -1518,7 +1641,7 @@ fn thread_start_params_from_config(
     ThreadStartParams {
         model: config.model.clone(),
         model_provider: Some(config.model_provider_id.clone()),
-        runtime_workspace_roots: Some(config.workspace_roots.clone()),
+        runtime_workspace_roots: Some(LegacyAppPathString::from_abs_paths(&config.workspace_roots)),
         approval_policy: Some(config.permissions.approval_policy.value().into()),
         approvals_reviewer: Some(config.approvals_reviewer.into()),
         sandbox: sandbox.flatten(),
@@ -1535,25 +1658,61 @@ fn thread_start_params_from_config(
 fn thread_resume_params_from_config(
     config: &Config,
     thread_id: String,
+    overrides: &ConfigOverrides,
     approvals_reviewer_override: Option<xdcode_app_server_protocol::ApprovalsReviewer>,
 ) -> ThreadResumeParams {
     let permissions = permissions_selection_from_config(config);
-    let sandbox = permissions.is_none().then(|| {
+    let sandbox = if permissions.is_none() {
         sandbox_mode_from_permission_profile(
             &config.permissions.effective_permission_profile(),
             config.cwd.as_path(),
         )
-    });
+    } else {
+        None
+    };
+    // A process default is not a new choice for an existing thread.
+    let mut explicit_permissions = overrides.sandbox_mode.is_some();
+    let mut runtime_workspace_roots = None;
+    for layer in config
+        .config_layer_stack
+        .layers_high_to_low()
+        .filter(|layer| {
+            matches!(
+                layer.name,
+                ConfigLayerSource::SessionFlags
+                    | ConfigLayerSource::User {
+                        profile: Some(_),
+                        ..
+                    }
+            )
+        })
+    {
+        let legacy_workspace = layer
+            .config
+            .get("sandbox_workspace_write")
+            .filter(|_| sandbox == Some(xdcode_app_server_protocol::SandboxMode::WorkspaceWrite));
+        explicit_permissions |= layer.config.get("sandbox_mode").is_some()
+            || layer.config.get("default_permissions").is_some()
+            || legacy_workspace.is_some();
+        if legacy_workspace
+            .and_then(|settings| settings.get("writable_roots"))
+            .is_some()
+        {
+            runtime_workspace_roots =
+                Some(LegacyAppPathString::from_abs_paths(&config.workspace_roots));
+        }
+    }
     ThreadResumeParams {
         thread_id,
         model: config.model.clone(),
         model_provider: Some(config.model_provider_id.clone()),
-        cwd: Some(config.cwd.to_string_lossy().to_string()),
-        runtime_workspace_roots: Some(config.workspace_roots.clone()),
+        cwd: (overrides.cwd.is_some() || runtime_workspace_roots.is_some())
+            .then(|| config.cwd.to_string_lossy().into_owned()),
+        runtime_workspace_roots,
         approval_policy: Some(config.permissions.approval_policy.value().into()),
         approvals_reviewer: approvals_reviewer_override,
-        sandbox: sandbox.flatten(),
-        permissions,
+        sandbox: sandbox.filter(|_| explicit_permissions),
+        permissions: permissions.filter(|_| explicit_permissions),
         config: thread_config_overrides_from_config(config),
         exclude_turns: true,
         ..ThreadResumeParams::default()
@@ -1603,7 +1762,7 @@ fn sandbox_mode_from_permission_profile(
 }
 
 async fn send_request_with_response<T>(
-    client: &InProcessAppServerClient,
+    client: &AppServerClient,
     request: ClientRequest,
     method: &str,
 ) -> Result<T, String>
@@ -1645,7 +1804,7 @@ fn session_configured_from_thread_start_response(
 
 fn session_configured_from_thread_resume_response(
     response: &ThreadResumeResponse,
-    config: &Config,
+    permission_profile: PermissionProfile,
 ) -> Result<SessionConfiguredEvent, String> {
     session_configured_from_thread_response(
         &response.thread.session_id,
@@ -1660,7 +1819,7 @@ fn session_configured_from_thread_resume_response(
         response.service_tier.clone(),
         response.approval_policy.to_core(),
         response.approvals_reviewer.to_core(),
-        config.permissions.effective_permission_profile(),
+        permission_profile,
         response.active_permission_profile.clone().map(Into::into),
         response.cwd.clone(),
         response.reasoning_effort.clone(),
@@ -1695,7 +1854,7 @@ fn session_configured_from_thread_response(
     approvals_reviewer: xdcode_protocol::config_types::ApprovalsReviewer,
     permission_profile: PermissionProfile,
     active_permission_profile: Option<xdcode_protocol::models::ActivePermissionProfile>,
-    cwd: AbsolutePathBuf,
+    cwd: LegacyAppPathString,
     reasoning_effort: Option<xdcode_protocol::model_types::ReasoningEffort>,
 ) -> Result<SessionConfiguredEvent, String> {
     let session_id = SessionId::from_string(session_id)
@@ -1725,7 +1884,7 @@ fn session_configured_from_thread_response(
         approvals_reviewer,
         permission_profile,
         active_permission_profile,
-        cwd,
+        cwd: AbsolutePathBuf::try_from(cwd).map_err(|err| err.to_string())?,
         reasoning_effort,
         network_proxy: None,
         rollout_path,
@@ -1803,11 +1962,12 @@ fn should_process_notification(
 async fn maybe_backfill_turn_completed_items(
     thread_ephemeral: bool,
     history_mode: ThreadHistoryMode,
-    client: &InProcessAppServerClient,
+    client: &AppServerClient,
     request_ids: &mut RequestIdSequencer,
     notification: &mut ServerNotification,
 ) {
     // In-process delivery may drop non-terminal item notifications under backpressure while still
+    // guaranteeing `turn/completed`. Recover the completed turn's items before shutdown.
     if !should_backfill_turn_completed_items(thread_ephemeral, notification) {
         return;
     }
@@ -1831,6 +1991,7 @@ async fn maybe_backfill_turn_completed_items(
                         cursor,
                         limit: None,
                         sort_direction: None,
+                        defer_output: None,
                     },
                 })
                 .await
@@ -1841,7 +2002,17 @@ async fn maybe_backfill_turn_completed_items(
                     return;
                 }
             };
-            items.extend(page.data.into_iter().map(|entry| entry.item));
+            for entry in page.data {
+                match ThreadItem::try_from(entry) {
+                    Ok(item) => items.push(item),
+                    Err(err) => {
+                        warn!(
+                            "thread/items/list returned an incomplete item during turn completion: {err}"
+                        );
+                        return;
+                    }
+                }
+            }
             let Some(next) = page.next_cursor else { break };
             if !seen_cursors.insert(next.clone()) {
                 warn!("thread/items/list returned a repeated cursor during turn completion");
@@ -1904,7 +2075,7 @@ fn should_backfill_turn_completed_items(
 fn turn_items_for_thread(
     thread: &AppServerThread,
     turn_id: &str,
-) -> Option<Vec<AppServerThreadItem>> {
+) -> Option<Vec<xdcode_app_server_protocol::ThreadItem>> {
     thread
         .turns
         .iter()
@@ -1966,7 +2137,7 @@ fn cwds_match(current_cwd: &Path, session_cwd: &Path) -> bool {
 }
 
 async fn resolve_resume_thread_id(
-    client: &InProcessAppServerClient,
+    client: &AppServerClient,
     config: &Config,
     state_db: Option<&StateDbHandle>,
     args: &crate::cli::ResumeArgs,
@@ -1982,6 +2153,9 @@ async fn resolve_resume_thread_id(
                 ClientRequest::ThreadList {
                     request_id: RequestId::Integer(0),
                     params: ThreadListParams {
+                        include_attached_threads: false,
+                        current_account_only: true,
+                        included_thread_ids: None,
                         excluded_thread_ids: None,
                         attached_to_thread_id: None,
                         originators: None,
@@ -2070,6 +2244,9 @@ async fn resolve_resume_thread_id(
             ClientRequest::ThreadList {
                 request_id: RequestId::Integer(0),
                 params: ThreadListParams {
+                    include_attached_threads: false,
+                    current_account_only: false,
+                    included_thread_ids: None,
                     excluded_thread_ids: None,
                     attached_to_thread_id: None,
                     originators: None,
@@ -2138,7 +2315,7 @@ fn canceled_mcp_server_elicitation_response(
 }
 
 async fn request_shutdown(
-    client: &InProcessAppServerClient,
+    client: &AppServerClient,
     request_ids: &mut RequestIdSequencer,
     thread_id: &str,
 ) -> Result<(), String> {
@@ -2154,7 +2331,7 @@ async fn request_shutdown(
 }
 
 async fn resolve_server_request(
-    client: &InProcessAppServerClient,
+    client: &AppServerClient,
     request_id: RequestId,
     value: serde_json::Value,
     method: &str,
@@ -2166,7 +2343,7 @@ async fn resolve_server_request(
 }
 
 async fn reject_server_request(
-    client: &InProcessAppServerClient,
+    client: &AppServerClient,
     request_id: RequestId,
     method: &str,
     reason: String,
@@ -2197,7 +2374,7 @@ fn server_request_method_name(request: &ServerRequest) -> String {
 }
 
 async fn handle_server_request(
-    client: &InProcessAppServerClient,
+    client: &AppServerClient,
     request: ServerRequest,
     error_seen: &mut bool,
 ) {
@@ -2283,15 +2460,6 @@ async fn handle_server_request(
                 request_id,
                 &method,
                 "attestation generation is not supported in exec mode".to_string(),
-            )
-            .await
-        }
-        ServerRequest::CurrentTimeRead { request_id, .. } => {
-            reject_server_request(
-                client,
-                request_id,
-                &method,
-                "external current time is not supported in exec mode".to_string(),
             )
             .await
         }
@@ -2430,12 +2598,8 @@ fn decode_utf16(
         return Err(PromptDecodeError::InvalidUtf16 { encoding });
     }
 
-    let units: Vec<u16> = input
-        .as_chunks::<2>()
-        .0
-        .iter()
-        .map(|chunk| decode_unit([chunk[0], chunk[1]]))
-        .collect();
+    let (units, _) = input.as_chunks();
+    let units: Vec<_> = units.iter().copied().map(decode_unit).collect();
 
     String::from_utf16(&units).map_err(|_| PromptDecodeError::InvalidUtf16 { encoding })
 }

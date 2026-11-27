@@ -3,8 +3,7 @@ use super::*;
 use crate::app_event::HistoryLookupResponse;
 use pretty_assertions::assert_eq;
 use xdcode_app_server_protocol::ImageReference;
-use xdcode_app_server_protocol::NetworkAccess;
-use xdcode_app_server_protocol::SandboxPolicy;
+use xdcode_app_server_protocol::ThreadItem;
 use xdcode_protocol::models::FunctionCallOutputBody;
 use xdcode_protocol::models::ManagedFileSystemPermissions;
 use xdcode_protocol::permissions::FileSystemAccessMode;
@@ -22,6 +21,9 @@ async fn resumed_initial_messages_render_history() {
     let rollout_file = NamedTempFile::new().unwrap();
     let mut configured = crate::session_state::ThreadSessionState {
         catalog_id: None,
+        read_only_history: false,
+        thread_settings_confirmed: true,
+        primary_environment_cwd: None,
         daybreak_enabled: true,
         windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
         thread_id,
@@ -35,7 +37,7 @@ async fn resumed_initial_messages_render_history() {
         approvals_reviewer: ApprovalsReviewer::User,
         permission_profile: PermissionProfile::read_only(),
         active_permission_profile: None,
-        cwd: test_path_buf("/home/user/project").abs(),
+        cwd: test_path_buf("/home/user/project").abs().into(),
         runtime_workspace_roots: Vec::new(),
         instruction_source_paths: Vec::new(),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
@@ -49,6 +51,7 @@ async fn resumed_initial_messages_render_history() {
     chat.status_account_display = Some(StatusAccountDisplay::ApiKey);
     let mut model = crate::test_support::TEST_MODEL_PRESETS[0].clone();
     model.available_access_programs = Some(xdcode_protocol::model_types::ModelAccessPrograms {
+        daybreak_availability: Default::default(),
         cyber: vec![xdcode_protocol::turn_input::CyberAccessProgram::Standard],
     });
     chat.model_catalog = Arc::new(ModelCatalog::new(vec![model]));
@@ -89,7 +92,7 @@ async fn resumed_initial_messages_render_history() {
     chat.set_feature_enabled(Feature::CliDaybreak, /*enabled*/ true);
     chat.show_welcome_banner = false;
     chat.local_settings.tui.show_tooltips = false;
-    chat.config.cwd = configured.cwd.clone();
+    chat.config.cwd = configured.cwd.to_abs_path().ok().unwrap();
     chat.transcript.active_cell = Some(ChatWidget::placeholder_session_header_cell(&chat.config));
     configured.thread_id = ThreadId::new();
     chat.handle_thread_session(configured);
@@ -132,14 +135,16 @@ async fn replayed_failed_turns_preserve_overload_warnings_between_retries() {
     let prompt = "The workspace also looks super confusing with its separator.";
     let error_message = "Selected model is at capacity. Please try a different model.";
     let failed_turn = |turn_id: &str, item_id: &str| AppServerTurn {
-        items: vec![AppServerThreadItem::UserMessage {
-            id: item_id.to_string(),
-            client_id: None,
-            content: vec![AppServerUserInput::Text {
-                text: prompt.to_string(),
-                text_elements: Vec::new(),
-            }],
-        }],
+        items: vec![ThreadItem::untimed(
+            AppServerThreadItemPayload::UserMessage {
+                id: item_id.to_string(),
+                client_id: None,
+                content: vec![AppServerUserInput::Text {
+                    text: prompt.to_string(),
+                    text_elements: Vec::new(),
+                }],
+            },
+        )],
         ..app_server_turn(
             turn_id,
             AppServerTurnStatus::Failed,
@@ -183,6 +188,9 @@ async fn restored_conversation_ultra_remains_selected_after_switching_to_plan() 
 
     chat.handle_thread_session(crate::session_state::ThreadSessionState {
         catalog_id: None,
+        read_only_history: false,
+        thread_settings_confirmed: true,
+        primary_environment_cwd: None,
         daybreak_enabled: false,
         windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
         thread_id: ThreadId::new(),
@@ -196,7 +204,7 @@ async fn restored_conversation_ultra_remains_selected_after_switching_to_plan() 
         approvals_reviewer: ApprovalsReviewer::User,
         permission_profile: PermissionProfile::read_only(),
         active_permission_profile: None,
-        cwd: test_path_buf("/home/user/project").abs(),
+        cwd: test_path_buf("/home/user/project").abs().into(),
         runtime_workspace_roots: Vec::new(),
         instruction_source_paths: Vec::new(),
         reasoning_effort: Some(ReasoningEffortConfig::Ultra),
@@ -309,7 +317,7 @@ async fn replayed_review_prompt_does_not_seed_composer_history() {
     let (mut chat, mut rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
 
     chat.replay_thread_item(
-        AppServerThreadItem::EnteredReviewMode {
+        AppServerThreadItemPayload::EnteredReviewMode {
             id: "review-start".to_string(),
             review: "changes against main".to_string(),
         },
@@ -332,7 +340,7 @@ async fn replayed_review_prompt_does_not_seed_composer_history() {
 async fn replayed_delegated_tool_output_is_attributed_without_seeding_composer_history() {
     let (mut chat, mut rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
 
-    let item = AppServerThreadItem::FunctionCallOutput {
+    let item = AppServerThreadItemPayload::FunctionCallOutput {
         id: "delegation-1".to_string(),
         name: "send_message_to_thread".to_string(),
         namespace: Some("xdcode_tui".to_string()),
@@ -349,13 +357,14 @@ async fn replayed_delegated_tool_output_is_attributed_without_seeding_composer_h
     };
 
     chat.handle_server_notification(
-        ServerNotification::ItemCompleted(ItemCompletedNotification {
-            thread_id: "thread-1".to_string(),
-            turn_id: "turn-1".to_string(),
-            item: item.clone(),
-            completed_at_ms: 0,
-        }),
-        None,
+        ServerNotification::ItemCompleted(ItemCompletedNotification::new(
+            "thread-1".to_string(),
+            "turn-1".to_string(),
+            item.clone(),
+            /*started_at_ms*/ None,
+            /*completed_at_ms*/ 0,
+        )),
+        /*replay_kind*/ None,
     );
     let live = drain_insert_history(&mut rx);
 
@@ -382,20 +391,20 @@ async fn replayed_delegated_tool_output_is_attributed_without_seeding_composer_h
     assert_eq!(
         projected
             .iter()
-            .map(|cell| cell.transcript_lines(80))
+            .map(|cell| cell.transcript_lines(/*width*/ 80))
             .collect::<Vec<_>>(),
         cells,
     );
     assert_eq!(
         projected[0]
-            .transcript_hyperlink_lines(80)
+            .transcript_hyperlink_lines(/*width*/ 80)
             .iter()
             .flat_map(|line| &line.hyperlinks)
             .map(|link| link.destination.as_str())
             .collect::<std::collections::BTreeSet<_>>(),
         std::collections::BTreeSet::from(["https://example.com/pr"]),
     );
-    let narrow = projected[0].transcript_hyperlink_lines(32);
+    let narrow = projected[0].transcript_hyperlink_lines(/*width*/ 32);
     let first = narrow[0].source.as_ref().unwrap();
     let continuation = narrow[1].source.as_ref().unwrap();
     assert!(std::sync::Arc::ptr_eq(&first.text, &continuation.text));
@@ -409,7 +418,7 @@ async fn replayed_nested_review_prompts_do_not_render_or_seed_composer_history()
     let (mut chat, mut rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
     let review_hint = "current changes";
     let review_prompt = "Review the current code changes (staged, unstaged, and untracked files).";
-    let user_message = |id: &str, text: &str| AppServerThreadItem::UserMessage {
+    let user_message = |id: &str, text: &str| AppServerThreadItemPayload::UserMessage {
         id: id.to_string(),
         client_id: None,
         content: vec![AppServerUserInput::Text {
@@ -419,14 +428,14 @@ async fn replayed_nested_review_prompts_do_not_render_or_seed_composer_history()
     };
     let review_marker = |turn_id: &str| AppServerTurn {
         items: vec![
-            AppServerThreadItem::EnteredReviewMode {
+            ThreadItem::untimed(AppServerThreadItemPayload::EnteredReviewMode {
                 id: format!("{turn_id}-start"),
                 review: review_hint.to_string(),
-            },
-            AppServerThreadItem::ExitedReviewMode {
+            }),
+            ThreadItem::untimed(AppServerThreadItemPayload::ExitedReviewMode {
                 id: format!("{turn_id}-end"),
                 review: "review complete".to_string(),
-            },
+            }),
         ],
         ..app_server_turn(
             turn_id,
@@ -441,8 +450,8 @@ async fn replayed_nested_review_prompts_do_not_render_or_seed_composer_history()
             review_marker("turn-review-before-steer"),
             AppServerTurn {
                 items: vec![
-                    user_message("interrupted-prompt", review_hint),
-                    user_message("interrupted-steer", review_hint),
+                    ThreadItem::untimed(user_message("interrupted-prompt", review_hint)),
+                    ThreadItem::untimed(user_message("interrupted-steer", review_hint)),
                 ],
                 completed_at: Some(1),
                 ..app_server_turn(
@@ -455,16 +464,17 @@ async fn replayed_nested_review_prompts_do_not_render_or_seed_composer_history()
             review_marker("turn-review"),
             AppServerTurn {
                 items: vec![
-                    user_message("review-prompt-1", review_prompt),
-                    user_message("review-prompt-2", review_prompt),
-                    AppServerThreadItem::AgentMessage {
+                    ThreadItem::untimed(user_message("review-prompt-1", review_prompt)),
+                    ThreadItem::untimed(user_message("review-prompt-2", review_prompt)),
+                    ThreadItem::untimed(AppServerThreadItemPayload::AgentMessage {
+                        moderation: None,
                         id: "review-result".to_string(),
                         text: "review result is retained".to_string(),
                         phase: Some(MessagePhase::FinalAnswer),
                         memory_citation: None,
                         delivery: None,
                         questions: None,
-                    },
+                    }),
                 ],
                 ..app_server_turn(
                     "turn-review-child",
@@ -505,6 +515,9 @@ async fn replayed_user_message_preserves_text_elements_and_local_images() {
     let rollout_file = NamedTempFile::new().unwrap();
     let configured = crate::session_state::ThreadSessionState {
         catalog_id: None,
+        read_only_history: false,
+        thread_settings_confirmed: true,
+        primary_environment_cwd: None,
         daybreak_enabled: false,
         windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
         thread_id,
@@ -518,7 +531,7 @@ async fn replayed_user_message_preserves_text_elements_and_local_images() {
         approvals_reviewer: ApprovalsReviewer::User,
         permission_profile: PermissionProfile::read_only(),
         active_permission_profile: None,
-        cwd: test_path_buf("/home/user/project").abs(),
+        cwd: test_path_buf("/home/user/project").abs().into(),
         runtime_workspace_roots: Vec::new(),
         instruction_source_paths: Vec::new(),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
@@ -579,6 +592,9 @@ async fn replayed_user_message_preserves_remote_image_urls() {
     let rollout_file = NamedTempFile::new().unwrap();
     let configured = crate::session_state::ThreadSessionState {
         catalog_id: None,
+        read_only_history: false,
+        thread_settings_confirmed: true,
+        primary_environment_cwd: None,
         daybreak_enabled: false,
         windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
         thread_id,
@@ -592,7 +608,7 @@ async fn replayed_user_message_preserves_remote_image_urls() {
         approvals_reviewer: ApprovalsReviewer::User,
         permission_profile: PermissionProfile::read_only(),
         active_permission_profile: None,
-        cwd: test_path_buf("/home/user/project").abs(),
+        cwd: test_path_buf("/home/user/project").abs().into(),
         runtime_workspace_roots: Vec::new(),
         instruction_source_paths: Vec::new(),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
@@ -681,12 +697,11 @@ async fn session_configured_syncs_widget_config_permissions_and_cwd() {
         },
     };
     let expected_permission_profile = expected_app_server_permission_profile.clone();
-    let expected_core_sandbox = expected_permission_profile
-        .to_legacy_sandbox_policy(expected_cwd.as_path())
-        .expect("permission profile should project to legacy sandbox policy");
-    let expected_sandbox = SandboxPolicy::from(expected_core_sandbox);
     let configured = crate::session_state::ThreadSessionState {
         catalog_id: None,
+        read_only_history: false,
+        thread_settings_confirmed: true,
+        primary_environment_cwd: None,
         daybreak_enabled: false,
         windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
         thread_id: ThreadId::new(),
@@ -700,8 +715,8 @@ async fn session_configured_syncs_widget_config_permissions_and_cwd() {
         approvals_reviewer: ApprovalsReviewer::User,
         permission_profile: expected_permission_profile,
         active_permission_profile: None,
-        cwd: expected_cwd.clone(),
-        runtime_workspace_roots: vec![expected_cwd.clone()],
+        cwd: expected_cwd.clone().into(),
+        runtime_workspace_roots: vec![expected_cwd.clone().into()],
         instruction_source_paths: Vec::new(),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
         collaboration_mode: None,
@@ -716,8 +731,6 @@ async fn session_configured_syncs_widget_config_permissions_and_cwd() {
         AskForApproval::from(chat.config_ref().permissions.approval_policy.value()),
         AskForApproval::Never
     );
-    let actual_sandbox = SandboxPolicy::from(chat.config_ref().legacy_sandbox_policy());
-    assert_eq!(&actual_sandbox, &expected_sandbox);
     assert_eq!(
         chat.config_ref().permissions.effective_permission_profile(),
         expected_app_server_permission_profile
@@ -727,8 +740,8 @@ async fn session_configured_syncs_widget_config_permissions_and_cwd() {
     chat.handle_manage_skills_closed();
     assert!(matches!(
         ops.try_recv(),
-        Ok(AppCommand::ListSkills { cwds, force_reload: true })
-            if cwds == vec![expected_cwd.to_path_buf()]
+        Ok(AppCommand::ListSkills { cwd, force_reload: true })
+            if cwd == PathUri::from_abs_path(&expected_cwd)
     ));
 
     let updated_profile = PermissionProfile::workspace_write();
@@ -769,6 +782,9 @@ async fn session_configured_preserves_profile_workspace_roots() {
         .materialize_project_roots_with_workspace_roots(&session_effective_workspace_roots);
     let configured = crate::session_state::ThreadSessionState {
         catalog_id: None,
+        read_only_history: false,
+        thread_settings_confirmed: true,
+        primary_environment_cwd: None,
         daybreak_enabled: false,
         windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
         thread_id: ThreadId::new(),
@@ -782,8 +798,11 @@ async fn session_configured_preserves_profile_workspace_roots() {
         approvals_reviewer: ApprovalsReviewer::User,
         permission_profile: session_permission_profile.clone(),
         active_permission_profile: None,
-        cwd: session_cwd.clone(),
-        runtime_workspace_roots: session_runtime_workspace_roots.clone(),
+        cwd: session_cwd.clone().into(),
+        runtime_workspace_roots: session_runtime_workspace_roots
+            .iter()
+            .map(PathUri::from_abs_path)
+            .collect(),
         instruction_source_paths: Vec::new(),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
         collaboration_mode: None,
@@ -813,11 +832,11 @@ async fn session_configured_external_sandbox_keeps_external_runtime_policy() {
         network: NetworkSandboxPolicy::Restricted,
     };
     let expected_permission_profile = expected_app_server_permission_profile.clone();
-    let expected_sandbox = SandboxPolicy::ExternalSandbox {
-        network_access: NetworkAccess::Restricted,
-    };
     let configured = crate::session_state::ThreadSessionState {
         catalog_id: None,
+        read_only_history: false,
+        thread_settings_confirmed: true,
+        primary_environment_cwd: None,
         daybreak_enabled: false,
         windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
         thread_id: ThreadId::new(),
@@ -831,7 +850,7 @@ async fn session_configured_external_sandbox_keeps_external_runtime_policy() {
         approvals_reviewer: ApprovalsReviewer::User,
         permission_profile: expected_permission_profile,
         active_permission_profile: None,
-        cwd: test_path_buf("/home/user/external").abs(),
+        cwd: test_path_buf("/home/user/external").abs().into(),
         runtime_workspace_roots: Vec::new(),
         instruction_source_paths: Vec::new(),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
@@ -843,8 +862,6 @@ async fn session_configured_external_sandbox_keeps_external_runtime_policy() {
 
     chat.handle_thread_session(configured);
 
-    let actual_sandbox = SandboxPolicy::from(chat.config_ref().legacy_sandbox_policy());
-    assert_eq!(&actual_sandbox, &expected_sandbox);
     assert_eq!(
         chat.config_ref().permissions.effective_permission_profile(),
         expected_app_server_permission_profile
@@ -861,6 +878,9 @@ async fn replayed_user_message_with_only_remote_images_renders_history_cell() {
     let rollout_file = NamedTempFile::new().unwrap();
     let configured = crate::session_state::ThreadSessionState {
         catalog_id: None,
+        read_only_history: false,
+        thread_settings_confirmed: true,
+        primary_environment_cwd: None,
         daybreak_enabled: false,
         windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
         thread_id,
@@ -874,7 +894,7 @@ async fn replayed_user_message_with_only_remote_images_renders_history_cell() {
         approvals_reviewer: ApprovalsReviewer::User,
         permission_profile: PermissionProfile::read_only(),
         active_permission_profile: None,
-        cwd: test_path_buf("/home/user/project").abs(),
+        cwd: test_path_buf("/home/user/project").abs().into(),
         runtime_workspace_roots: Vec::new(),
         instruction_source_paths: Vec::new(),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
@@ -923,6 +943,9 @@ async fn replayed_user_message_with_only_local_images_renders_history_cell() {
     let rollout_file = NamedTempFile::new().unwrap();
     let configured = crate::session_state::ThreadSessionState {
         catalog_id: None,
+        read_only_history: false,
+        thread_settings_confirmed: true,
+        primary_environment_cwd: None,
         daybreak_enabled: false,
         windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
         thread_id,
@@ -936,7 +959,7 @@ async fn replayed_user_message_with_only_local_images_renders_history_cell() {
         approvals_reviewer: ApprovalsReviewer::User,
         permission_profile: PermissionProfile::read_only(),
         active_permission_profile: None,
-        cwd: test_path_buf("/home/user/project").abs(),
+        cwd: test_path_buf("/home/user/project").abs().into(),
         runtime_workspace_roots: Vec::new(),
         instruction_source_paths: Vec::new(),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
@@ -1042,15 +1065,16 @@ async fn prompt_edit_stops_streaming_without_submitting_queued_input() {
 
     let retained_turn = AppServerTurn {
         items: vec![
-            AppServerThreadItem::AgentMessage {
+            ThreadItem::untimed(AppServerThreadItemPayload::AgentMessage {
+                moderation: None,
                 id: "retained-response".to_string(),
                 text: "retained response".to_string(),
                 phase: Some(MessagePhase::FinalAnswer),
                 memory_citation: None,
                 delivery: None,
                 questions: None,
-            },
-            AppServerThreadItem::UserMessage {
+            }),
+            ThreadItem::untimed(AppServerThreadItemPayload::UserMessage {
                 id: "voice-steer".to_string(),
                 client_id: None,
                 content: vec![UserInput::Text {
@@ -1058,15 +1082,16 @@ async fn prompt_edit_stops_streaming_without_submitting_queued_input() {
                         .to_string(),
                     text_elements: Vec::new(),
                 }],
-            },
-            AppServerThreadItem::AgentMessage {
+            }),
+            ThreadItem::untimed(AppServerThreadItemPayload::AgentMessage {
+                moderation: None,
                 id: "private-commentary".to_string(),
                 text: "hidden voice commentary".to_string(),
                 phase: Some(MessagePhase::Commentary),
                 memory_citation: None,
                 delivery: None,
                 questions: None,
-            },
+            }),
         ],
         ..app_server_turn(
             "retained-turn",
@@ -1280,6 +1305,9 @@ async fn replayed_reasoning_item_preserves_summary_parts_and_hides_raw_reasoning
     chat.config.show_raw_agent_reasoning = false;
     chat.handle_thread_session(crate::session_state::ThreadSessionState {
         catalog_id: None,
+        read_only_history: false,
+        thread_settings_confirmed: true,
+        primary_environment_cwd: None,
         daybreak_enabled: false,
         windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
         thread_id: ThreadId::new(),
@@ -1293,7 +1321,7 @@ async fn replayed_reasoning_item_preserves_summary_parts_and_hides_raw_reasoning
         approvals_reviewer: ApprovalsReviewer::User,
         permission_profile: PermissionProfile::read_only(),
         active_permission_profile: None,
-        cwd: test_project_path().abs(),
+        cwd: test_project_path().abs().into(),
         runtime_workspace_roots: Vec::new(),
         instruction_source_paths: Vec::new(),
         reasoning_effort: None,
@@ -1305,7 +1333,7 @@ async fn replayed_reasoning_item_preserves_summary_parts_and_hides_raw_reasoning
     let _ = drain_insert_history(&mut rx);
 
     chat.replay_thread_item(
-        AppServerThreadItem::Reasoning {
+        AppServerThreadItemPayload::Reasoning {
             id: "reasoning-1".to_string(),
             summary: vec![
                 "**Plan**\n\ndone".to_string(),
@@ -1333,6 +1361,9 @@ async fn replayed_reasoning_item_shows_raw_reasoning_when_enabled() {
     chat.config.show_raw_agent_reasoning = true;
     chat.handle_thread_session(crate::session_state::ThreadSessionState {
         catalog_id: None,
+        read_only_history: false,
+        thread_settings_confirmed: true,
+        primary_environment_cwd: None,
         daybreak_enabled: false,
         windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
         thread_id: ThreadId::new(),
@@ -1346,7 +1377,7 @@ async fn replayed_reasoning_item_shows_raw_reasoning_when_enabled() {
         approvals_reviewer: ApprovalsReviewer::User,
         permission_profile: PermissionProfile::read_only(),
         active_permission_profile: None,
-        cwd: test_project_path().abs(),
+        cwd: test_project_path().abs().into(),
         runtime_workspace_roots: Vec::new(),
         instruction_source_paths: Vec::new(),
         reasoning_effort: None,
@@ -1358,7 +1389,7 @@ async fn replayed_reasoning_item_shows_raw_reasoning_when_enabled() {
     let _ = drain_insert_history(&mut rx);
 
     chat.replay_thread_item(
-        AppServerThreadItem::Reasoning {
+        AppServerThreadItemPayload::Reasoning {
             id: "reasoning-1".to_string(),
             summary: vec!["Summary only".to_string()],
             content: vec!["Raw reasoning".to_string()],
@@ -1381,7 +1412,8 @@ async fn replayed_mcp_tool_call_stays_active_until_completion() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     let _ = drain_insert_history(&mut rx);
 
-    let mut item = AppServerThreadItem::McpToolCall {
+    let mut item = AppServerThreadItemPayload::McpToolCall {
+        environment_id: None,
         id: "mcp-1".to_string(),
         server: "copilot-bridge".to_string(),
         tool: "copilot".to_string(),
@@ -1407,7 +1439,7 @@ async fn replayed_mcp_tool_call_stays_active_until_completion() {
     assert!(active.contains("Calling"));
     assert!(!active.contains("MCP tool call completed without a result"));
 
-    if let AppServerThreadItem::McpToolCall { status, .. } = &mut item {
+    if let AppServerThreadItemPayload::McpToolCall { status, .. } = &mut item {
         *status = xdcode_app_server_protocol::McpToolCallStatus::Completed;
     }
     chat.on_mcp_tool_call_completed(item);
@@ -1426,11 +1458,8 @@ async fn failed_repl_mcp_tool_call_preserves_status_and_result() {
         let _ = drain_insert_history(&mut rx);
 
         chat.handle_server_notification(
-            ServerNotification::ItemCompleted(ItemCompletedNotification {
-                thread_id: "thread-1".to_string(),
-                turn_id: "turn-1".to_string(),
-                completed_at_ms: 0,
-                item: AppServerThreadItem::McpToolCall {
+            ServerNotification::ItemCompleted(ItemCompletedNotification::new("thread-1".to_string(), "turn-1".to_string(), AppServerThreadItemPayload::McpToolCall {
+                    environment_id: None,
                     id: "mcp-failed".to_string(),
                     server: server.to_string(),
                     tool: "js".to_string(),
@@ -1452,8 +1481,7 @@ async fn failed_repl_mcp_tool_call_preserves_status_and_result() {
                     })),
                     error: None,
                     duration_ms: Some(5),
-                },
-            }),
+                }, /*started_at_ms*/ None, /*completed_at_ms*/ 0)),
             /*replay_kind*/ None,
         );
 
@@ -1497,7 +1525,8 @@ async fn deferred_mcp_lifecycle_events_keep_fifo_after_stream_finishes() {
         chat.history_render_mode(),
     ));
 
-    chat.on_mcp_tool_call_started(AppServerThreadItem::McpToolCall {
+    chat.on_mcp_tool_call_started(AppServerThreadItemPayload::McpToolCall {
+        environment_id: None,
         id: "mcp-deferred".to_string(),
         server: "copilot-bridge".to_string(),
         tool: "copilot".to_string(),
@@ -1515,7 +1544,8 @@ async fn deferred_mcp_lifecycle_events_keep_fifo_after_stream_finishes() {
     assert!(!chat.interrupts.is_empty());
 
     chat.stream_controller = None;
-    chat.on_mcp_tool_call_completed(AppServerThreadItem::McpToolCall {
+    chat.on_mcp_tool_call_completed(AppServerThreadItemPayload::McpToolCall {
+        environment_id: None,
         id: "mcp-deferred".to_string(),
         server: "copilot-bridge".to_string(),
         tool: "copilot".to_string(),
@@ -1587,16 +1617,17 @@ async fn live_reasoning_summary_is_not_rendered_twice_when_item_completes() {
     );
 
     chat.handle_server_notification(
-        ServerNotification::ItemCompleted(ItemCompletedNotification {
-            thread_id: "thread-1".to_string(),
-            turn_id: "turn-1".to_string(),
-            completed_at_ms: 0,
-            item: AppServerThreadItem::Reasoning {
+        ServerNotification::ItemCompleted(ItemCompletedNotification::new(
+            "thread-1".to_string(),
+            "turn-1".to_string(),
+            AppServerThreadItemPayload::Reasoning {
                 id: "reasoning-1".to_string(),
                 summary: vec!["Summary only".to_string()],
                 content: Vec::new(),
             },
-        }),
+            /*started_at_ms*/ None,
+            /*completed_at_ms*/ 0,
+        )),
         /*replay_kind*/ None,
     );
 
@@ -1663,11 +1694,10 @@ async fn live_reasoning_summary_drops_empty_parts_without_losing_content() {
     }
 
     chat.handle_server_notification(
-        ServerNotification::ItemCompleted(ItemCompletedNotification {
-            thread_id: "thread-1".to_string(),
-            turn_id: "turn-1".to_string(),
-            completed_at_ms: 0,
-            item: AppServerThreadItem::Reasoning {
+        ServerNotification::ItemCompleted(ItemCompletedNotification::new(
+            "thread-1".to_string(),
+            "turn-1".to_string(),
+            AppServerThreadItemPayload::Reasoning {
                 id: "reasoning-1".to_string(),
                 summary: vec![
                     "**Plan**\n\ndone".to_string(),
@@ -1675,7 +1705,9 @@ async fn live_reasoning_summary_drops_empty_parts_without_losing_content() {
                 ],
                 content: Vec::new(),
             },
-        }),
+            /*started_at_ms*/ None,
+            /*completed_at_ms*/ 0,
+        )),
         /*replay_kind*/ None,
     );
 

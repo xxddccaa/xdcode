@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 use clap::Args;
 use clap::CommandFactory;
 use clap::Parser;
@@ -13,6 +15,7 @@ use xdcode_app_server_daemon::BootstrapOptions as AppServerBootstrapOptions;
 use xdcode_app_server_daemon::LifecycleCommand as AppServerLifecycleCommand;
 use xdcode_arg0::Arg0DispatchPaths;
 use xdcode_arg0::arg0_dispatch_or_else;
+use xdcode_cli::cloud_config;
 use xdcode_exec::Cli as ExecCli;
 use xdcode_exec::Command as ExecCommand;
 use xdcode_exec::ReviewArgs;
@@ -24,6 +27,7 @@ use xdcode_state::StateRuntime;
 use xdcode_tui::AppExitInfo;
 use xdcode_tui::Cli as TuiCli;
 use xdcode_tui::ExitReason;
+use xdcode_tui::resolve_remote_endpoint;
 use xdcode_utils_absolute_path::AbsolutePathBuf;
 use xdcode_utils_cli::CliConfigOverrides;
 use xdcode_utils_cli::ProfileV2Name;
@@ -37,7 +41,7 @@ use xdcode_utils_cli::SharedCliOptions;
 #[global_allocator]
 static ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-mod cloud_config;
+mod app_server_proxy;
 mod config_override_args;
 mod doctor;
 #[cfg(test)]
@@ -46,9 +50,6 @@ mod exec_args_tests;
 #[cfg(test)]
 #[path = "exec_server_args_tests.rs"]
 mod exec_server_args_tests;
-mod exec_server_command;
-mod exec_server_credential;
-mod exec_server_telemetry;
 mod marketplace_cmd;
 mod mcp_cmd;
 mod mcp_login;
@@ -64,13 +65,13 @@ mod state_db_recovery;
 #[cfg(not(windows))]
 mod wsl_paths;
 
-use crate::exec_server_command::ExecServerCommand;
 use crate::mcp_cmd::McpCli;
 use crate::plugin_cmd::PluginCli;
 use crate::plugin_cmd::PluginSubcommand;
 use crate::queue_cmd::QueueCommand;
 use doctor::DoctorCommand;
 use state_db_recovery as local_state_db;
+use xdcode_exec_server_cli::ExecServerCommand;
 
 use xdcode_config::LoaderOverrides;
 use xdcode_core::build_models_manager;
@@ -88,6 +89,7 @@ use xdcode_login::AuthManager;
 use xdcode_memories_write::clear_memory_roots_contents;
 use xdcode_models_manager::bundled_models_response;
 use xdcode_models_manager::manager::RefreshStrategy;
+use xdcode_protocol::auth::AuthMode;
 use xdcode_protocol::protocol::AskForApproval;
 use xdcode_protocol::user_input::UserInput;
 use xdcode_terminal_detection::TerminalName;
@@ -127,12 +129,13 @@ struct MultitoolCli {
 
 #[derive(Debug, clap::Subcommand)]
 enum Subcommand {
-    /// Browse all agent sessions on the shared local app-server daemon.
+    /// Open the agent command center to browse and switch sessions.
     Agents(AgentsCommand),
 
-    /// Internal: forward a local TCP socket through an HTTP/3 CONNECT proxy.
+    /// Internal: forward SSH stdio or a local TCP socket through an HTTP/3 CONNECT proxy.
     #[clap(hide = true)]
     TcpTunnel(xdcode_tcp_tunnel::Args),
+
     /// Run Xdcode non-interactively.
     #[clap(visible_alias = "e")]
     Exec(ExecCli),
@@ -195,10 +198,6 @@ enum Subcommand {
     /// Internal: run the responses API proxy.
     #[clap(hide = true)]
     ResponsesApiProxy(ResponsesApiProxyArgs),
-
-    /// Internal: relay stdio to a Unix domain socket.
-    #[clap(hide = true, name = "stdio-to-uds")]
-    StdioToUds(StdioToUdsCommand),
 
     /// [EXPERIMENTAL] Run the standalone exec-server service.
     ExecServer(ExecServerCommand),
@@ -446,7 +445,7 @@ enum SandboxSubcommand {
 #[cfg(target_os = "macos")]
 type HostSandboxArgs = xdcode_cli::SeatbeltCommand;
 #[cfg(target_os = "linux")]
-type HostSandboxArgs = xdcode_cli::LandlockCommand;
+type HostSandboxArgs = xdcode_cli::LinuxSandboxCommand;
 #[cfg(target_os = "windows")]
 type HostSandboxArgs = xdcode_cli::WindowsCommand;
 
@@ -516,6 +515,9 @@ struct AppServerCommand {
     /// Save loaded threads during managed daemon shutdown.
     #[arg(long, hide = true)]
     managed_daemon: bool,
+
+    #[command(flatten)]
+    plugin_mcp_launch: xdcode_app_server::PluginMcpLaunchArgs,
 
     #[command(flatten)]
     auth: xdcode_websocket_auth::WebsocketAuthArgs,
@@ -606,13 +608,6 @@ struct GenerateInternalJsonSchemaCommand {
     /// Output directory where internal JSON Schema artifacts will be written
     #[arg(short = 'o', long = "out", value_name = "DIR")]
     out_dir: PathBuf,
-}
-
-#[derive(Debug, Parser)]
-struct StdioToUdsCommand {
-    /// Path to the Unix domain socket to connect to.
-    #[arg(value_name = "SOCKET_PATH", value_parser = parse_socket_path)]
-    socket_path: AbsolutePathBuf,
 }
 
 fn parse_socket_path(raw: &str) -> Result<AbsolutePathBuf, String> {
@@ -791,6 +786,17 @@ fn main() -> anyhow::Result<()> {
     xdcode_build_info::initialize!();
     let _ = xdcode_app_server::take_remote_control_disabled_env();
     arg0_dispatch_or_else(move |arg0_paths: Arg0DispatchPaths| async move {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if std::env::args_os().nth(1).as_deref()
+            == Some(std::ffi::OsStr::new("--xdcode-run-as-sandbox-launcher"))
+        {
+            anyhow::ensure!(
+                std::env::args_os().len() == 2,
+                "--xdcode-run-as-sandbox-launcher does not accept additional arguments"
+            );
+            return xdcode_cli::shared_sandbox_launcher::run(arg0_paths.xdcode_linux_sandbox_exe)
+                .await;
+        }
         // Finish polling the large subcommand dispatcher before polling interactive TUI events.
         if let Some(tui) = Box::pin(dispatch_cli(arg0_paths)).await? {
             tui.await?;
@@ -826,12 +832,18 @@ async fn dispatch_cli(
         Some(Subcommand::Agents(options)) => Some(options),
         _ => None,
     };
-    if let Some(options) = agents_options
+    let session_remote = match &subcommand {
+        Some(Subcommand::Agents(options)) => Some(("agents", &options.remote)),
+        Some(Subcommand::Resume(options)) => Some(("resume", &options.remote)),
+        Some(Subcommand::Fork(options)) => Some(("fork", &options.remote)),
+        _ => None,
+    };
+    if let Some((command, options)) = session_remote
         && let Some(root_endpoint) = &remote.remote
-        && let Some(agents_endpoint) = &options.remote.remote
-        && root_endpoint != agents_endpoint
+        && let Some(command_endpoint) = &options.remote
+        && root_endpoint != command_endpoint
     {
-        anyhow::bail!("`xdcode agents` received conflicting remote server endpoints");
+        anyhow::bail!("`xdcode {command}` received conflicting remote server endpoints");
     }
     let root_remote = agents_options
         .and_then(|options| options.remote.remote.clone())
@@ -905,8 +917,9 @@ async fn dispatch_cli(
                 arg0_paths,
             )));
         }
-        Some(Subcommand::TcpTunnel(args)) => {
-            xdcode_tcp_tunnel::run(args).await?;
+        Some(Subcommand::TcpTunnel(_args)) => {
+            // Upstream's tunnel only reaches the hosted Cloud portal gateway.
+            anyhow::bail!("`xdcode tcp-tunnel` is not available in xdcode (hosted Cloud gateway)");
         }
         Some(Subcommand::Exec(mut exec_cli)) => {
             reject_remote_mode_for_subcommand(
@@ -922,6 +935,7 @@ async fn dispatch_cli(
                 &mut exec_cli.config_overrides,
                 root_config_overrides.clone(),
             );
+            // Keep the exec future out of the shared dispatcher's stack frame.
             Box::pin(xdcode_exec::run_main(exec_cli, arg0_paths.clone())).await?;
         }
         Some(Subcommand::Review(ReviewCommand {
@@ -1005,6 +1019,7 @@ async fn dispatch_cli(
                 listen,
                 stdio,
                 managed_daemon,
+                plugin_mcp_launch,
                 auth,
             } = app_server_cli;
             let strict_config = app_server_strict_config || root_strict_config;
@@ -1049,6 +1064,7 @@ async fn dispatch_cli(
                         cloud_skills_snapshot,
                         code_mode_host_transport: code_mode_host.into(),
                         managed_daemon,
+                        plugin_mcp_launch,
                         remote_control_startup_mode:
                             xdcode_app_server::RemoteControlStartupMode::DisabledEphemeral,
                         ..Default::default()
@@ -1071,10 +1087,7 @@ async fn dispatch_cli(
                     }
                 }
                 Some(AppServerSubcommand::Daemon(daemon_cli)) => match daemon_cli.subcommand {
-                    AppServerDaemonSubcommand::Start => {
-                        print_app_server_daemon_output(AppServerLifecycleCommand::Start).await?;
-                    }
-                    AppServerDaemonSubcommand::Bootstrap(_) => {
+                    AppServerDaemonSubcommand::Bootstrap(_bootstrap_cli) => {
                         let output =
                             xdcode_app_server_daemon::bootstrap(AppServerBootstrapOptions {
                                 remote_control_enabled: false,
@@ -1082,7 +1095,10 @@ async fn dispatch_cli(
                             .await?;
                         println!("{}", serde_json::to_string(&output)?);
                     }
-                    AppServerDaemonSubcommand::Restart => {
+                    command @ (AppServerDaemonSubcommand::Start
+                    | AppServerDaemonSubcommand::Restart) => {
+                        let start = matches!(command, AppServerDaemonSubcommand::Start);
+                        let action = if start { "start" } else { "restart" };
                         let overrides = root_config_overrides
                             .parse_overrides()
                             .map_err(anyhow::Error::msg)?;
@@ -1111,18 +1127,20 @@ async fn dispatch_cli(
                             let feature =
                                 xdcode_features::feature_for_key(name).ok_or_else(|| {
                                     anyhow::anyhow!(
-                                        "daemon restart requires a boolean feature toggle: {name}"
+                                        "daemon {action} requires a boolean feature toggle: {name}"
                                     )
                                 })?;
                             let enabled = value.as_bool().ok_or_else(|| {
-                                anyhow::anyhow!("daemon restart requires a boolean enablement for features.{name}")
+                                anyhow::anyhow!("daemon {action} requires a boolean enablement for features.{name}")
                             })?;
                             feature_overrides.insert(feature.key().to_string(), enabled);
                         }
-                        print_app_server_daemon_output(AppServerLifecycleCommand::Restart {
-                            feature_overrides,
-                        })
-                        .await?;
+                        let command = if start {
+                            AppServerLifecycleCommand::Start { feature_overrides }
+                        } else {
+                            AppServerLifecycleCommand::Restart { feature_overrides }
+                        };
+                        print_app_server_daemon_output(command).await?;
                     }
                     AppServerDaemonSubcommand::Stop => {
                         print_app_server_daemon_output(AppServerLifecycleCommand::Stop).await?;
@@ -1139,7 +1157,7 @@ async fn dispatch_cli(
                             xdcode_app_server::app_server_control_socket_path(&xdcode_home)?
                         }
                     };
-                    xdcode_stdio_to_uds::run(socket_path.as_path()).await?;
+                    app_server_proxy::run(socket_path.as_path()).await?;
                 }
                 Some(AppServerSubcommand::GenerateTs(gen_cli)) => {
                     let options = xdcode_app_server_protocol::GenerateTsOptions {
@@ -1365,7 +1383,7 @@ async fn dispatch_cli(
             )
             .await?;
             #[cfg(target_os = "linux")]
-            xdcode_cli::run_command_under_landlock(
+            xdcode_cli::run_command_under_linux_sandbox(
                 sandbox_cli,
                 arg0_paths.xdcode_linux_sandbox_exe.clone(),
                 loader_overrides,
@@ -1450,15 +1468,6 @@ async fn dispatch_cli(
             )?;
             tokio::task::spawn_blocking(move || xdcode_responses_api_proxy::run_main(args))
                 .await??;
-        }
-        Some(Subcommand::StdioToUds(cmd)) => {
-            reject_remote_mode_for_subcommand(
-                root_remote.as_deref(),
-                root_remote_auth_token_env.as_deref(),
-                "stdio-to-uds",
-            )?;
-            let socket_path = cmd.socket_path;
-            xdcode_stdio_to_uds::run(socket_path.as_path()).await?;
         }
         Some(Subcommand::ExecServer(mut cmd)) => {
             reject_remote_mode_for_subcommand(
@@ -1722,6 +1731,9 @@ async fn run_debug_prompt_input_command(
             catalog_deltas_enabled: config
                 .features
                 .enabled(xdcode_features::Feature::SkillCatalogDeltas),
+            omit_descriptions: config
+                .features
+                .enabled(xdcode_features::Feature::OmitSkillDescriptions),
             max_context_tokens: config.skill_max_context_tokens,
             bundled_skills_enabled: config.bundled_skills_enabled(),
             cloud_skill_enabled: config.cloud_skill_enabled,
@@ -1759,7 +1771,21 @@ async fn run_debug_models_command(
             .await?;
         let auth_manager =
             AuthManager::shared_from_config(&config, /*enable_xdcode_api_key_env*/ true).await?;
-        let models_manager = build_models_manager(&config, auth_manager);
+        let runtime_auth = if config.model_catalog.is_none()
+            && config
+                .features
+                .enabled(xdcode_features::Feature::RuntimeAgentInstances)
+        {
+            let installation_id = xdcode_core::resolve_installation_id(&config.xdcode_home).await?;
+            xdcode_core::build_runtime_auth_manager(
+                &config,
+                Arc::clone(&auth_manager),
+                &installation_id,
+            )
+        } else {
+            None
+        };
+        let models_manager = build_models_manager(&config, auth_manager, runtime_auth);
         models_manager
             .raw_model_catalog(
                 RefreshStrategy::OnlineIfUncached,
@@ -1933,7 +1959,6 @@ fn unsupported_subcommand_name_for_strict_config(
         Some(Subcommand::Debug(_)) => Some("debug"),
         Some(Subcommand::Execpolicy(_)) => Some("execpolicy"),
         Some(Subcommand::ResponsesApiProxy(_)) => Some("responses-api-proxy"),
-        Some(Subcommand::StdioToUds(_)) => Some("stdio-to-uds"),
         Some(Subcommand::Features(_)) => Some("features"),
         Some(Subcommand::TcpTunnel(_)) => Some("tcp-tunnel"),
     }
@@ -2129,41 +2154,6 @@ where
     }
 }
 
-fn resolve_remote_endpoint(
-    remote: Option<String>,
-    remote_auth_token_env: Option<String>,
-) -> std::io::Result<Option<xdcode_tui::RemoteAppServerEndpoint>> {
-    let mut remote_endpoint = remote
-        .as_deref()
-        .map(xdcode_tui::resolve_remote_addr)
-        .transpose()
-        .map_err(std::io::Error::other)?;
-    if let Some(remote_auth_token_env) = remote_auth_token_env {
-        let Some(endpoint) = remote_endpoint.as_mut() else {
-            return Err(std::io::Error::other(
-                "`--remote-auth-token-env` requires `--remote`.",
-            ));
-        };
-        if !xdcode_tui::remote_addr_supports_auth_token(endpoint) {
-            return Err(std::io::Error::other(
-                "`--remote-auth-token-env` requires a `wss://` or loopback `ws://` remote.",
-            ));
-        }
-        let auth_token = read_remote_auth_token_from_env_var(&remote_auth_token_env)
-            .map_err(std::io::Error::other)?;
-        let xdcode_tui::RemoteAppServerEndpoint::WebSocket {
-            auth_token: slot, ..
-        } = endpoint
-        else {
-            return Err(std::io::Error::other(
-                "`--remote-auth-token-env` requires a `wss://` or loopback `ws://` remote.",
-            ));
-        };
-        *slot = Some(auth_token);
-    }
-    Ok(remote_endpoint)
-}
-
 fn is_remote_auth_usage_error(err: &std::io::Error) -> bool {
     err.to_string()
         .starts_with("`--remote-auth-token-env` requires")
@@ -2325,7 +2315,6 @@ mod tests {
     use super::*;
     use assert_matches::assert_matches;
     use pretty_assertions::assert_eq;
-    use xdcode_login::XdcodeAuth;
     use xdcode_protocol::ThreadId;
     use xdcode_tui::TokenUsage;
 
@@ -2915,32 +2904,18 @@ mod tests {
     }
 
     #[test]
-    fn tcp_tunnel_is_hidden_and_accepts_its_control_input_contract() {
+    fn tcp_tunnel_is_hidden_and_accepts_an_ssh_proxy_route() {
         let root_help = help_from_args(&["xdcode", "--help"]);
         assert!(!root_help.contains("tcp-tunnel"), "{root_help}");
-        let help = help_from_args(&["xdcode", "tcp-tunnel", "--help"]);
-        for option in [
-            "--target",
-            "--auth-token-stdin",
-            "--auth-token-updates-stdin",
-            "--connect-headers-stdin",
-        ] {
-            assert!(help.contains(option), "{help}");
-        }
         let cli = MultitoolCli::try_parse_from([
             "xdcode",
             "tcp-tunnel",
-            "--proxy-url",
-            "https://proxy.example.org",
-            "--proxy-origins-file",
-            "/tmp/approved-origins",
-            "--target",
-            "[::1]:22",
-            "--auth-token-stdin",
-            "--auth-token-updates-stdin",
-            "--connect-headers-stdin",
+            "--environment-id",
+            "ccarenv_test",
+            "--token-file",
+            "/private/token",
         ])
-        .expect("generic tunnel should parse");
+        .expect("SSH proxy route should parse");
         assert!(matches!(cli.subcommand, Some(Subcommand::TcpTunnel(_))));
     }
 
@@ -3065,6 +3040,17 @@ mod tests {
             err.to_string(),
             "--force requires a session UUID; names must be confirmed interactively"
         );
+    }
+
+    #[test]
+    fn sandbox_runs_launcher_executable() {
+        let cli = MultitoolCli::try_parse_from(["xdcode", "sandbox", "launcher", "--help"])
+            .expect("parse sandbox executable");
+        let Some(Subcommand::Sandbox(command)) = cli.subcommand else {
+            panic!("expected sandbox command");
+        };
+        assert!(command.subcommand.is_none());
+        assert_eq!(command.host.command, vec!["launcher", "--help"]);
     }
 
     #[test]
@@ -3228,6 +3214,7 @@ mod tests {
                 thread_id,
                 thread_name: thread_name.map(str::to_string),
             }),
+            archive_warnings: Vec::new(),
             disconnect_info: None,
             update_action: None,
             exit_reason: ExitReason::UserRequested,
@@ -3240,6 +3227,7 @@ mod tests {
             token_usage: TokenUsage::default(),
             thread_id: None,
             resume_hint: None,
+            archive_warnings: Vec::new(),
             disconnect_info: None,
             update_action: None,
             exit_reason: ExitReason::UserRequested,
@@ -3300,6 +3288,7 @@ mod tests {
             token_usage: TokenUsage::default(),
             thread_id: Some(ThreadId::from_string("123e4567-e89b-12d3-a456-426614174000").unwrap()),
             resume_hint: None,
+            archive_warnings: Vec::new(),
             disconnect_info: None,
             update_action: None,
             exit_reason: ExitReason::Fatal("boom".to_string()),
@@ -3866,34 +3855,6 @@ mod tests {
         )
         .expect_err("non-interactive app-server subcommands should reject --remote-auth-token-env");
         assert!(err.to_string().contains("generate-internal-json-schema"));
-    }
-
-    #[test]
-    fn read_remote_auth_token_from_env_var_reports_missing_values() {
-        let err = read_remote_auth_token_from_env_var_with("XDCODE_REMOTE_AUTH_TOKEN", |_| {
-            Err(std::env::VarError::NotPresent)
-        })
-        .expect_err("missing env vars should be rejected");
-        assert!(err.to_string().contains("is not set"));
-    }
-
-    #[test]
-    fn read_remote_auth_token_from_env_var_trims_values() {
-        let auth_token =
-            read_remote_auth_token_from_env_var_with("XDCODE_REMOTE_AUTH_TOKEN", |_| {
-                Ok("  bearer-token  ".to_string())
-            })
-            .expect("env var should parse");
-        assert_eq!(auth_token, "bearer-token");
-    }
-
-    #[test]
-    fn read_remote_auth_token_from_env_var_rejects_empty_values() {
-        let err = read_remote_auth_token_from_env_var_with("XDCODE_REMOTE_AUTH_TOKEN", |_| {
-            Ok(" \n\t ".to_string())
-        })
-        .expect_err("empty env vars should be rejected");
-        assert!(err.to_string().contains("is empty"));
     }
 
     #[test]

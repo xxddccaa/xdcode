@@ -23,6 +23,7 @@ async fn discovery_and_calls_reuse_board_schemas_identity_and_bounded_results() 
         let path = AgentPath::root().join("worker").unwrap();
         let host = Arc::new(Host {
             clock: AtomicI64::default(),
+            fail_clock: AtomicBool::new(false),
             agent_path_calls: AtomicUsize::default(),
             members: [(caller, path.clone())].into(),
             active: AtomicBool::new(true),
@@ -35,9 +36,9 @@ async fn discovery_and_calls_reuse_board_schemas_identity_and_bounded_results() 
             board.clone(),
             caller,
             path.clone(),
-            None,
+            /*namespace*/ None,
             "",
-            None,
+            /*tool_messages*/ None,
         );
         let adapter = MessageBoardMcpServer::new(
             &MessageBoardTool::DISCUSSION,
@@ -45,7 +46,7 @@ async fn discovery_and_calls_reuse_board_schemas_identity_and_bounded_results() 
             caller,
             path.clone(),
         );
-        let (server_io, client_io) = tokio::io::duplex(65536);
+        let (server_io, client_io) = tokio::io::duplex(/*max_buf_size*/ 65536);
         let (server, client) = tokio::join!(adapter.serve(server_io), ().serve(client_io));
         let server = server.unwrap();
         let mut client = client.unwrap();
@@ -101,6 +102,7 @@ async fn discovery_and_calls_reuse_board_schemas_identity_and_bounded_results() 
             .unwrap();
         let mut expected =
             CallToolResult::structured(native_read.code_mode_result(&payload.payload));
+        // The negotiated legacy wire format omits the newer resultType discriminator.
         expected.result_type = None;
         assert_eq!(read, expected);
         let value = read.structured_content.unwrap();
@@ -114,6 +116,7 @@ async fn discovery_and_calls_reuse_board_schemas_identity_and_bounded_results() 
                 .collect::<String>()
         );
 
+        // Identity is bound by the host, never supplied in model arguments.
         let invalid = client
             .call_tool(
                 CallToolRequestParams::new("post").with_arguments(
@@ -154,6 +157,7 @@ async fn request_identity_deduplicates_within_a_session_but_not_across_sessions(
     let caller = ThreadId::new();
     let host = Arc::new(Host {
         clock: AtomicI64::default(),
+        fail_clock: AtomicBool::new(false),
         agent_path_calls: AtomicUsize::default(),
         members: [(caller, AgentPath::root())].into(),
         active: AtomicBool::new(true),
@@ -180,10 +184,12 @@ async fn request_identity_deduplicates_within_a_session_but_not_across_sessions(
             caller,
             AgentPath::root(),
         );
-        let (server_io, client_io) = tokio::io::duplex(65536);
+        let (server_io, client_io) = tokio::io::duplex(/*max_buf_size*/ 65536);
         let (server, client) = tokio::join!(adapter.serve(server_io), ().serve(client_io));
         let server = server.unwrap();
         let mut client = client.unwrap();
+        // Use the handler's real session with explicit IDs to exercise retransmission
+        // and distinguish the JSON-RPC number 7 from the string "7".
         for id in [RequestId::Number(7), RequestId::String("7".into())] {
             let request = CallToolRequestParams::new("post").with_arguments(
                 json!({"channel_name":"general", "text":"same request"})
@@ -238,6 +244,7 @@ async fn read_only_connection_returns_the_existing_structured_permission_denial(
     let caller = ThreadId::new();
     let host = Arc::new(Host {
         clock: AtomicI64::default(),
+        fail_clock: AtomicBool::new(false),
         agent_path_calls: AtomicUsize::default(),
         members: [(caller, AgentPath::root())].into(),
         active: AtomicBool::new(true),
@@ -257,7 +264,7 @@ async fn read_only_connection_returns_the_existing_structured_permission_denial(
         caller,
         AgentPath::root(),
     );
-    let (server_io, client_io) = tokio::io::duplex(65536);
+    let (server_io, client_io) = tokio::io::duplex(/*max_buf_size*/ 65536);
     let (server, client) = tokio::join!(adapter.serve(server_io), ().serve(client_io));
     let server = server.unwrap();
     let mut client = client.unwrap();

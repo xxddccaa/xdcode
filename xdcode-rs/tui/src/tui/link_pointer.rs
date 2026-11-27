@@ -3,13 +3,13 @@
 //! Cleanup is independent of Tui so panic, suspend, and editor handoffs also restore the shape.
 //! Kitty releases its override; Ghostty retains its existing text-cursor fallback.
 
-use ratatui::layout::Position;
 use std::io::Write;
 use std::sync::atomic::AtomicU8;
 use std::sync::atomic::Ordering;
 
 use crossterm::event::MouseEvent;
 use crossterm::event::MouseEventKind;
+use ratatui::layout::Position;
 use xdcode_terminal_detection::TerminalName;
 
 use super::Tui;
@@ -55,7 +55,7 @@ impl LinkHover {
     }
 }
 
-// 0: untouched/restored, 1: captured arrow, 2: link hand, 3: uncertain after a write failure.
+// Zero means untouched/restored. A failed write leaves the previous shape unknown.
 // Keep cleanup armed until flush succeeds.
 #[derive(Default)]
 pub(super) struct LinkPointer(AtomicU8);
