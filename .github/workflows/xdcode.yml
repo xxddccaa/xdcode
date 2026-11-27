@@ -263,6 +263,9 @@ jobs:
           $toolchain = python -c 'import tomllib; print(tomllib.load(open("xdcode-rs/rust-toolchain.toml", "rb"))["toolchain"]["channel"])'
           rustup toolchain install $toolchain --profile minimal --target x86_64-pc-windows-msvc
           if ($LASTEXITCODE -ne 0) { throw 'Rust toolchain installation failed' }
+      - name: Enable Git long paths
+        # rusty_v8's vendored Chromium crates exceed MAX_PATH; Cargo's libgit2 checkout honors core.longpaths.
+        run: git config --global core.longpaths true
       - name: Test Windows packaging and PowerShell installer safety
         run: python -m unittest discover -s scripts/xdcode/tests -p 'test_windows.py' -v
       - name: Build and validate the native Windows package
